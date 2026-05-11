@@ -488,12 +488,63 @@ def fetch_data(start_date=None, end_date=None):
         # ── FRED 실제 데이터 연결 ──────────────────────────────────────────
         df = _attach_fred_data(df, start_date, end_date)
 
+        # ── FRED WTI로 yfinance 이상값 패치 ───────────────────────────────
+        df = _patch_wti_with_fred(df, start_date, end_date)
+
         log.info(f"    yfinance 성공: {len(df):,} rows")
         return df
 
     except Exception as e:
         log.warning(f"yfinance 오류({e}) → 더미 데이터 사용")
         return _dummy_prices(start_date, end_date)
+
+
+def _patch_wti_with_fred(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
+    """FRED DCOILWTICO로 yfinance WTI 이상값 감지·교체.
+
+    yfinance CL=F 롤오버 버그로 10% 이상 괴리 발생 시 FRED 공식값으로 패치.
+    오늘 날짜는 FRED 하루 지연 특성상 검증 제외. FRED 미설정·실패 시 원본 유지.
+    """
+    if not _FRED or not FRED_API_KEY:
+        return df
+    try:
+        fred = _Fred(api_key=FRED_API_KEY)
+        fred_wti = fred.get_series('DCOILWTICO',
+                                   observation_start=start_date,
+                                   observation_end=end_date)
+        fred_wti = fred_wti.dropna()
+        fred_wti.index = pd.to_datetime(fred_wti.index).normalize()
+
+        if len(fred_wti) < 30:
+            return df
+
+        today = pd.Timestamp(datetime.today().date())
+        check_idx = df.index.intersection(fred_wti.index)
+        check_idx = check_idx[check_idx < today]   # 오늘 제외 (FRED 지연)
+
+        if len(check_idx) == 0:
+            return df
+
+        yf_vals   = df.loc[check_idx, 'WTI']
+        fred_vals = fred_wti.loc[check_idx]
+        diff_pct  = ((yf_vals - fred_vals) / fred_vals).abs()
+
+        anomalies = diff_pct[diff_pct > 0.10]
+        if anomalies.empty:
+            log.info(f"    WTI 이상값 없음 (FRED 검증 통과: {len(check_idx)}일)")
+            return df
+
+        log.warning(f"    ⚠ WTI 이상값 {len(anomalies)}건 → FRED 값으로 교체:")
+        for dt, pct in anomalies.items():
+            yf_v, fred_v = float(yf_vals[dt]), float(fred_vals[dt])
+            log.warning(f"      {dt.date()}: yfinance={yf_v:.2f} → FRED={fred_v:.2f} (괴리 {pct*100:.1f}%)")
+            df.loc[dt, 'WTI'] = fred_v
+
+        return df
+
+    except Exception as exc:
+        log.warning(f"    FRED WTI 검증 실패({exc}) → yfinance 원본 유지")
+        return df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
