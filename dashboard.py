@@ -154,6 +154,7 @@ with tab1:
                 'forecast_price': '예측가($)',
                 'lower_95ci': '하단(95%)',
                 'upper_95ci': '상단(95%)',
+                'bias_correction': 'Bias보정($)',
             }
             show_fc = fc[[c for c in display_cols if c in fc.columns]].rename(columns=display_cols)
             st.dataframe(show_fc, hide_index=True, use_container_width=True)

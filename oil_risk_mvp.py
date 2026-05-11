@@ -1240,33 +1240,71 @@ def _train_prophet(train_df: pd.DataFrame, test_df: pd.DataFrame,
 
 
 def compute_ensemble_weights(window: int = 30):
-    """최근 backtest 오차 기반 SARIMAX/XGBoost 동적 가중치 산출.
+    """최근 오차 기반 SARIMAX/XGBoost 동적 가중치 산출.
 
-    prediction_log.csv 의 최근 N일 backtest MAPE를 보고 SARIMAX 가중치 조정.
-    데이터 부족 시 기본값(0.65/0.35) 반환.
+    backtest 30일 MAPE + live 실측 오차(있으면 70% 가중)를 합산해 가중치 결정.
+    live 데이터가 3건 미만이면 backtest만 사용. 데이터 부족 시 기본값(0.65/0.35).
     """
     default = (0.65, 0.35)
     if not PRED_LOG_FILE.exists():
         return default
     try:
-        pl  = pd.read_csv(PRED_LOG_FILE)
-        bt  = pl[(pl['type'] == 'backtest') & pl['price_error'].notna()].tail(window)
+        pl = pd.read_csv(PRED_LOG_FILE)
+        bt = pl[(pl['type'] == 'backtest') & pl['price_error'].notna()].tail(window)
+        lv = pl[(pl['type'] == 'live') & pl['price_error'].notna()].tail(10)
+
         if len(bt) < 10 or bt['actual_price'].isna().all():
             return default
 
-        avg_price     = bt['actual_price'].mean()
-        sarimax_mape  = (bt['price_error'].abs() / avg_price * 100).mean()
+        bt_mape = (bt['price_error'].abs() / bt['actual_price'].mean() * 100).mean()
+
+        if len(lv) >= 3:
+            lv_mape = (lv['price_error'].abs() / lv['actual_price'].mean() * 100).mean()
+            # live가 더 최근 실측이므로 70% 가중
+            sarimax_mape = 0.3 * bt_mape + 0.7 * lv_mape
+            src_label = f"bt={bt_mape:.2f}% lv={lv_mape:.2f}% → 합산={sarimax_mape:.2f}%"
+        else:
+            sarimax_mape = bt_mape
+            src_label = f"bt={bt_mape:.2f}% (live 데이터 부족)"
 
         if   sarimax_mape < 3.0:  w_s = 0.75
         elif sarimax_mape < 5.0:  w_s = 0.65
         elif sarimax_mape < 8.0:  w_s = 0.55
         else:                     w_s = 0.45
 
-        log.info(f"    동적 앙상블 가중치: SARIMAX={w_s:.2f}  XGB={1-w_s:.2f} "
-                 f"(최근{window}일 MAPE={sarimax_mape:.2f}%)")
+        log.info(f"    동적 앙상블 가중치: SARIMAX={w_s:.2f} XGB={1-w_s:.2f} ({src_label})")
         return w_s, 1 - w_s
     except Exception:
         return default
+
+
+def compute_live_bias_correction(window: int = 10, max_correction: float = 5.0) -> float:
+    """최근 live 실측 오차의 지수가중 평균으로 bias correction 값 반환.
+
+    예측이 지속적으로 한쪽으로 치우칠 때 다음 예측에 보정값을 더함.
+    max_correction으로 과보정 방지. live 데이터 3건 미만이면 0 반환.
+    price_error = actual - predicted 이므로 양수면 과소예측 → 더해야 함.
+    """
+    if not PRED_LOG_FILE.exists():
+        return 0.0
+    try:
+        pl = pd.read_csv(PRED_LOG_FILE)
+        lv = pl[(pl['type'] == 'live') & pl['price_error'].notna()].tail(window)
+        if len(lv) < 3:
+            return 0.0
+
+        # 지수가중 평균 (최근일수록 더 반영)
+        errors = lv['price_error'].values.astype(float)
+        weights = np.exp(np.linspace(0, 1, len(errors)))
+        weights /= weights.sum()
+        bias = float(np.dot(weights, errors))
+
+        # 과보정 방지
+        bias = max(-max_correction, min(max_correction, bias))
+        log.info(f"    Live bias correction: {bias:+.3f}$ (최근 {len(lv)}건 지수가중)")
+        return bias
+    except Exception:
+        return 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1369,16 +1407,22 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         trend = feature_df['WTI'].diff().tail(5).mean()
         ensemble = np.array([last_price + trend * (i + 1) for i in range(7)])
 
+    # ── A: live bias correction (실측 오차 피드백) ───────────────────
+    bias = compute_live_bias_correction()
+    if bias != 0.0:
+        ensemble = ensemble + bias
+
     # ── 신뢰구간 (변동성 기반)
     recent_vol = float(feature_df['vol_5d'].dropna().iloc[-1]) if 'vol_5d' in feature_df.columns else 0.015
     t = np.arange(1, 8)
     ci_half = ensemble * recent_vol * 1.96 * np.sqrt(t)
 
     fc_df = pd.DataFrame({
-        'date':          fc_dates.strftime('%Y-%m-%d'),
+        'date':           fc_dates.strftime('%Y-%m-%d'),
         'forecast_price': np.round(ensemble, 2),
         'lower_95ci':     np.round(ensemble - ci_half, 2),
         'upper_95ci':     np.round(ensemble + ci_half, 2),
+        'bias_correction': round(bias, 3),
     })
     if 'sarimax' in forecasts:
         fc_df['sarimax_forecast'] = np.round(forecasts['sarimax'], 2)
