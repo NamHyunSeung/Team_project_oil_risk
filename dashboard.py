@@ -68,8 +68,9 @@ with st.sidebar:
     if st.button("🔄 파이프라인 실행 / 새로고침", use_container_width=True, type="primary"):
         with st.spinner("분석 중... (약 1-2분)"):
             try:
-                from oil_risk_mvp import run_pipeline
-                run_pipeline()
+                import importlib, oil_risk_mvp
+                importlib.reload(oil_risk_mvp)
+                oil_risk_mvp.run_pipeline()
                 st.cache_data.clear()
                 st.success("✅ 완료!")
                 st.rerun()
@@ -364,6 +365,59 @@ with tab5:
 
             plt.tight_layout()
             st.pyplot(fig)
+            plt.close()
+
+        # ── 방향성 정확도 / 누적 오차 / 롤링 MAPE ────────────────────────────
+        if not bt.empty and bt['price_error'].notna().any():
+            bt_a = bt.dropna(subset=['price_error', 'actual_price', 'sarimax_pred']).copy()
+            bt_a['date'] = pd.to_datetime(bt_a['date'])
+            bt_a = bt_a.sort_values('date').reset_index(drop=True)
+
+            # 방향성 정확도
+            bt_a['actual_dir']  = bt_a['actual_price'].diff().apply(lambda x: 1 if x > 0 else -1)
+            bt_a['pred_dir']    = bt_a['sarimax_pred'].diff().apply(lambda x: 1 if x > 0 else -1)
+            bt_a['dir_correct'] = (bt_a['actual_dir'] == bt_a['pred_dir']).astype(float)
+            dir_acc = bt_a['dir_correct'].dropna().mean() * 100
+
+            bt_a['abs_pct_err'] = bt_a['price_error_pct'].abs()
+            rolling_mape = bt_a['abs_pct_err'].rolling(10).mean()
+            bt_a['cum_abs_err'] = bt_a['price_error'].abs().cumsum()
+
+            col_d1, col_d2, col_d3 = st.columns(3)
+            col_d1.metric("방향성 정확도 (상승/하락)", f"{dir_acc:.1f}%",
+                          help="예측 방향(상승/하락)이 실제와 일치한 비율")
+            col_d2.metric("최근 10일 롤링 MAPE",
+                          f"{rolling_mape.dropna().iloc[-1]:.2f}%" if rolling_mape.notna().any() else "—")
+            col_d3.metric("누적 절대 오차", f"${bt_a['cum_abs_err'].iloc[-1]:.2f}")
+
+            # 누적 오차 & 롤링 MAPE 차트
+            fig2, axes2 = plt.subplots(1, 2, figsize=(10, 3.2), facecolor='#161b22')
+
+            ax_c = axes2[0]
+            ax_c.set_facecolor('#1c2433')
+            ax_c.plot(bt_a['date'], bt_a['cum_abs_err'], color='#f0c040', lw=1.5)
+            ax_c.fill_between(bt_a['date'], 0, bt_a['cum_abs_err'], alpha=0.15, color='#f0c040')
+            ax_c.set_title('누적 절대 오차 ($)', color='#e6edf3', fontsize=9)
+            ax_c.set_ylabel('누적 오차 ($)', color='#ccc', fontsize=8)
+            ax_c.tick_params(colors='#ccc', labelsize=7)
+            for sp in ax_c.spines.values(): sp.set_color('#30363d')
+            ax_c.grid(color='#21262d', lw=0.5)
+
+            ax_r = axes2[1]
+            ax_r.set_facecolor('#1c2433')
+            ax_r.plot(bt_a['date'], rolling_mape, color='#3fb950', lw=1.5, label='10일 롤링 MAPE')
+            mean_mape = bt_a['abs_pct_err'].mean()
+            ax_r.axhline(mean_mape, color='#ff6b6b', lw=0.9, ls='--',
+                         label=f'평균 {mean_mape:.2f}%')
+            ax_r.set_title('롤링 MAPE — 10일 윈도우 (%)', color='#e6edf3', fontsize=9)
+            ax_r.set_ylabel('MAPE (%)', color='#ccc', fontsize=8)
+            ax_r.tick_params(colors='#ccc', labelsize=7)
+            ax_r.legend(fontsize=7, facecolor='#1c2433', labelcolor='white')
+            for sp in ax_r.spines.values(): sp.set_color('#30363d')
+            ax_r.grid(color='#21262d', lw=0.5)
+
+            plt.tight_layout()
+            st.pyplot(fig2)
             plt.close()
 
         st.markdown("---")
