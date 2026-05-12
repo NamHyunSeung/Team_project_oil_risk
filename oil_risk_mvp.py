@@ -974,15 +974,16 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['regime_x_sent']= df['regime'] * df['news_sentiment_smooth']  # 국면 × 감성
     df['regime_x_gpr'] = df['regime'] * df['gpr_zscore']     # 국면 × 지정학
 
-    # ── 훈련 타깃 (다음 날 5일 실현변동성 & 가격)
+    # ── 훈련 타깃 (다음 날 5일 실현변동성 & 가격 & 수익률)
     df['target_rv']     = df['RV_5d'].shift(-1)
-    df['target_rv_log'] = np.log(df['target_rv'].clip(lower=1e-8))   # 3번: 로그 변환 타깃
+    df['target_rv_log'] = np.log(df['target_rv'].clip(lower=1e-8))
     df['target_price']  = df['WTI'].shift(-1)
+    df['target_return'] = np.log(df['WTI'].shift(-1) / df['WTI'])   # 내일 log 수익률
 
     # 피처 행만 dropna (타깃 NaN 포함 시 훈련용으로만 제거)
     feat_na_cols = [c for c in FEATURE_COLS if c in df.columns]
     df_full = df.copy()               # 마지막 행 보존용 (예측에 사용)
-    df.dropna(subset=feat_na_cols + ['target_rv', 'target_rv_log', 'target_price'], inplace=True)
+    df.dropna(subset=feat_na_cols + ['target_rv', 'target_rv_log', 'target_price', 'target_return'], inplace=True)
 
     log.info(f"    피처 완성: {df.shape[0]:,} rows × {df.shape[1]} cols")
     return df, df_full
@@ -1009,6 +1010,7 @@ def train_models(feature_df: pd.DataFrame):
     y_rv_tr,     y_rv_te     = train_df['target_rv'],     test_df['target_rv']
     y_rv_log_tr, y_rv_log_te = train_df['target_rv_log'], test_df['target_rv_log']
     y_px_tr,     y_px_te     = train_df['target_price'],  test_df['target_price']
+    y_ret_tr,    y_ret_te    = train_df['target_return'],  test_df['target_return']
 
     results = {}
     scaler  = None
@@ -1273,12 +1275,67 @@ def train_models(feature_df: pd.DataFrame):
     # Prophet: WTI는 불연속 충격 기반이라 트렌드+계절성 모델 부적합 (R²=-4.3 확인)
     # → 학습 생략, 2모델 앙상블(SARIMAX+XGBoost) 유지
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Model D: XGBoost 수익률 예측 (log_return 타깃)
+    # vol 시뮬레이션 대체 — 방향성+크기 직접 학습
+    # ─────────────────────────────────────────────────────────────────────
+    if _XGB and _SKL and scaler is not None:
+        log.info("    [D] XGBoost 수익률 예측 학습 중...")
+        try:
+            ret_scaler = StandardScaler()
+            X_tr_ret   = ret_scaler.fit_transform(X_tr)
+            X_te_ret   = ret_scaler.transform(X_te)
+
+            # 지수감쇠 + COVID 가중치
+            _n_ret  = len(y_ret_tr)
+            _tw_ret = np.exp(np.log(2) / 252 * np.arange(_n_ret))
+            _tw_ret /= _tw_ret.mean()
+            covid_w_ret = (np.where(train_df['covid_dummy'].values == 1, 0.35, 1.0)
+                           if 'covid_dummy' in train_df.columns else np.ones(_n_ret))
+            w_ret = covid_w_ret * _tw_ret
+
+            modelD = xgb.XGBRegressor(
+                n_estimators=500, max_depth=3, learning_rate=0.015,
+                subsample=0.75, colsample_bytree=0.6,
+                min_child_weight=8, reg_alpha=0.3, reg_lambda=3.0,
+                n_jobs=-1, random_state=42, verbosity=0,
+            )
+            modelD.fit(X_tr_ret, y_ret_tr, sample_weight=w_ret)
+
+            pred_ret   = modelD.predict(X_te_ret)
+            # 수익률 → 가격 역변환 후 평가
+            pred_px_d  = test_df['WTI'].values * np.exp(pred_ret)
+            rmse_d     = float(np.sqrt(mean_squared_error(y_px_te, pred_px_d)))
+            mae_d      = float(mean_absolute_error(y_px_te, pred_px_d))
+            r2_d       = float(r2_score(y_px_te, pred_px_d))
+
+            # 방향성 정확도 (상승/하락 예측 일치율)
+            actual_dir  = np.sign(y_ret_te.values)
+            pred_dir    = np.sign(pred_ret)
+            dir_acc     = float((actual_dir == pred_dir).mean())
+
+            log.info(f"        XGB-Return → RMSE={rmse_d:.4f}  MAE={mae_d:.4f}  "
+                     f"R²={r2_d:.4f}  방향성={dir_acc*100:.1f}%")
+
+            results['xgb_return'] = {
+                'model': modelD, 'scaler': ret_scaler,
+                'features': available_feats, 'type': 'price',
+                'rmse': rmse_d, 'mae': mae_d, 'r2': r2_d,
+                'dir_acc': dir_acc,
+                'name': f'XGBoost-Return (방향성={dir_acc*100:.1f}%)',
+            }
+        except Exception as exc:
+            log.warning(f"    XGBoost 수익률 예측 실패({exc})")
+
     # ── 성능 저장
-    perf_df = pd.DataFrame([
-        {'model': v['name'], 'target': v['type'],
-         'rmse': round(v['rmse'], 5), 'mae': round(v['mae'], 5), 'r2': round(v['r2'], 4)}
-        for v in results.values()
-    ])
+    perf_rows = []
+    for v in results.values():
+        row = {'model': v['name'], 'target': v['type'],
+               'rmse': round(v['rmse'], 5), 'mae': round(v['mae'], 5), 'r2': round(v['r2'], 4)}
+        if 'dir_acc' in v:
+            row['dir_acc'] = round(v['dir_acc'], 4)
+        perf_rows.append(row)
+    perf_df = pd.DataFrame(perf_rows)
     perf_df.to_csv(OUTPUT_DIR / 'model_performance.csv', index=False)
     log.info("    model_performance.csv 저장")
 
@@ -1450,29 +1507,48 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         except Exception as exc:
             log.warning(f"SARIMAX 예측 실패: {exc}")
 
-    # ── XGBoost 예측 (재귀적 수익률 시뮬레이션, GARCH vol 앙상블 반영)
-    if 'xgb_har' in results:
+    # ── XGBoost 수익률 예측 → 가격 역변환 (xgb_return 우선, 없으면 vol 폴백)
+    if 'xgb_return' in results:
+        try:
+            info    = results['xgb_return']
+            model   = info['model']
+            sc      = info['scaler']
+            feats   = info['features']
+            avail_f = [f for f in feats if f in feature_df.columns]
+            last_row = feature_df[avail_f].iloc[-1:].values.copy()
+            last_s   = sc.transform(last_row)
+
+            pred_ret_d1 = float(model.predict(last_s)[0])   # D+1 log 수익률
+            # D+1~7: 수익률 예측값에 불확실성 감쇠 적용 (멀수록 0에 수렴)
+            decay = np.array([0.95 ** i for i in range(7)])
+            ret_path = pred_ret_d1 * decay
+            price_path = last_price * np.exp(np.cumsum(ret_path))
+            forecasts['xgb'] = np.round(price_path, 2)
+            log.info(f"    XGBoost-Return 예측 D+1: ret={pred_ret_d1:+.4f} "
+                     f"→ ${price_path[0]:.2f} (방향: {'↑' if pred_ret_d1>0 else '↓'})")
+        except Exception as exc:
+            log.warning(f"XGBoost-Return 예측 실패({exc}) → vol 시뮬 폴백")
+
+    if 'xgb' not in forecasts and 'xgb_har' in results:
         try:
             info    = results['xgb_har']
             model   = info['model']
             scaler  = info['scaler']
             feats   = info['features']
             avail_f = [f for f in feats if f in feature_df.columns]
-
             last_row = feature_df[avail_f].iloc[-1:].values.copy()
             last_s   = scaler.transform(last_row)
-
             np.random.seed(0)
             path = [last_price]
             row  = last_s.copy()
             for _ in range(7):
                 rv_pred = abs(float(model.predict(row)[0]))
                 rv_pred = max(rv_pred, 0.004)
-                ret = np.random.normal(0, rv_pred)
+                ret     = np.random.normal(0, rv_pred)
                 path.append(path[-1] * (1 + ret))
                 row = row * 0.98
-
             forecasts['xgb'] = np.array(path[1:])
+            log.warning("    vol 시뮬레이션 폴백 사용")
         except Exception as exc:
             log.warning(f"XGBoost 예측 실패: {exc}")
 
