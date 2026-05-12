@@ -530,9 +530,22 @@ def fetch_data(start_date=None, end_date=None):
             wti_high = pd.Series(dtype=float, name="WTI_High")
             wti_low  = pd.Series(dtype=float, name="WTI_Low")
 
+        # VIX 기간구조 + SKEW (파생상품 꼬리위험)
+        try:
+            vix3m = _dl("^VIX3M")
+            log.info("    VIX3M(3개월 변동성) 수집 완료")
+        except Exception:
+            vix3m = pd.Series(dtype=float, name="^VIX3M")
+        try:
+            skew = _dl("^SKEW")
+            log.info("    SKEW(꼬리위험) 수집 완료")
+        except Exception:
+            skew = pd.Series(dtype=float, name="^SKEW")
+
         df = pd.DataFrame({'WTI': wti, 'Brent': brent, 'DXY': dxy,
                            'VIX': vix, 'OVX': ovx, 'futures_spread': futures_spread,
-                           'WTI_High': wti_high, 'WTI_Low': wti_low})
+                           'WTI_High': wti_high, 'WTI_Low': wti_low,
+                           'VIX3M': vix3m, 'SKEW': skew})
         df = df.ffill().bfill()
         df.dropna(subset=['WTI'], inplace=True)
 
@@ -842,6 +855,10 @@ FEATURE_COLS = [
     'ewma_vol_10', 'ewma_vol_21', 'ewma_vol_63',
     # D: 변동성 모멘텀
     'rv_term_slope', 'rv_5d_chg', 'rv_mom_5_21',
+    # 장중 고빈도 실현분산 (1h)
+    'rv_intraday', 'rv_intraday_5d', 'rv_intraday_21d', 'rv_intra_vs_close',
+    # VIX 기간구조 + SKEW
+    'vix_term_slope', 'vix_ts_zscore', 'skew_zscore', 'skew_chg',
     # 5번: 시장 국면(Regime) 피처
     'regime', 'regime_x_mom', 'regime_x_sent', 'regime_x_gpr',
     # COVID 특수 변수
@@ -918,6 +935,54 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     except Exception as _ge:
         log.warning(f"    GARCH 실패({_ge}) → garch_vol=0")
         df['garch_vol'] = 0.0
+
+    # ── 장중 고빈도 실현분산 (1h 데이터, 최근 730일 — 더 정확한 RV 추정)
+    try:
+        _raw_1h = yf.download("CL=F", period="730d", interval="1h",
+                              progress=False, auto_adjust=True)
+        if not _raw_1h.empty and len(_raw_1h) > 100:
+            _c1h = _raw_1h['Close']
+            if isinstance(_c1h, pd.DataFrame): _c1h = _c1h.iloc[:, 0]
+            _r1h = np.log(_c1h / _c1h.shift(1)).dropna()
+            _rv_1h = _r1h.resample('D').apply(
+                lambda x: float(np.sqrt((x ** 2).sum())) if len(x) >= 4 else float('nan')
+            ).dropna()
+            _rv_1h.index = pd.to_datetime(_rv_1h.index).normalize()
+            df['rv_intraday']     = _rv_1h.reindex(df.index)
+            df['rv_intraday']     = df['rv_intraday'].fillna(df['parkinson_vol'])  # 과거는 Parkinson 대체
+            df['rv_intraday_5d']  = df['rv_intraday'].rolling(5).mean().fillna(0)
+            df['rv_intraday_21d'] = df['rv_intraday'].rolling(21).mean().fillna(0)
+            df['rv_intra_vs_close'] = (df['rv_intraday'] /
+                                       df['RV_1d'].replace(0, np.nan)).fillna(1.0).clip(0.3, 5.0)
+            log.info(f"    장중 RV 생성: {_rv_1h.notna().sum()}일 (μ={float(_rv_1h.mean()):.5f})")
+        else:
+            for c in ['rv_intraday','rv_intraday_5d','rv_intraday_21d','rv_intra_vs_close']:
+                df[c] = 0.0
+    except Exception as _ie:
+        log.warning(f"    장중 RV 실패({_ie}) → 0")
+        for c in ['rv_intraday','rv_intraday_5d','rv_intraday_21d','rv_intra_vs_close']:
+            df[c] = 0.0
+
+    # ── VIX 기간구조 (VIX3M - VIX) + SKEW (꼬리위험)
+    if 'VIX3M' in df.columns and df['VIX3M'].notna().sum() > 30:
+        df['VIX3M']         = df['VIX3M'].ffill().bfill().fillna(0)
+        df['vix_term_slope']= (df['VIX3M'] - df['VIX']).fillna(0)   # >0: 장기>단기(정상), <0: 역전(위험)
+        df['vix_ts_zscore'] = ((df['vix_term_slope'] - df['vix_term_slope'].rolling(252).mean()) /
+                               (df['vix_term_slope'].rolling(252).std() + 1e-8)).fillna(0)
+        log.info(f"    VIX 기간구조 생성 (μ={df['vix_term_slope'].mean():.3f})")
+    else:
+        df['vix_term_slope'] = 0.0
+        df['vix_ts_zscore']  = 0.0
+
+    if 'SKEW' in df.columns and df['SKEW'].notna().sum() > 30:
+        df['SKEW']       = df['SKEW'].ffill().bfill().fillna(100)
+        df['skew_zscore']= ((df['SKEW'] - df['SKEW'].rolling(252).mean()) /
+                            (df['SKEW'].rolling(252).std() + 1e-8)).fillna(0)
+        df['skew_chg']   = df['SKEW'].diff().fillna(0)
+        log.info(f"    SKEW 피처 생성 (μ={df['SKEW'].mean():.2f})")
+    else:
+        df['skew_zscore'] = 0.0
+        df['skew_chg']    = 0.0
 
     # ── 레버리지 효과 (하락일 변동성 비대칭)
     df['neg_return']      = (df['return_1d'] < 0).astype(float)
