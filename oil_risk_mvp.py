@@ -2026,16 +2026,58 @@ def extract_crisis_keywords(news_df: pd.DataFrame, top_n: int = 60) -> pd.DataFr
 # 9.  generate_wordcloud()
 # ─────────────────────────────────────────────────────────────────────────────
 
+_KW_TRANSLATE = {
+    # 원자재/에너지
+    'oil':'원유', 'crude':'원유', 'brent':'브렌트', 'wti':'WTI',
+    'petroleum':'석유', 'barrel':'배럴', 'gas':'가스', 'lng':'LNG',
+    'energy':'에너지', 'fuel':'연료', 'refinery':'정유', 'pipeline':'파이프라인',
+    # 기관/국가
+    'opec':'OPEC', 'russia':'러시아', 'saudi':'사우디', 'iran':'이란',
+    'iraq':'이라크', 'china':'중국', 'usa':'미국', 'us':'미국',
+    'uae':'UAE', 'venezuela':'베네수엘라', 'nigeria':'나이지리아',
+    'kuwait':'쿠웨이트', 'libya':'리비아',
+    # 지정학
+    'war':'전쟁', 'sanctions':'제재', 'conflict':'분쟁', 'crisis':'위기',
+    'attack':'공격', 'military':'군사', 'ukraine':'우크라이나',
+    'israel':'이스라엘', 'gaza':'가자', 'hamas':'하마스',
+    'geopolitical':'지정학', 'tension':'긴장', 'ceasefire':'휴전',
+    # 수급/시장
+    'supply':'공급', 'demand':'수요', 'production':'생산', 'output':'생산량',
+    'inventory':'재고', 'stockpile':'비축', 'reserve':'매장량',
+    'market':'시장', 'price':'가격', 'rally':'반등', 'slump':'급락',
+    'cut':'감산', 'increase':'증산', 'quota':'쿼터',
+    # 거시경제
+    'inflation':'인플레이션', 'recession':'경기침체', 'gdp':'GDP',
+    'dollar':'달러', 'fed':'연준', 'interest':'금리', 'rate':'금리',
+    'economy':'경제', 'growth':'성장',
+    # 기후/전환
+    'climate':'기후', 'renewable':'재생에너지', 'solar':'태양광',
+    'electric':'전기차', 'carbon':'탄소', 'emission':'배출',
+    'trump':'트럼프', 'biden':'바이든', 'opec+':'OPEC+',
+}
+
+
 def generate_wordcloud(kw_df: pd.DataFrame):
-    """위기 키워드 워드클라우드 (없으면 바 차트 대체)"""
+    """위기 키워드 워드클라우드 — 영어 키워드를 한글로 변환하여 표시"""
     log.info("[8/9] 워드클라우드 생성 중...")
     crisis_set = set(kw_df[kw_df['is_crisis_word']]['keyword'])
 
+    # 영어 → 한글 변환 (매핑 없으면 원어 유지)
+    kw_ko = kw_df.copy()
+    kw_ko['keyword_display'] = kw_ko['keyword'].apply(
+        lambda w: _KW_TRANSLATE.get(w.lower(), w)
+    )
+    # 한글 변환된 키워드끼리 빈도 합산
+    ko_freq = kw_ko.groupby('keyword_display')['count'].sum()
+    crisis_ko = set(
+        kw_ko[kw_ko['is_crisis_word']]['keyword_display']
+    )
+
     if _WC:
-        freq = dict(zip(kw_df['keyword'], kw_df['count']))
+        freq = ko_freq.to_dict()
 
         def color_fn(word, **_):
-            if word.lower() in crisis_set:
+            if word in crisis_ko or word.lower() in crisis_set:
                 return f"hsl({np.random.randint(0,25)}, 90%, {np.random.randint(42,58)}%)"
             return f"hsl({np.random.randint(195,245)}, 65%, {np.random.randint(45,62)}%)"
 
@@ -2072,13 +2114,13 @@ def generate_wordcloud(kw_df: pd.DataFrame):
         plt.savefig(OUTPUT_DIR / 'wordcloud.png', dpi=150, bbox_inches='tight', facecolor='#12141a')
         plt.close()
     else:
-        # ── 바 차트 대체
-        top20 = kw_df.head(20).iloc[::-1]
+        # ── 바 차트 대체 (한글 키워드 사용)
+        top20 = kw_ko.head(20).iloc[::-1]
         colors = ['#e74c3c' if x else '#3d85c8' for x in top20['is_crisis_word']]
 
         fig, ax = plt.subplots(figsize=(12, 7), facecolor='#12141a')
         ax.set_facecolor('#1a1d24')
-        ax.barh(top20['keyword'], top20['count'], color=colors)
+        ax.barh(top20['keyword_display'], top20['count'], color=colors)
         ax.set_xlabel('빈도', color='#ccc')
         ax.set_title('주요 위기 키워드 Top 20', color='white', fontsize=13)
         ax.tick_params(colors='#ccc')
