@@ -81,7 +81,8 @@ FRED_API_KEY     = os.getenv("FRED_API_KEY",     "0a1d6c8b56c44eff8716c204f0aa49
 GUARDIAN_API_KEY = os.getenv("GUARDIAN_API_KEY", "3a287cda-6e49-49f0-8998-3092657e209e")
 EIA_API_KEY      = os.getenv("EIA_API_KEY",      "")
 GPR_FILE         = "data_gpr_daily_recent.xls"   # 프로젝트 폴더에 위치
-DATA_YEARS       = 3                              # 학습 데이터 기간 (10→3년: 최근 패턴 강화)
+DATA_YEARS       = 10                             # 데이터 수집 기간 (XGBoost 학습용)
+SARIMAX_YEARS    = 5                              # SARIMAX 학습 기간 (최근 가격 패턴 집중)
 
 # ── 이메일 알림 설정 (.env 또는 환경변수)
 # Gmail 사용 시: Google 계정 → 보안 → 앱 비밀번호 생성 후 SMTP_PASSWORD에 입력
@@ -1040,12 +1041,18 @@ def train_models(feature_df: pd.DataFrame):
         r2_cv   = float(r2_score(wf_actual, wf_preds))
         log.info(f"        Walk-forward CV → RMSE={rmse_cv:.5f}  MAE={mae_cv:.5f}  R²={r2_cv:.4f}")
 
-        # ── 최종 모델: 전체 훈련셋으로 재학습
+        # ── 최종 모델: 전체 훈련셋으로 재학습 (지수감쇠 + COVID 가중치)
         X_tr_s = full_X
         X_te_s = scaler.transform(X_te)
+
+        _n = len(y_rv_tr)
+        _time_w = np.exp(np.log(2) / 252 * np.arange(_n))  # 반감기 1년
+        _time_w = _time_w / _time_w.mean()
         covid_w_full = (np.where(train_df['covid_dummy'].values == 1, 0.35, 1.0)
-                        if 'covid_dummy' in train_df.columns else None)
-        modelA.fit(X_tr_s, y_rv_tr, sample_weight=covid_w_full)
+                        if 'covid_dummy' in train_df.columns else np.ones(_n))
+        combined_w = covid_w_full * _time_w
+        log.info(f"        지수감쇠 가중치: 최신/최고참 비율={_time_w[-1]/_time_w[0]:.1f}x")
+        modelA.fit(X_tr_s, y_rv_tr, sample_weight=combined_w)
 
         # 홀드아웃 테스트셋 평가
         pred_rv  = modelA.predict(X_te_s)
@@ -1092,12 +1099,19 @@ def train_models(feature_df: pd.DataFrame):
                 except Exception:
                     return s
 
-            full_wti  = _to_bday(feature_df['WTI'])
-            full_exog = _to_bday(feature_df[exog_cols]) if exog_cols else None
-            n_train   = len(train_df)
+            # SARIMAX는 최근 SARIMAX_YEARS 년치만 사용 (오래된 가격 레짐 영향 최소화)
+            cutoff = feature_df.index[-1] - pd.DateOffset(years=SARIMAX_YEARS)
+            sx_df  = feature_df[feature_df.index >= cutoff]
+            n_test_sx = min(60, int(len(sx_df) * 0.15))
+            sx_train  = sx_df.iloc[:-n_test_sx]
+            sx_test   = sx_df.iloc[-n_test_sx:]
 
-            wti_train  = _to_bday(train_df['WTI'])
-            exog_train = _to_bday(train_df[exog_cols]) if exog_cols else None
+            full_wti  = _to_bday(sx_df['WTI'])
+            full_exog = _to_bday(sx_df[exog_cols]) if exog_cols else None
+            n_train   = len(sx_train)
+
+            wti_train  = _to_bday(sx_train['WTI'])
+            exog_train = _to_bday(sx_train[exog_cols]) if exog_cols else None
 
             # 1번: auto_arima로 최적 파라미터 탐색
             sarimax_order    = (2, 1, 1)
@@ -1145,9 +1159,10 @@ def train_models(feature_df: pd.DataFrame):
             pred_obj   = fit_full.get_prediction(start=n_train, dynamic=False)
             pred_price = pred_obj.predicted_mean.values[-n_test:]
 
-            rmse_b = float(np.sqrt(mean_squared_error(y_px_te, pred_price)))
-            mae_b  = float(mean_absolute_error(y_px_te, pred_price))
-            r2_b   = float(r2_score(y_px_te, pred_price))
+            y_px_te_sx = sx_test['target_price'].values
+            rmse_b = float(np.sqrt(mean_squared_error(y_px_te_sx, pred_price)))
+            mae_b  = float(mean_absolute_error(y_px_te_sx, pred_price))
+            r2_b   = float(r2_score(y_px_te_sx, pred_price))
 
             # 라이브 예측용: 전체 데이터로 재학습 (훈련셋만 학습한 fit은 60일 전 상태)
             log.info("    [B1] 전체 데이터 SARIMAX 재학습 (라이브 예측용)...")
@@ -1163,8 +1178,8 @@ def train_models(feature_df: pd.DataFrame):
                 'rmse': rmse_b, 'mae': mae_b, 'r2': r2_b,
                 'name': f'SARIMAX{sarimax_order} 1-step',
                 'pred_price_test':   pred_price,
-                'actual_price_test': test_df['WTI'].values,
-                'test_dates':        test_df.index,
+                'actual_price_test': sx_test['WTI'].values,
+                'test_dates':        sx_test.index,
                 'order': sarimax_order, 'seasonal_order': sarimax_seasonal,
             }
             log.info(f"        1-step ahead → RMSE={rmse_b:.4f}  MAE={mae_b:.4f}  R²={r2_b:.4f}")
