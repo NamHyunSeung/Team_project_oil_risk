@@ -81,7 +81,7 @@ FRED_API_KEY     = os.getenv("FRED_API_KEY",     "0a1d6c8b56c44eff8716c204f0aa49
 GUARDIAN_API_KEY = os.getenv("GUARDIAN_API_KEY", "3a287cda-6e49-49f0-8998-3092657e209e")
 EIA_API_KEY      = os.getenv("EIA_API_KEY",      "")
 GPR_FILE         = "data_gpr_daily_recent.xls"   # 프로젝트 폴더에 위치
-DATA_YEARS       = 10                             # 학습 데이터 기간
+DATA_YEARS       = 3                              # 학습 데이터 기간 (10→3년: 최근 패턴 강화)
 
 # ── 이메일 알림 설정 (.env 또는 환경변수)
 # Gmail 사용 시: Google 계정 → 보안 → 앱 비밀번호 생성 후 SMTP_PASSWORD에 입력
@@ -1341,7 +1341,7 @@ def compute_ensemble_weights(window: int = 30):
 
         bt_mape = (bt['price_error'].abs() / bt['actual_price'].mean() * 100).mean()
 
-        if len(lv) >= 3:
+        if len(lv) >= 2:
             lv_mape = (lv['price_error'].abs() / lv['actual_price'].mean() * 100).mean()
             # live가 더 최근 실측이므로 70% 가중
             sarimax_mape = 0.3 * bt_mape + 0.7 * lv_mape
@@ -1373,7 +1373,7 @@ def compute_live_bias_correction(window: int = 10, max_correction: float = 5.0) 
     try:
         pl = pd.read_csv(PRED_LOG_FILE)
         lv = pl[(pl['type'] == 'live') & pl['price_error'].notna()].tail(window)
-        if len(lv) < 3:
+        if len(lv) < 2:
             return 0.0
 
         # 지수가중 평균 (최근일수록 더 반영)
