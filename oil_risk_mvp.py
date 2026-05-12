@@ -485,8 +485,16 @@ def fetch_data(start_date=None, end_date=None):
         except Exception:
             ovx = pd.Series(dtype=float, name="^OVX")
 
+        try:
+            cl2 = _dl("CL2=F")
+            futures_spread = (cl2 - wti).rename("futures_spread")
+            log.info(f"    WTI 선물 커브 스프레드 수집 완료 (μ={futures_spread.mean():.3f})")
+        except Exception:
+            futures_spread = pd.Series(dtype=float, name="futures_spread")
+            log.warning("    WTI 2번째 월물 수집 실패 → futures_spread=0")
+
         df = pd.DataFrame({'WTI': wti, 'Brent': brent, 'DXY': dxy,
-                           'VIX': vix, 'OVX': ovx})
+                           'VIX': vix, 'OVX': ovx, 'futures_spread': futures_spread})
         df = df.ffill().bfill()
         df.dropna(subset=['WTI'], inplace=True)
 
@@ -780,6 +788,8 @@ FEATURE_COLS = [
     'fear_composite', 'vix_amplified', 'vix_sent_diverge',
     # OVX (원유 변동성 지수) 피처
     'ovx_zscore', 'ovx_change', 'ovx_rv_spread',
+    # WTI 선물 커브 (contango/backwardation)
+    'futures_spread', 'futures_spread_chg', 'contango_dummy',
     # EIA 미국 원유 재고 (실물 수급 지표)
     'inv_chg_zscore', 'inv_lvl_zscore',
     # 5번: 시장 국면(Regime) 피처
@@ -931,6 +941,18 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df['ovx_zscore']   = 0.0
         df['ovx_change']   = 0.0
         df['ovx_rv_spread']= 0.0
+
+    # ── WTI 선물 커브 스프레드 피처 (contango/backwardation)
+    if 'futures_spread' in df.columns and df['futures_spread'].notna().sum() > 30:
+        df['futures_spread']     = df['futures_spread'].ffill().bfill().fillna(0)
+        df['futures_spread_chg'] = df['futures_spread'].diff().fillna(0)
+        df['contango_dummy']     = (df['futures_spread'] > 0).astype(float)
+        log.info(f"    선물 커브 스프레드 피처 생성 "
+                 f"(contango 비율={df['contango_dummy'].mean()*100:.1f}%)")
+    else:
+        df['futures_spread']     = 0.0
+        df['futures_spread_chg'] = 0.0
+        df['contango_dummy']     = 0.0
 
     # ── VIX × 뉴스 감성 복합변수 (뉴스 집계 이후에 계산)
     neg_sent = (-df['news_sentiment_smooth']).clip(lower=0)   # 부정 감성만 추출
@@ -1248,11 +1270,11 @@ def train_models(feature_df: pd.DataFrame):
         _ridge_fallback(results, X_tr_s, y_px_tr, X_te_s, y_px_te,
                         available_feats, scaler)
 
-    # 4번: Prophet 모델 학습
+    # 4번: Prophet 모델 학습 (SARIMAX와 동일한 5년 윈도우)
     prophet_exog = [c for c in ['vix_change', 'news_sentiment_smooth', 'dxy_change']
                     if c in feature_df.columns]
     log.info("    [C] Prophet 학습 중...")
-    prophet_result = _train_prophet(train_df, test_df, prophet_exog)
+    prophet_result = _train_prophet(sx_train, sx_test, prophet_exog)
     if prophet_result:
         results['prophet'] = prophet_result
 
@@ -1320,9 +1342,9 @@ def _train_prophet(train_df: pd.DataFrame, test_df: pd.DataFrame,
         r2_p   = float(r2_score(test_df['WTI'].values, pred))
         log.info(f"        Prophet Hold-out → RMSE={rmse_p:.4f}  R²={r2_p:.4f}")
 
-        # R² < 0.5이면 실용성 없음 → 미사용
-        if r2_p < 0.5:
-            log.info(f"        Prophet 미채택 (R²={r2_p:.4f} < 0.5 기준)")
+        # R² < 0.3이면 실용성 없음 → 미사용
+        if r2_p < 0.3:
+            log.info(f"        Prophet 미채택 (R²={r2_p:.4f} < 0.3 기준)")
             return None
 
         return {
@@ -1842,6 +1864,23 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
     }
 
     pd.DataFrame([signal]).to_csv(OUTPUT_DIR / 'latest_risk_signal.csv', index=False)
+
+    # 리스크 히스토리 누적 저장
+    _hist_path = OUTPUT_DIR / 'risk_history.csv'
+    _hist_row  = pd.DataFrame([{
+        'date':       signal['date'],
+        'risk_level': level,
+        'risk_score': signal['risk_score'],
+        'wti_price':  signal['wti_price'],
+        'volatility': signal['volatility_5d'],
+    }])
+    if _hist_path.exists():
+        _hist = pd.read_csv(_hist_path)
+        _hist = pd.concat([_hist, _hist_row], ignore_index=True)
+        _hist = _hist.drop_duplicates(subset=['date'], keep='last').sort_values('date').tail(365)
+    else:
+        _hist = _hist_row
+    _hist.to_csv(_hist_path, index=False)
     r = RISK_LEVELS[level]
     log.info(f"    {r['emoji']} {level} ({r['label']})  "
              f"WTI=${current_wti:.2f}  Vol={vol:.2%}  Score={risk_score:.3f}")
