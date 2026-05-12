@@ -167,13 +167,30 @@ CRISIS_SEED = {
 }
 
 STOP_WORDS = {
+    # 관사/전치사/접속사
     'the','a','an','in','on','at','to','for','of','and','or','but','is',
     'are','was','were','be','been','has','have','had','will','would','could',
     'should','may','might','as','with','by','from','up','about','into',
     'through','before','after','that','this','these','those','it','its',
-    'new','more','than','over','which','who','when','where','how','what',
-    'not','no','said','says','amid','its','their','they','our','we','us',
-    'amid','amid','its','after','amid'
+    # 대명사/의문사/부사
+    'not','no','said','says','amid','their','they','our','we','us','you',
+    'your','him','her','his','she','he','who','when','where','how','what',
+    'why','which','than','more','most','very','also','just','even','still',
+    # 일반 동사/형용사 (유가 무관)
+    'make','made','say','get','got','take','took','come','came','know',
+    'think','want','need','see','look','seem','give','put','use','find',
+    'tell','ask','work','feel','try','leave','call','keep','let','mean',
+    'first','last','next','one','two','three','all','both','can','will',
+    'back','off','out','over','down','up','right','good','best','big',
+    'old','long','little','own','same','other','new','high','low','day',
+    'year','years','time','way','part','well','much','many','now','then',
+    'here','there','where','ever','never','always','often','again','away',
+    # 뉴스/미디어 관련 노이즈
+    'happened','review','reviews','recipe','recipes','briefing','briefings',
+    'podcast','newsletter','today','yesterday','week','month','morning',
+    'guardian','report','reports','reporting','interview','exclusive',
+    'live','update','updates','latest','breaking','watch','listen','read',
+    'comment','opinion','analysis','explainer','guide','everything','shows',
 }
 
 # 4번: 뉴스 중요도 가중치 — 핵심 산유국/기관 언급 기사에 1.5× 가중치
@@ -2029,31 +2046,82 @@ def extract_crisis_keywords(news_df: pd.DataFrame, top_n: int = 60) -> pd.DataFr
 _KW_TRANSLATE = {
     # 원자재/에너지
     'oil':'원유', 'crude':'원유', 'brent':'브렌트', 'wti':'WTI',
-    'petroleum':'석유', 'barrel':'배럴', 'gas':'가스', 'lng':'LNG',
-    'energy':'에너지', 'fuel':'연료', 'refinery':'정유', 'pipeline':'파이프라인',
-    # 기관/국가
-    'opec':'OPEC', 'russia':'러시아', 'saudi':'사우디', 'iran':'이란',
-    'iraq':'이라크', 'china':'중국', 'usa':'미국', 'us':'미국',
-    'uae':'UAE', 'venezuela':'베네수엘라', 'nigeria':'나이지리아',
-    'kuwait':'쿠웨이트', 'libya':'리비아',
-    # 지정학
-    'war':'전쟁', 'sanctions':'제재', 'conflict':'분쟁', 'crisis':'위기',
-    'attack':'공격', 'military':'군사', 'ukraine':'우크라이나',
-    'israel':'이스라엘', 'gaza':'가자', 'hamas':'하마스',
-    'geopolitical':'지정학', 'tension':'긴장', 'ceasefire':'휴전',
+    'petroleum':'석유', 'barrel':'배럴', 'barrels':'배럴',
+    'gas':'가스', 'lng':'LNG', 'lpg':'LPG', 'natural':'천연',
+    'energy':'에너지', 'fuel':'연료', 'fuels':'연료',
+    'refinery':'정유', 'refining':'정제', 'pipeline':'파이프라인',
+    'shale':'셰일', 'offshore':'해양', 'rig':'굴착기',
+    'fossil':'화석연료', 'coal':'석탄', 'nuclear':'핵/원자력',
+    # 국가/기관
+    'opec':'OPEC', 'opec+':'OPEC+', 'iea':'IEA', 'eia':'EIA',
+    'russia':'러시아', 'russian':'러시아', 'kremlin':'크렘린',
+    'saudi':'사우디', 'arabia':'아라비아', 'aramco':'아람코',
+    'iran':'이란', 'iranian':'이란', 'iraq':'이라크', 'iraqi':'이라크',
+    'china':'중국', 'chinese':'중국', 'beijing':'베이징',
+    'usa':'미국', 'america':'미국', 'american':'미국',
+    'uae':'UAE', 'emirates':'에미리트',
+    'venezuela':'베네수엘라', 'nigeria':'나이지리아', 'angola':'앙골라',
+    'kuwait':'쿠웨이트', 'libya':'리비아', 'algeria':'알제리',
+    'qatar':'카타르', 'mexico':'멕시코', 'canada':'캐나다',
+    'australia':'호주', 'norway':'노르웨이', 'uk':'영국', 'britain':'영국',
+    'europe':'유럽', 'european':'유럽', 'india':'인도', 'japan':'일본',
+    'korea':'한국', 'middle':'중동',
+    # 지정학/안보
+    'war':'전쟁', 'sanctions':'제재', 'sanction':'제재',
+    'conflict':'분쟁', 'crisis':'위기', 'crises':'위기',
+    'attack':'공격', 'attacks':'공격', 'military':'군사',
+    'ukraine':'우크라이나', 'ukrainian':'우크라이나',
+    'israel':'이스라엘', 'israeli':'이스라엘',
+    'gaza':'가자', 'hamas':'하마스', 'iran':'이란',
+    'geopolitical':'지정학', 'tension':'긴장', 'tensions':'긴장',
+    'ceasefire':'휴전', 'invasion':'침공', 'missile':'미사일',
+    'coup':'쿠데타', 'protest':'시위', 'strike':'파업/공습',
+    'terrorism':'테러', 'drone':'드론',
     # 수급/시장
-    'supply':'공급', 'demand':'수요', 'production':'생산', 'output':'생산량',
-    'inventory':'재고', 'stockpile':'비축', 'reserve':'매장량',
-    'market':'시장', 'price':'가격', 'rally':'반등', 'slump':'급락',
-    'cut':'감산', 'increase':'증산', 'quota':'쿼터',
-    # 거시경제
-    'inflation':'인플레이션', 'recession':'경기침체', 'gdp':'GDP',
-    'dollar':'달러', 'fed':'연준', 'interest':'금리', 'rate':'금리',
-    'economy':'경제', 'growth':'성장',
-    # 기후/전환
-    'climate':'기후', 'renewable':'재생에너지', 'solar':'태양광',
-    'electric':'전기차', 'carbon':'탄소', 'emission':'배출',
-    'trump':'트럼프', 'biden':'바이든', 'opec+':'OPEC+',
+    'supply':'공급', 'supplies':'공급', 'demand':'수요',
+    'production':'생산', 'output':'생산량', 'capacity':'생산능력',
+    'inventory':'재고', 'inventories':'재고', 'stockpile':'비축',
+    'reserve':'매장량', 'reserves':'매장량',
+    'market':'시장', 'markets':'시장',
+    'price':'가격', 'prices':'가격',
+    'rally':'반등', 'slump':'급락', 'surge':'급등', 'drop':'급락',
+    'cut':'감산', 'cuts':'감산', 'increase':'증산', 'quota':'쿼터',
+    'export':'수출', 'exports':'수출', 'import':'수입', 'imports':'수입',
+    'trade':'무역', 'deal':'협상', 'agreement':'합의',
+    'rise':'상승', 'fall':'하락', 'decline':'하락', 'gain':'상승',
+    'record':'기록', 'high':'고점', 'low':'저점', 'peak':'정점',
+    'volatility':'변동성', 'swing':'급변',
+    # 거시경제/금융
+    'inflation':'인플레이션', 'recession':'경기침체',
+    'gdp':'GDP', 'growth':'성장', 'economy':'경제', 'economic':'경제',
+    'dollar':'달러', 'fed':'연준', 'federal':'연방', 'reserve':'준비/연준',
+    'interest':'금리', 'rate':'금리', 'rates':'금리',
+    'bank':'은행', 'banking':'금융', 'financial':'금융',
+    'investment':'투자', 'investor':'투자자',
+    'deficit':'적자', 'debt':'부채', 'currency':'통화',
+    # 기후/에너지전환
+    'climate':'기후', 'global':'세계', 'warming':'온난화',
+    'renewable':'재생에너지', 'solar':'태양광', 'wind':'풍력',
+    'electric':'전기차', 'carbon':'탄소', 'emission':'탄소배출',
+    'emissions':'탄소배출', 'green':'친환경', 'clean':'청정',
+    'transition':'전환', 'net':'탄소중립', 'zero':'제로',
+    'cop':'기후회의', 'paris':'파리협정',
+    # 주요 인물
+    'trump':'트럼프', 'biden':'바이든', 'putin':'푸틴',
+    'xi':'시진핑', 'mbs':'빈살만', 'powell':'파월',
+    'zelensky':'젤렌스키', 'netanyahu':'네타냐후',
+    # 기타 빈출 관련어
+    'world':'세계', 'global':'세계', 'international':'국제',
+    'plan':'계획', 'plans':'계획', 'policy':'정책', 'policies':'정책',
+    'change':'변화', 'changes':'변화', 'reform':'개혁',
+    'power':'전력/파워', 'grid':'전력망', 'storage':'저장',
+    'hit':'타격', 'impact':'영향', 'effect':'효과',
+    'security':'안보', 'risk':'리스크', 'threat':'위협',
+    'forecast':'전망', 'outlook':'전망', 'prediction':'예측',
+    'report':'보고서', 'data':'데이터', 'analysis':'분석',
+    'opec+':'OPEC+', 'brexit':'브렉시트', 'covid':'코로나19',
+    'pandemic':'팬데믹', 'recovery':'회복',
+    'food':'식품', 'water':'수자원', 'war':'전쟁',
 }
 
 
