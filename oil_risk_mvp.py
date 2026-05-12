@@ -815,6 +815,33 @@ def score_sentiment(text: str) -> float:
 # 4.  build_features()
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── HAR 전용 피처셋 (변동성 예측 특화, ~25개, regime/뉴스/거시 제외)
+# 과적합 원인: 96개 피처 중 regime(48%) 단독 지배 → 훈련R²=0.80 vs CV R²=0.36
+HAR_FEATURE_COLS = [
+    # 핵심 HAR 성분
+    'RV_1d', 'RV_5d', 'RV_21d', 'RV_63d',
+    # GARCH / Parkinson / EWMA
+    'garch_vol', 'parkinson_vol', 'parkinson_vol_5d', 'parkinson_vol_21d',
+    'ewma_vol_10', 'ewma_vol_21', 'ewma_vol_63',
+    # 변동성 모멘텀
+    'rv_term_slope', 'rv_5d_chg', 'rv_mom_5_21',
+    # 레버리지 효과
+    'leverage_effect', 'neg_return',
+    # EIA 발표일 효과
+    'dow_wednesday', 'dow_thursday', 'eia_vol_signal',
+    # 장중 RV (정확한 측정)
+    'rv_intraday', 'rv_intraday_5d',
+    # 파생상품 (옵션 내재변동성)
+    'ovx_zscore', 'ovx_change', 'ovx_rv_spread',
+    'vix_change', 'vix_zscore',
+    'vix_term_slope', 'vix_ts_zscore',
+    'skew_zscore',
+    # Brent 스필오버
+    'brent_rv_1d_lag1', 'brent_rv_5d_lag1',
+    # 기존 lag
+    'RV_lag1',
+]
+
 FEATURE_COLS = [
     # HAR 구성요소 (일·주·월 실현변동성)
     'RV_1d', 'RV_5d', 'RV_21d',
@@ -1165,19 +1192,26 @@ def train_models(feature_df: pd.DataFrame):
     log.info("[4/9] 모델 훈련 중...")
 
     available_feats = [c for c in FEATURE_COLS if c in feature_df.columns]
+    # HAR 전용 피처: regime/뉴스/거시 제외로 과적합 방지
+    har_feats = [c for c in HAR_FEATURE_COLS if c in feature_df.columns]
+    log.info(f"    HAR 피처: {len(har_feats)}개 / 전체: {len(available_feats)}개")
 
     # ── 테스트셋: 최근 60 영업일 (원샷 장기예측 오차 제거)
     n_test   = 60
     train_df = feature_df.iloc[:-n_test]
     test_df  = feature_df.iloc[-n_test:]
 
-    X_tr = train_df[available_feats]
-    X_te = test_df[available_feats]
+    X_tr = train_df[har_feats]   # HAR 모델은 har_feats만 사용
+    X_te = test_df[har_feats]
     # 3번: 로그 변환 타깃 사용 (훈련), 평가는 원래 스케일로 역변환
     y_rv_tr,     y_rv_te     = train_df['target_rv'],     test_df['target_rv']
     y_rv_log_tr, y_rv_log_te = train_df['target_rv_log'], test_df['target_rv_log']
     y_px_tr,     y_px_te     = train_df['target_price'],  test_df['target_price']
     y_ret_tr,    y_ret_te    = train_df['target_return'],  test_df['target_return']
+
+    # 가격 모델(XGBoost-Return, SARIMAX)용 전체 피처
+    X_tr_all = train_df[available_feats]
+    X_te_all = test_df[available_feats]
 
     results = {}
     scaler  = None
@@ -1190,16 +1224,17 @@ def train_models(feature_df: pd.DataFrame):
 
         log.info("    [A] XGBoost-HAR (5-fold walk-forward CV) 학습 중...")
         if _XGB:
+            # 정규화 대폭 강화 (과적합 gap=0.44 → 목표 gap<0.15)
             modelA = xgb.XGBRegressor(
-                n_estimators=600, max_depth=5, learning_rate=0.025,
-                subsample=0.8, colsample_bytree=0.7,
-                min_child_weight=5, reg_alpha=0.05, reg_lambda=1.0,
+                n_estimators=300, max_depth=3, learning_rate=0.02,
+                subsample=0.7, colsample_bytree=0.6,
+                min_child_weight=15, reg_alpha=1.0, reg_lambda=5.0,
                 n_jobs=-1, random_state=42, verbosity=0,
             )
         else:
             modelA = GradientBoostingRegressor(
-                n_estimators=500, max_depth=4, learning_rate=0.03,
-                subsample=0.8, random_state=42,
+                n_estimators=300, max_depth=3, learning_rate=0.02,
+                subsample=0.7, random_state=42,
             )
 
         # ── walk-forward TimeSeriesSplit 평가 (5 fold)
@@ -1265,9 +1300,10 @@ def train_models(feature_df: pd.DataFrame):
         try:
             _har_feats = [c for c in ['RV_1d','RV_5d','RV_21d','RV_63d',
                                        'garch_vol','parkinson_vol','ewma_vol_10',
-                                       'leverage_effect','dow_wednesday'] if c in X_tr.columns]
-            _X_har_tr = scaler.transform(X_tr[_har_feats])
-            _X_har_te = scaler.transform(X_te[_har_feats])
+                                       'leverage_effect','dow_wednesday'] if c in har_feats]
+            _sc_ridge  = StandardScaler()
+            _X_har_tr  = _sc_ridge.fit_transform(train_df[_har_feats])
+            _X_har_te  = _sc_ridge.transform(test_df[_har_feats])
             _har_model = Ridge(alpha=1.0)
             _har_model.fit(_X_har_tr, y_rv_tr)
             _har_pred  = _har_model.predict(_X_har_te)
@@ -1325,7 +1361,7 @@ def train_models(feature_df: pd.DataFrame):
                 log.debug(f"    장중RV 타깃 모델 실패({_ie})")
 
         results['xgb_har'] = {
-            'model': modelA, 'scaler': scaler, 'features': available_feats,
+            'model': modelA, 'scaler': scaler, 'features': har_feats,
             'type': 'vol_5d',
             'rmse': rmse_cv, 'mae': mae_cv, 'r2': r2_cv,
             'rmse_ho': rmse_ho, 'r2_ho': r2_ho,
@@ -1512,8 +1548,8 @@ def train_models(feature_df: pd.DataFrame):
         log.info("    [D] XGBoost 수익률 예측 학습 중...")
         try:
             ret_scaler = StandardScaler()
-            X_tr_ret   = ret_scaler.fit_transform(X_tr)
-            X_te_ret   = ret_scaler.transform(X_te)
+            X_tr_ret   = ret_scaler.fit_transform(X_tr_all)   # 전체 피처 사용
+            X_te_ret   = ret_scaler.transform(X_te_all)
 
             # 지수감쇠 + COVID 가중치
             _n_ret  = len(y_ret_tr)
