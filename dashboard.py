@@ -79,6 +79,23 @@ with st.sidebar:
                 st.info("pip install -r requirements.txt 후 재시도하세요.")
 
     st.markdown("---")
+
+    # 마지막 실행 시간
+    import json as _json
+    _meta_path = OUTPUT_DIR / 'run_meta.json'
+    if _meta_path.exists():
+        try:
+            _meta = _json.loads(_meta_path.read_text())
+            st.markdown("**마지막 파이프라인 실행**")
+            st.markdown(f"🕐 `{_meta.get('last_run', '—')}`")
+            st.markdown(f"📅 데이터: `~ {_meta.get('data_through', '—')}`")
+            st.markdown(f"📊 실시간 예측: `{_meta.get('n_live', 0)}건`")
+        except Exception:
+            pass
+    else:
+        st.caption("파이프라인 실행 후 갱신 시간이 표시됩니다.")
+
+    st.markdown("---")
     st.markdown("**출력 파일 상태**")
     for fname in ['model_performance.csv', 'forecast_7days.csv',
                   'latest_risk_signal.csv', 'crisis_keywords.csv',
@@ -87,7 +104,7 @@ with st.sidebar:
         st.markdown(f"{'✅' if exists else '❌'} `{fname}`")
 
     st.markdown("---")
-    st.caption(f"업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    st.caption(f"대시보드 로드: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 
 # ── 메인 ─────────────────────────────────────────────────────────────────────
@@ -331,6 +348,31 @@ with tab5:
                           f"${live_confirmed['price_error'].abs().mean():.2f}")
             col_s4.metric("실시간 MAPE",
                           f"{live_confirmed['price_error_pct'].abs().mean():.2f}%")
+
+        # ── 드리프트 경고 (live MAPE > backtest MAPE × 2)
+        if (not bt.empty and bt['price_error_pct'].notna().any()
+                and not live_confirmed.empty):
+            bt_mape  = bt['price_error_pct'].abs().mean()
+            lv_mape  = live_confirmed['price_error_pct'].abs().mean()
+            if lv_mape > bt_mape * 2:
+                st.warning(
+                    f"⚠️ **모델 드리프트 감지** — 실시간 MAPE({lv_mape:.1f}%)가 "
+                    f"백테스트 MAPE({bt_mape:.1f}%)의 2배 초과. 재학습 또는 피처 점검 필요."
+                )
+
+        # ── Bias correction 경고
+        if 'forecast_7days' in data:
+            _bc = data['forecast_7days'].get('bias_correction', pd.Series([0])).iloc[0]
+            try:
+                _bc = float(_bc)
+                if abs(_bc) > 3.0:
+                    _dir = "과소예측" if _bc > 0 else "과대예측"
+                    st.info(
+                        f"ℹ️ **Bias 보정 활성** — 현재 예측에 {_bc:+.2f}$ 보정 적용 중 "
+                        f"({_dir} 패턴). live 데이터 누적 시 자동 조정됩니다."
+                    )
+            except (TypeError, ValueError):
+                pass
 
         st.markdown("---")
 

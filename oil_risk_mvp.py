@@ -1128,8 +1128,17 @@ def train_models(feature_df: pd.DataFrame):
             mae_b  = float(mean_absolute_error(y_px_te, pred_price))
             r2_b   = float(r2_score(y_px_te, pred_price))
 
+            # 라이브 예측용: 전체 데이터로 재학습 (훈련셋만 학습한 fit은 60일 전 상태)
+            log.info("    [B1] 전체 데이터 SARIMAX 재학습 (라이브 예측용)...")
+            mdl_live = SARIMAX(
+                full_wti, exog=full_exog,
+                order=sarimax_order, seasonal_order=sarimax_seasonal,
+                enforce_stationarity=False, enforce_invertibility=False,
+            )
+            fit_live = mdl_live.fit(disp=False, maxiter=300)
+
             results['sarimax'] = {
-                'model': fit, 'features': exog_cols, 'type': 'price',
+                'model': fit_live, 'features': exog_cols, 'type': 'price',
                 'rmse': rmse_b, 'mae': mae_b, 'r2': r2_b,
                 'name': f'SARIMAX{sarimax_order} 1-step',
                 'pred_price_test':   pred_price,
@@ -1142,8 +1151,8 @@ def train_models(feature_df: pd.DataFrame):
             # 3번: SARIMAX 잔차 교정 (Residual Correction)
             log.info("    [B2] SARIMAX 잔차 교정 모델 학습 중...")
             try:
-                # B-freq 변환된 잔차를 원래 train_df 인덱스에 정렬
-                train_resid = fit.resid.reindex(train_df.index).dropna()
+                # 전체 데이터 fit_live의 잔차 사용 (훈련셋 구간만 추출)
+                train_resid = fit_live.resid.reindex(train_df.index).dropna()
                 rc_feat_cols = [c for c in
                     ['vol_5d', 'vix_change', 'news_sentiment_smooth', 'dxy_change', 'gpr_zscore']
                     if c in train_df.columns]
@@ -1177,12 +1186,14 @@ def train_models(feature_df: pd.DataFrame):
 
                     if r2_c > r2_s:
                         log.info(f"        잔차 교정 채택 ✓  R²: {r2_s:.4f} → {r2_c:.4f}")
+                        # last_resid는 전체 데이터 기준 최신 잔차 사용
+                        full_resid = fit_live.resid.reindex(feature_df.index).dropna()
                         results['resid_corrector'] = {
                             'model':       rc_model,
                             'scaler':      rc_scaler,
                             'features':    list(X_rc.columns),
-                            'last_resid1': float(resid_s.iloc[-1]),
-                            'last_resid2': float(resid_s.iloc[-2]),
+                            'last_resid1': float(full_resid.iloc[-1]),
+                            'last_resid2': float(full_resid.iloc[-2]),
                             'rc_feat_cols': rc_feat_cols,
                         }
                         results['sarimax']['r2']             = r2_c
@@ -2007,6 +2018,16 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     kw_df                = extract_crisis_keywords(news_df)
     generate_wordcloud(kw_df)
     plot_oil_forecast(feature_df, fc_df, risk_signal)
+
+    # ── 마지막 실행 시간 기록
+    import json as _json
+    _run_meta = {
+        'last_run': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'data_through': feature_df.index[-1].strftime('%Y-%m-%d'),
+        'n_live': int((pd.read_csv(PRED_LOG_FILE)['type'] == 'live').sum()) if PRED_LOG_FILE.exists() else 0,
+    }
+    with open(OUTPUT_DIR / 'run_meta.json', 'w') as _f:
+        _json.dump(_run_meta, _f)
 
     # ── 결과 요약 출력
     rl = risk_signal['risk_level']
