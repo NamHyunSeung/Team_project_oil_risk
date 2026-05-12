@@ -499,52 +499,62 @@ def fetch_data(start_date=None, end_date=None):
         return _dummy_prices(start_date, end_date)
 
 
-def _patch_wti_with_fred(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
-    """FRED DCOILWTICO로 yfinance WTI 이상값 감지·교체.
+def _patch_price_with_fred(df: pd.DataFrame, col: str, fred_series: str,
+                           start_date: str, end_date: str,
+                           fred_client, threshold: float = 0.10) -> pd.DataFrame:
+    """FRED 공식 데이터로 yfinance 컬럼 이상값 감지·교체 (내부 공통 함수).
 
-    yfinance CL=F 롤오버 버그로 10% 이상 괴리 발생 시 FRED 공식값으로 패치.
-    오늘 날짜는 FRED 하루 지연 특성상 검증 제외. FRED 미설정·실패 시 원본 유지.
+    threshold 비율 이상 괴리 시 FRED 값으로 교체. 오늘 날짜는 FRED 지연으로 제외.
     """
-    if not _FRED or not FRED_API_KEY:
-        return df
     try:
-        fred = _Fred(api_key=FRED_API_KEY)
-        fred_wti = fred.get_series('DCOILWTICO',
-                                   observation_start=start_date,
-                                   observation_end=end_date)
-        fred_wti = fred_wti.dropna()
-        fred_wti.index = pd.to_datetime(fred_wti.index).normalize()
+        fred_data = fred_client.get_series(fred_series,
+                                           observation_start=start_date,
+                                           observation_end=end_date)
+        fred_data = fred_data.dropna()
+        fred_data.index = pd.to_datetime(fred_data.index).normalize()
 
-        if len(fred_wti) < 30:
+        if len(fred_data) < 30 or col not in df.columns:
             return df
 
-        today = pd.Timestamp(datetime.today().date())
-        check_idx = df.index.intersection(fred_wti.index)
-        check_idx = check_idx[check_idx < today]   # 오늘 제외 (FRED 지연)
+        today     = pd.Timestamp(datetime.today().date())
+        check_idx = df.index.intersection(fred_data.index)
+        check_idx = check_idx[check_idx < today]
 
         if len(check_idx) == 0:
             return df
 
-        yf_vals   = df.loc[check_idx, 'WTI']
-        fred_vals = fred_wti.loc[check_idx]
+        yf_vals   = df.loc[check_idx, col]
+        fred_vals = fred_data.loc[check_idx]
         diff_pct  = ((yf_vals - fred_vals) / fred_vals).abs()
+        anomalies = diff_pct[diff_pct > threshold]
 
-        anomalies = diff_pct[diff_pct > 0.10]
         if anomalies.empty:
-            log.info(f"    WTI 이상값 없음 (FRED 검증 통과: {len(check_idx)}일)")
+            log.info(f"    {col} 이상값 없음 (FRED {fred_series} 검증 통과: {len(check_idx)}일)")
             return df
 
-        log.warning(f"    ⚠ WTI 이상값 {len(anomalies)}건 → FRED 값으로 교체:")
+        log.warning(f"    ⚠ {col} 이상값 {len(anomalies)}건 → FRED {fred_series} 값으로 교체:")
         for dt, pct in anomalies.items():
             yf_v, fred_v = float(yf_vals[dt]), float(fred_vals[dt])
             log.warning(f"      {dt.date()}: yfinance={yf_v:.2f} → FRED={fred_v:.2f} (괴리 {pct*100:.1f}%)")
-            df.loc[dt, 'WTI'] = fred_v
+            df.loc[dt, col] = fred_v
 
         return df
-
     except Exception as exc:
-        log.warning(f"    FRED WTI 검증 실패({exc}) → yfinance 원본 유지")
+        log.warning(f"    FRED {fred_series} 검증 실패({exc}) → yfinance 원본 유지")
         return df
+
+
+def _patch_wti_with_fred(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
+    """FRED로 WTI(DCOILWTICO)·Brent(DCOILBRENTEU) 이상값 패치."""
+    if not _FRED or not FRED_API_KEY:
+        return df
+    try:
+        fred = _Fred(api_key=FRED_API_KEY)
+        df = _patch_price_with_fred(df, 'WTI',   'DCOILWTICO',   start_date, end_date, fred)
+        df = _patch_price_with_fred(df, 'Brent',  'DCOILBRENTEU', start_date, end_date, fred)
+    except Exception as exc:
+        log.warning(f"    FRED 패치 초기화 실패({exc}) → yfinance 원본 유지")
+    return df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1998,8 +2008,31 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     print("  🛢  국제 유가 리스크 예측 시스템  MVP")
     print("=" * 65)
 
-    price_df             = fetch_data(start_date, end_date)
-    news_df              = fetch_news()   # 기본값: DATA_YEARS × 365일
+    api_status = {}  # API별 수집 성공 여부 추적
+
+    # yfinance
+    try:
+        price_df = fetch_data(start_date, end_date)
+        _is_dummy = (len(price_df) < 100 and price_df.index[0].year < 2010)
+        api_status['yfinance'] = '❌ 더미' if _is_dummy else '✅ 정상'
+    except Exception as e:
+        price_df = fetch_data(start_date, end_date)
+        api_status['yfinance'] = f'❌ 오류'
+
+    # FRED
+    api_status['FRED'] = '✅ 정상' if (_FRED and FRED_API_KEY) else '❌ 미설정'
+
+    # Guardian 뉴스
+    try:
+        news_df = fetch_news()
+        api_status['Guardian'] = '✅ 정상' if len(news_df) > 10 else '⚠️ 부족'
+    except Exception:
+        news_df = fetch_news()
+        api_status['Guardian'] = '❌ 오류'
+
+    # EIA
+    api_status['EIA'] = '✅ 정상' if EIA_API_KEY else '❌ 미설정'
+
     feature_df, full_df  = build_features(price_df, news_df)
     model_results, _     = train_models(feature_df)
 
@@ -2019,12 +2052,13 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     generate_wordcloud(kw_df)
     plot_oil_forecast(feature_df, fc_df, risk_signal)
 
-    # ── 마지막 실행 시간 기록
+    # ── 마지막 실행 시간 + API 상태 기록
     import json as _json
     _run_meta = {
-        'last_run': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'last_run':    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'data_through': feature_df.index[-1].strftime('%Y-%m-%d'),
-        'n_live': int((pd.read_csv(PRED_LOG_FILE)['type'] == 'live').sum()) if PRED_LOG_FILE.exists() else 0,
+        'n_live':      int((pd.read_csv(PRED_LOG_FILE)['type'] == 'live').sum()) if PRED_LOG_FILE.exists() else 0,
+        'api_status':  api_status,
     }
     with open(OUTPUT_DIR / 'run_meta.json', 'w') as _f:
         _json.dump(_run_meta, _f)

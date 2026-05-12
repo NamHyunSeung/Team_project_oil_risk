@@ -90,6 +90,12 @@ with st.sidebar:
             st.markdown(f"🕐 `{_meta.get('last_run', '—')}`")
             st.markdown(f"📅 데이터: `~ {_meta.get('data_through', '—')}`")
             st.markdown(f"📊 실시간 예측: `{_meta.get('n_live', 0)}건`")
+
+            _api = _meta.get('api_status', {})
+            if _api:
+                st.markdown("**API 수집 상태**")
+                for _name, _stat in _api.items():
+                    st.markdown(f"{_stat} `{_name}`")
         except Exception:
             pass
     else:
