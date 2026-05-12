@@ -420,15 +420,43 @@ with tab4:
 
     # ── XGBoost 피처 중요도 차트
     st.markdown("---")
+    _FEAT_KO = {
+        'RV_5d':'5일 실현변동성', 'RV_22d':'22일 실현변동성', 'RV_1d':'1일 실현변동성',
+        'return_1d':'1일 수익률', 'log_return':'로그 수익률',
+        'vol_5d':'5일 변동성', 'vol_21d':'21일 변동성',
+        'momentum_5d':'5일 모멘텀', 'momentum_21d':'21일 모멘텀',
+        'price_vs_ma5':'MA5 대비 가격', 'price_vs_ma21':'MA21 대비 가격',
+        'bb_position':'볼린저밴드 위치',
+        'Brent':'브렌트 가격', 'DXY':'달러인덱스', 'WTI':'WTI 가격',
+        'VIX':'VIX 공포지수', 'OVX':'OVX 원유변동성',
+        'dxy_change':'달러인덱스 변화', 'vix_change':'VIX 변화',
+        'vix_zscore':'VIX Z-스코어', 'ovx_change':'OVX 변화',
+        'ovx_zscore':'OVX Z-스코어', 'ovx_rv_spread':'내재-실현변동성 스프레드',
+        'demand_shock':'수요 충격', 'supply_shock':'공급 충격',
+        'inv_chg_zscore':'재고 변화 Z-스코어', 'inv_lvl_zscore':'재고 수준 Z-스코어',
+        'news_sentiment':'뉴스 감성', 'news_sentiment_smooth':'뉴스 감성(평활)',
+        'news_count':'뉴스 건수', 'news_sentiment_lag1':'뉴스 감성(1일 전)',
+        'news_sentiment_lag2':'뉴스 감성(2일 전)',
+        'news_count_lag1':'뉴스 건수(1일 전)', 'news_count_lag2':'뉴스 건수(2일 전)',
+        'geo_dummy':'지정학 위기 더미', 'gpr_zscore':'GPR Z-스코어',
+        'fear_composite':'공포 복합지수', 'vix_amplified':'VIX 증폭 감성',
+        'vix_sent_diverge':'VIX-감성 괴리',
+        'regime':'시장 국면', 'regime_x_mom':'국면×모멘텀',
+        'regime_x_sent':'국면×감성', 'regime_x_gpr':'국면×지정학',
+        'futures_spread':'선물 커브 스프레드', 'futures_spread_chg':'선물 스프레드 변화',
+        'contango_dummy':'콘탱고 더미', 'covid_dummy':'COVID 더미',
+    }
+
     _fi_path = OUTPUT_DIR / 'feature_importance.csv'
     if _fi_path.exists():
         fi = pd.read_csv(_fi_path).head(15)
+        fi['feature_ko'] = fi['feature'].map(_FEAT_KO).fillna(fi['feature'])
         fi = fi.sort_values('importance')
 
         fig_fi, ax_fi = plt.subplots(figsize=(8, 4.5), facecolor='#161b22')
         ax_fi.set_facecolor('#1c2433')
-        bars = ax_fi.barh(fi['feature'], fi['importance'], color='#58a6ff', alpha=0.85)
-        ax_fi.set_title('XGBoost 피처 중요도 (Top 15)', color='#e6edf3', fontsize=10)
+        bars = ax_fi.barh(fi['feature_ko'], fi['importance'], color='#58a6ff', alpha=0.85)
+        ax_fi.set_title('XGBoost-HAR 피처 중요도 (Top 15)', color='#e6edf3', fontsize=10)
         ax_fi.tick_params(colors='#ccc', labelsize=8)
         ax_fi.set_xlabel('Importance', color='#ccc', fontsize=8)
         for sp in ax_fi.spines.values(): sp.set_color('#30363d')

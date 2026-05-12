@@ -2039,17 +2039,34 @@ def generate_wordcloud(kw_df: pd.DataFrame):
                 return f"hsl({np.random.randint(0,25)}, 90%, {np.random.randint(42,58)}%)"
             return f"hsl({np.random.randint(195,245)}, 65%, {np.random.randint(45,62)}%)"
 
-        wc = _WC_Class(
+        # 한글 폰트 경로 탐색 (WordCloud용)
+        import matplotlib.font_manager as _fm
+        _ko_candidates = ['Malgun Gothic', 'AppleGothic', 'NanumGothic']
+        _ko_path = None
+        for _n in _ko_candidates:
+            _hits = [f.fname for f in _fm.fontManager.ttflist if f.name == _n]
+            if _hits:
+                _ko_path = _hits[0]
+                break
+        if _ko_path is None:
+            _p = Path('C:/Windows/Fonts/malgun.ttf')
+            if _p.exists():
+                _ko_path = str(_p)
+
+        wc_kwargs = dict(
             width=1400, height=700, background_color='#12141a',
             color_func=color_fn, max_words=80, prefer_horizontal=0.68,
             min_font_size=11, max_font_size=130, random_state=42,
         )
+        if _ko_path:
+            wc_kwargs['font_path'] = _ko_path
+        wc = _WC_Class(**wc_kwargs)
         wc.generate_from_frequencies(freq)
 
         fig, ax = plt.subplots(figsize=(14, 7), facecolor='#12141a')
         ax.imshow(wc, interpolation='bilinear')
         ax.axis('off')
-        ax.set_title('Oil Market Crisis Keywords  (🔴 위기어  🔵 일반어)',
+        ax.set_title('유가 시장 뉴스 키워드  (🔴 위기어  🔵 일반어)',
                      color='#e0e0e0', fontsize=14, pad=10)
         plt.tight_layout()
         plt.savefig(OUTPUT_DIR / 'wordcloud.png', dpi=150, bbox_inches='tight', facecolor='#12141a')
@@ -2062,12 +2079,12 @@ def generate_wordcloud(kw_df: pd.DataFrame):
         fig, ax = plt.subplots(figsize=(12, 7), facecolor='#12141a')
         ax.set_facecolor('#1a1d24')
         ax.barh(top20['keyword'], top20['count'], color=colors)
-        ax.set_xlabel('Frequency', color='#ccc')
-        ax.set_title('Top Crisis Keywords (워드클라우드 대체 바 차트)', color='white', fontsize=13)
+        ax.set_xlabel('빈도', color='#ccc')
+        ax.set_title('주요 위기 키워드 Top 20', color='white', fontsize=13)
         ax.tick_params(colors='#ccc')
         for sp in ax.spines.values(): sp.set_color('#333')
-        p1 = mpatches.Patch(color='#e74c3c', label='Crisis Keyword')
-        p2 = mpatches.Patch(color='#3d85c8', label='General Keyword')
+        p1 = mpatches.Patch(color='#e74c3c', label='위기 키워드')
+        p2 = mpatches.Patch(color='#3d85c8', label='일반 키워드')
         ax.legend(handles=[p1, p2], facecolor='#1a1d24', labelcolor='white')
         plt.tight_layout()
         plt.savefig(OUTPUT_DIR / 'wordcloud.png', dpi=150, bbox_inches='tight', facecolor='#12141a')
