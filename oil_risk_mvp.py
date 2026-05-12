@@ -484,11 +484,13 @@ def fetch_data(start_date=None, end_date=None):
         return _dummy_prices(start_date, end_date)
 
     try:
-        def _dl(ticker):
+        def _dl(ticker, col='Close'):
             raw = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
             if isinstance(raw, pd.DataFrame):
-                col = 'Close' if 'Close' in raw.columns else raw.columns[0]
-                s = raw[col]
+                if col in raw.columns:
+                    s = raw[col]
+                else:
+                    s = raw.iloc[:, 0]
                 if isinstance(s, pd.DataFrame):   # MultiIndex ticker残留
                     s = s.iloc[:, 0]
             else:
@@ -519,8 +521,18 @@ def fetch_data(start_date=None, end_date=None):
             futures_spread = pd.Series(dtype=float, name="futures_spread")
             log.warning("    WTI 2번째 월물 수집 실패 → futures_spread=0")
 
+        # Parkinson 추정을 위한 WTI High/Low 수집
+        try:
+            wti_high = _dl("CL=F", col='High').rename("WTI_High")
+            wti_low  = _dl("CL=F", col='Low').rename("WTI_Low")
+            log.info("    WTI High/Low 수집 완료 (Parkinson 추정용)")
+        except Exception:
+            wti_high = pd.Series(dtype=float, name="WTI_High")
+            wti_low  = pd.Series(dtype=float, name="WTI_Low")
+
         df = pd.DataFrame({'WTI': wti, 'Brent': brent, 'DXY': dxy,
-                           'VIX': vix, 'OVX': ovx, 'futures_spread': futures_spread})
+                           'VIX': vix, 'OVX': ovx, 'futures_spread': futures_spread,
+                           'WTI_High': wti_high, 'WTI_Low': wti_low})
         df = df.ffill().bfill()
         df.dropna(subset=['WTI'], inplace=True)
 
@@ -822,6 +834,14 @@ FEATURE_COLS = [
     'RV_63d', 'neg_return', 'return_neg', 'return_pos',
     'leverage_effect', 'dow_wednesday', 'dow_thursday', 'dow_monday',
     'eia_vol_signal',
+    # A: GARCH 조건부 분산
+    'garch_vol',
+    # B: Parkinson 장중 범위 추정
+    'parkinson_vol', 'parkinson_vol_5d', 'parkinson_vol_21d',
+    # C: EWMA 변동성
+    'ewma_vol_10', 'ewma_vol_21', 'ewma_vol_63',
+    # D: 변동성 모멘텀
+    'rv_term_slope', 'rv_5d_chg', 'rv_mom_5_21',
     # 5번: 시장 국면(Regime) 피처
     'regime', 'regime_x_mom', 'regime_x_sent', 'regime_x_gpr',
     # COVID 특수 변수
@@ -860,6 +880,44 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['RV_5d']  = df['log_return'].rolling(5).std()
     df['RV_21d'] = df['log_return'].rolling(21).std()
     df['RV_63d'] = df['log_return'].rolling(63).std()   # 분기 변동성 (레짐 포착)
+
+    # ── B: Parkinson 장중 범위 추정 (High-Low 기반, 종가보다 4~5배 효율적)
+    if 'WTI_High' in df.columns and 'WTI_Low' in df.columns:
+        _h = df['WTI_High'].replace(0, np.nan)
+        _l = df['WTI_Low'].replace(0, np.nan).clip(lower=0.01)
+        _hl_ratio = (_h / _l).clip(lower=1.0)
+        df['parkinson_vol'] = (np.log(_hl_ratio) ** 2 / (4 * np.log(2))).apply(np.sqrt).fillna(0)
+        df['parkinson_vol_5d']  = df['parkinson_vol'].rolling(5).mean().fillna(0)
+        df['parkinson_vol_21d'] = df['parkinson_vol'].rolling(21).mean().fillna(0)
+        log.info(f"    Parkinson vol 생성 (μ={df['parkinson_vol'].mean():.5f})")
+    else:
+        df['parkinson_vol']     = 0.0
+        df['parkinson_vol_5d']  = 0.0
+        df['parkinson_vol_21d'] = 0.0
+
+    # ── C: EWMA 변동성 (RiskMetrics λ=0.94)
+    df['ewma_vol_10']  = df['log_return'].ewm(span=10,  adjust=False).std().fillna(0)
+    df['ewma_vol_21']  = df['log_return'].ewm(span=21,  adjust=False).std().fillna(0)
+    df['ewma_vol_63']  = df['log_return'].ewm(span=63,  adjust=False).std().fillna(0)
+
+    # ── D: 변동성 모멘텀 (term structure + 변화량)
+    df['rv_term_slope']  = (df['RV_5d'] / df['RV_21d'].replace(0, np.nan)).fillna(1.0)  # >1: 단기>장기(변동성 상승 중)
+    df['rv_5d_chg']      = df['RV_5d'].diff().fillna(0)   # 변동성 변화량
+    df['rv_mom_5_21']    = (df['RV_5d'] - df['RV_21d']).fillna(0)  # 단기-장기 스프레드
+
+    # ── A: GARCH(1,1) 조건부 분산 (변동성 클러스터링 명시적 모델링)
+    try:
+        from arch import arch_model as _arch_model
+        _ret_pct = df['log_return'].dropna() * 100   # % 스케일
+        _garch   = _arch_model(_ret_pct, vol='Garch', p=1, q=1,
+                               dist='Normal', rescale=False)
+        _res     = _garch.fit(disp='off', show_warning=False)
+        _cond_vol = _res.conditional_volatility / 100   # 소수점 스케일 복원
+        df['garch_vol'] = _cond_vol.reindex(df.index).ffill().bfill().fillna(0)
+        log.info(f"    GARCH(1,1) 조건부 분산 생성 (μ={df['garch_vol'].mean():.5f})")
+    except Exception as _ge:
+        log.warning(f"    GARCH 실패({_ge}) → garch_vol=0")
+        df['garch_vol'] = 0.0
 
     # ── 레버리지 효과 (하락일 변동성 비대칭)
     df['neg_return']      = (df['return_1d'] < 0).astype(float)
