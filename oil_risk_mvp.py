@@ -818,6 +818,10 @@ FEATURE_COLS = [
     'futures_spread', 'futures_spread_chg', 'contango_dummy',
     # EIA 미국 원유 재고 (실물 수급 지표)
     'inv_chg_zscore', 'inv_lvl_zscore',
+    # HAR 장기 성분 + 레버리지 효과 + EIA 요일 효과
+    'RV_63d', 'neg_return', 'return_neg', 'return_pos',
+    'leverage_effect', 'dow_wednesday', 'dow_thursday', 'dow_monday',
+    'eia_vol_signal',
     # 5번: 시장 국면(Regime) 피처
     'regime', 'regime_x_mom', 'regime_x_sent', 'regime_x_gpr',
     # COVID 특수 변수
@@ -851,10 +855,24 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['return_1d']  = df['return_1d'].clip(lo, hi)
     df['log_return'] = df['log_return'].clip(lo * 1.05, hi * 1.05)
 
-    # ── HAR 실현변동성 구성요소
+    # ── HAR 실현변동성 구성요소 (일·주·월·분기)
     df['RV_1d']  = df['log_return'].abs()
     df['RV_5d']  = df['log_return'].rolling(5).std()
     df['RV_21d'] = df['log_return'].rolling(21).std()
+    df['RV_63d'] = df['log_return'].rolling(63).std()   # 분기 변동성 (레짐 포착)
+
+    # ── 레버리지 효과 (하락일 변동성 비대칭)
+    df['neg_return']      = (df['return_1d'] < 0).astype(float)
+    df['return_neg']      = df['return_1d'].clip(upper=0)   # 음수 수익률만
+    df['return_pos']      = df['return_1d'].clip(lower=0)   # 양수 수익률만
+    df['leverage_effect'] = df['neg_return'] * df['RV_5d']  # 하락×변동성 교호작용
+
+    # ── EIA 발표 요일 효과 (수요일=재고발표일, 목요일=반응일)
+    _dow = pd.to_datetime(df.index).dayofweek
+    df['dow_wednesday']  = (_dow == 2).astype(float)
+    df['dow_thursday']   = (_dow == 3).astype(float)
+    df['dow_monday']     = (_dow == 0).astype(float)
+    df['eia_vol_signal'] = df['dow_wednesday'] * df['inv_chg_zscore'].abs()
 
     # ── 이동평균 & 모멘텀
     for w in [5, 10, 21]:
