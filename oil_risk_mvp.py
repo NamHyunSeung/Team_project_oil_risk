@@ -1412,42 +1412,63 @@ def _train_prophet(train_df: pd.DataFrame, test_df: pd.DataFrame,
 
 
 def compute_ensemble_weights(window: int = 30):
-    """최근 오차 기반 SARIMAX/XGBoost 동적 가중치 산출.
+    """R² 기반 초기 가중치 + MAPE 미세조정으로 SARIMAX/XGBoost 동적 가중치 산출.
 
-    backtest 30일 MAPE + live 실측 오차(있으면 70% 가중)를 합산해 가중치 결정.
-    live 데이터가 3건 미만이면 backtest만 사용. 데이터 부족 시 기본값(0.65/0.35).
+    1단계: model_performance.csv의 테스트셋 R²로 비례 가중치 계산
+    2단계: 최근 backtest/live MAPE로 ±0.1 범위 미세조정
+    R² 정보 없으면 기본값(0.65/0.35), 최종 클램프 [0.30, 0.70].
     """
     default = (0.65, 0.35)
+
+    # ── 1단계: R² 기반 초기 가중치 ──────────────────────────────────────
+    w_s_base = 0.65
+    perf_path = OUTPUT_DIR / 'model_performance.csv'
+    if perf_path.exists():
+        try:
+            pf = pd.read_csv(perf_path)
+            sx  = pf[pf['model'].str.startswith('SARIMAX')]
+            xgr = pf[pf['model'].str.startswith('XGBoost-Return')]
+            if not sx.empty and not xgr.empty:
+                r2_s = float(sx['r2'].iloc[0])
+                r2_x = float(xgr['r2'].iloc[0])
+                if (r2_s + r2_x) > 0 and r2_s > 0 and r2_x > 0:
+                    w_s_base = float(np.clip(r2_s / (r2_s + r2_x), 0.30, 0.70))
+                    log.info(f"    R² 기반 초기 가중치: SARIMAX={w_s_base:.2f} "
+                             f"XGB={1-w_s_base:.2f} (R²_s={r2_s:.4f} R²_x={r2_x:.4f})")
+        except Exception:
+            pass
+
+    # ── 2단계: MAPE 미세조정 ─────────────────────────────────────────────
     if not PRED_LOG_FILE.exists():
-        return default
+        return w_s_base, 1 - w_s_base
     try:
         pl = pd.read_csv(PRED_LOG_FILE)
         bt = pl[(pl['type'] == 'backtest') & pl['price_error'].notna()].tail(window)
         lv = pl[(pl['type'] == 'live') & pl['price_error'].notna()].tail(10)
 
         if len(bt) < 10 or bt['actual_price'].isna().all():
-            return default
+            return w_s_base, 1 - w_s_base
 
         bt_mape = (bt['price_error'].abs() / bt['actual_price'].mean() * 100).mean()
-
         if len(lv) >= 2:
             lv_mape = (lv['price_error'].abs() / lv['actual_price'].mean() * 100).mean()
-            # live가 더 최근 실측이므로 70% 가중
             sarimax_mape = 0.3 * bt_mape + 0.7 * lv_mape
-            src_label = f"bt={bt_mape:.2f}% lv={lv_mape:.2f}% → 합산={sarimax_mape:.2f}%"
         else:
             sarimax_mape = bt_mape
-            src_label = f"bt={bt_mape:.2f}% (live 데이터 부족)"
 
-        if   sarimax_mape < 3.0:  w_s = 0.75
-        elif sarimax_mape < 5.0:  w_s = 0.65
-        elif sarimax_mape < 8.0:  w_s = 0.55
-        else:                     w_s = 0.45
+        # MAPE 구간별 ±보정
+        if   sarimax_mape < 3.0:  mape_adj = +0.05
+        elif sarimax_mape < 5.0:  mape_adj =  0.00
+        elif sarimax_mape < 8.0:  mape_adj = -0.05
+        else:                     mape_adj = -0.10
 
-        log.info(f"    동적 앙상블 가중치: SARIMAX={w_s:.2f} XGB={1-w_s:.2f} ({src_label})")
+        w_s = float(np.clip(w_s_base + mape_adj, 0.30, 0.70))
+        log.info(f"    최종 앙상블 가중치: SARIMAX={w_s:.2f} XGB={1-w_s:.2f} "
+                 f"(R²기반={w_s_base:.2f} MAPE조정={mape_adj:+.2f} "
+                 f"sarimax_mape={sarimax_mape:.2f}%)")
         return w_s, 1 - w_s
     except Exception:
-        return default
+        return w_s_base, 1 - w_s_base
 
 
 def compute_live_bias_correction(window: int = 10, max_correction: float = 5.0) -> float:
