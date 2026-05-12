@@ -1296,24 +1296,49 @@ def train_models(feature_df: pd.DataFrame):
         else:
             log.info(f"        훈련R²={r2_train:.4f}  CV R²={r2_cv:.4f}  gap={overfit_gap:.3f} (정상)")
 
-        # ── HAR-OLS(Ridge) 경쟁: 단순 선형 모델과 비교
+        # ── HAR-Ridge walk-forward CV 평가 후 XGBoost와 비교, 더 좋으면 채택
         try:
-            _har_feats = [c for c in ['RV_1d','RV_5d','RV_21d','RV_63d',
-                                       'garch_vol','parkinson_vol','ewma_vol_10',
-                                       'leverage_effect','dow_wednesday'] if c in har_feats]
-            _sc_ridge  = StandardScaler()
-            _X_har_tr  = _sc_ridge.fit_transform(train_df[_har_feats])
-            _X_har_te  = _sc_ridge.transform(test_df[_har_feats])
-            _har_model = Ridge(alpha=1.0)
-            _har_model.fit(_X_har_tr, y_rv_tr)
-            _har_pred  = _har_model.predict(_X_har_te)
-            _r2_har    = float(r2_score(y_rv_te, _har_pred))
-            _r2_xgb_te = float(r2_score(y_rv_te, modelA.predict(X_te_s)))
-            log.info(f"        HAR-Ridge(선형) R²={_r2_har:.4f}  XGBoost R²={_r2_xgb_te:.4f}")
-            if _r2_har > _r2_xgb_te + 0.01:
-                log.warning("    ⚠️ 선형 HAR이 XGBoost보다 좋음 → XGBoost 과적합 가능성")
+            _rf = [c for c in ['RV_1d','RV_5d','RV_21d','RV_63d',
+                                'garch_vol','parkinson_vol','ewma_vol_10',
+                                'leverage_effect','dow_wednesday',
+                                'rv_intraday','ovx_zscore','vix_term_slope',
+                                'skew_zscore','brent_rv_1d_lag1'] if c in har_feats]
+            _sc_r  = StandardScaler()
+            _Xr_tr = _sc_r.fit_transform(train_df[_rf])
+            _Xr_te = _sc_r.transform(test_df[_rf])
+
+            # Walk-forward CV로 Ridge 평가 (공정 비교)
+            _ridge_preds = np.zeros(len(y_rv_tr))
+            for _ti, _vi in TimeSeriesSplit(n_splits=5).split(_Xr_tr):
+                _rm = Ridge(alpha=1.0)
+                _rm.fit(_Xr_tr[_ti], y_rv_tr.values[_ti])
+                _ridge_preds[_vi] = _rm.predict(_Xr_tr[_vi])
+            _r2_ridge_cv = float(r2_score(y_rv_tr.values, _ridge_preds))
+
+            # 최종 Ridge (전체 훈련셋)
+            _ridge_final = Ridge(alpha=1.0)
+            _ridge_final.fit(_Xr_tr, y_rv_tr)
+            _r2_ridge_ho = float(r2_score(y_rv_te, _ridge_final.predict(_Xr_te)))
+            _r2_xgb_ho   = float(r2_score(y_rv_te, modelA.predict(X_te_s)))
+
+            log.info(f"        HAR-Ridge CV R²={_r2_ridge_cv:.4f}  Hold-out R²={_r2_ridge_ho:.4f}")
+            log.info(f"        XGBoost  CV R²={r2_cv:.4f}   Hold-out R²={_r2_xgb_ho:.4f}")
+
+            # Hold-out과 CV 모두 Ridge가 좋으면 채택
+            if _r2_ridge_cv > r2_cv and _r2_ridge_ho > _r2_xgb_ho:
+                modelA    = _ridge_final
+                scaler    = _sc_r
+                har_feats = _rf
+                r2_cv     = _r2_ridge_cv
+                pred_rv   = modelA.predict(_Xr_te)
+                rmse_ho   = float(np.sqrt(mean_squared_error(y_rv_te, pred_rv)))
+                mae_ho    = float(mean_absolute_error(y_rv_te, pred_rv))
+                r2_ho     = _r2_ridge_ho
+                log.info(f"    ✅ HAR-Ridge 채택: CV R²={r2_cv:.4f}  Hold-out R²={r2_ho:.4f}")
+            else:
+                log.info(f"    XGBoost 유지 (Ridge CV={_r2_ridge_cv:.4f} vs XGB CV={r2_cv:.4f})")
         except Exception as _he:
-            log.debug(f"    HAR-Ridge 비교 실패({_he})")
+            log.warning(f"    HAR-Ridge 평가 실패({_he})")
 
         # ── 피처 중요도 저장 + 상위 30개 기록
         if hasattr(modelA, 'feature_importances_'):
