@@ -48,6 +48,7 @@ output/latest_risk_signal.csv
 output/crisis_keywords.csv
 output/guardian_news_cache.csv
 output/pipeline_run.log
+output/feature_importance.csv
 output/pipeline_run.log.bak
 
 # Streamlit 로그

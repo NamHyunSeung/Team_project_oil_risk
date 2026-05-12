@@ -1054,12 +1054,15 @@ def train_models(feature_df: pd.DataFrame):
         r2_ho    = float(r2_score(y_rv_te, pred_rv))
         log.info(f"        Hold-out 60d → RMSE={rmse_ho:.5f}  MAE={mae_ho:.5f}  R²={r2_ho:.4f}")
 
-        # 피처 중요도 상위 8개 로깅
+        # 피처 중요도 저장 (대시보드 시각화용)
         if _XGB and hasattr(modelA, 'feature_importances_'):
             imp = sorted(zip(available_feats, modelA.feature_importances_),
                          key=lambda x: x[1], reverse=True)
             top_str = ', '.join(f"{n}({v:.3f})" for n, v in imp[:8])
             log.info(f"        피처 중요도 Top8: {top_str}")
+            imp_df = pd.DataFrame(imp, columns=['feature', 'importance'])
+            imp_df.to_csv(OUTPUT_DIR / 'feature_importance.csv', index=False)
+            log.info("        feature_importance.csv 저장")
 
         results['xgb_har'] = {
             'model': modelA, 'scaler': scaler, 'features': available_feats,

@@ -8,8 +8,27 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.font_manager as fm
 from pathlib import Path
 from datetime import datetime
+
+# ── 한글 폰트 설정 (Windows 맑은 고딕 우선, 없으면 AppleGothic, NanumGothic)
+def _set_korean_font():
+    candidates = ['Malgun Gothic', 'AppleGothic', 'NanumGothic', 'NanumBarunGothic']
+    available  = {f.name for f in fm.fontManager.ttflist}
+    for name in candidates:
+        if name in available:
+            plt.rcParams['font.family'] = name
+            plt.rcParams['axes.unicode_minus'] = False
+            return
+    # 직접 경로 시도 (Windows)
+    path = Path('C:/Windows/Fonts/malgun.ttf')
+    if path.exists():
+        fm.fontManager.addfont(str(path))
+        plt.rcParams['font.family'] = 'Malgun Gothic'
+        plt.rcParams['axes.unicode_minus'] = False
+
+_set_korean_font()
 
 OUTPUT_DIR = Path("output")
 
@@ -20,6 +39,16 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── 자동 새로고침 (10분 주기, st_autorefresh 없을 시 meta refresh 폴백) ────────
+try:
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=10 * 60 * 1000, key="auto_refresh")
+except ImportError:
+    st.markdown(
+        '<meta http-equiv="refresh" content="600">',
+        unsafe_allow_html=True,
+    )
 
 # ── 스타일 ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -53,7 +82,7 @@ RISK_LABEL = {
 @st.cache_data(ttl=180)
 def load_all():
     out = {}
-    for name in ['model_performance', 'forecast_7days', 'latest_risk_signal', 'crisis_keywords', 'prediction_log']:
+    for name in ['model_performance', 'forecast_7days', 'latest_risk_signal', 'crisis_keywords', 'prediction_log', 'feature_importance']:
         p = OUTPUT_DIR / f'{name}.csv'
         if p.exists():
             out[name] = pd.read_csv(p)
@@ -323,6 +352,31 @@ with tab4:
             plt.close()
     else:
         st.info("파이프라인 실행 후 성능 데이터가 표시됩니다.")
+
+    # ── XGBoost 피처 중요도 차트
+    st.markdown("---")
+    _fi_path = OUTPUT_DIR / 'feature_importance.csv'
+    if _fi_path.exists():
+        fi = pd.read_csv(_fi_path).head(15)
+        fi = fi.sort_values('importance')
+
+        fig_fi, ax_fi = plt.subplots(figsize=(8, 4.5), facecolor='#161b22')
+        ax_fi.set_facecolor('#1c2433')
+        bars = ax_fi.barh(fi['feature'], fi['importance'], color='#58a6ff', alpha=0.85)
+        ax_fi.set_title('XGBoost 피처 중요도 (Top 15)', color='#e6edf3', fontsize=10)
+        ax_fi.tick_params(colors='#ccc', labelsize=8)
+        ax_fi.set_xlabel('Importance', color='#ccc', fontsize=8)
+        for sp in ax_fi.spines.values(): sp.set_color('#30363d')
+        ax_fi.grid(axis='x', color='#21262d', lw=0.5)
+        for bar in bars:
+            w = bar.get_width()
+            ax_fi.text(w + 0.001, bar.get_y() + bar.get_height()/2,
+                       f'{w:.3f}', va='center', color='#ccc', fontsize=7)
+        plt.tight_layout()
+        st.pyplot(fig_fi)
+        plt.close()
+    else:
+        st.info("파이프라인 실행 후 피처 중요도가 표시됩니다.")
 
     st.markdown("---")
     st.markdown("""
