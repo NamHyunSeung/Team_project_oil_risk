@@ -48,3 +48,11 @@ output/latest_risk_signal.csv
 output/crisis_keywords.csv
 output/guardian_news_cache.csv
 output/pipeline_run.log
+output/pipeline_run.log.bak
+
+# Streamlit 로그
+streamlit_err.txt
+streamlit_log.txt
+
+# Task Scheduler XML (민감 경로 포함 가능)
+task_schedule.xml

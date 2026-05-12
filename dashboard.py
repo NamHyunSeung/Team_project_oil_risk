@@ -171,9 +171,14 @@ with tab1:
     with col_table:
         st.subheader("📅 7일 예측")
         if 'forecast_7days' in data:
-            fc = data['forecast_7days']
+            fc = data['forecast_7days'].copy()
+            # 요일 추가
+            _DAY_KO = {0:'월',1:'화',2:'수',3:'목',4:'금',5:'토',6:'일'}
+            fc['날짜'] = pd.to_datetime(fc['date']).apply(
+                lambda d: f"{d.strftime('%m/%d')}({_DAY_KO[d.weekday()]})"
+            )
             display_cols = {
-                'date': '날짜',
+                '날짜': '날짜',
                 'forecast_price': '예측가($)',
                 'lower_95ci': '하단(95%)',
                 'upper_95ci': '상단(95%)',
@@ -495,6 +500,63 @@ with tab5:
                     'price_error_pct': '오차(%)'
                 })
                 st.dataframe(show_lv, hide_index=True, use_container_width=True)
+
+        # ── 예측 정확도 트렌드 차트 (backtest 30일 rolling MAPE)
+        st.markdown("---")
+        st.markdown("**📈 예측 정확도 트렌드 (Rolling 10일 MAPE)**")
+        bt_trend = bt.dropna(subset=['price_error_pct', 'date']).copy()
+        bt_trend['date'] = pd.to_datetime(bt_trend['date'])
+        bt_trend = bt_trend.sort_values('date').tail(60)
+
+        if len(bt_trend) >= 10:
+            bt_trend['abs_pct'] = bt_trend['price_error_pct'].abs()
+            bt_trend['rolling_mape'] = bt_trend['abs_pct'].rolling(10).mean()
+            bt_trend['rolling_mae']  = bt_trend['price_error'].abs().rolling(10).mean()
+
+            fig_t, axes_t = plt.subplots(1, 2, figsize=(10, 2.8), facecolor='#161b22')
+
+            for ax in axes_t:
+                ax.set_facecolor('#1c2433')
+                for sp in ax.spines.values(): sp.set_color('#30363d')
+                ax.tick_params(colors='#ccc', labelsize=7)
+                ax.grid(color='#21262d', lw=0.5)
+
+            # MAPE 트렌드
+            ax_m = axes_t[0]
+            ax_m.plot(bt_trend['date'], bt_trend['rolling_mape'],
+                      color='#3fb950', lw=1.5, label='10일 Rolling MAPE')
+            ax_m.axhline(bt_trend['abs_pct'].mean(), color='#f0c040',
+                         lw=0.9, ls='--', label=f"전체 평균 {bt_trend['abs_pct'].mean():.1f}%")
+            ax_m.set_title('MAPE 트렌드 (%)', color='#e6edf3', fontsize=9)
+            ax_m.set_ylabel('MAPE (%)', color='#ccc', fontsize=8)
+            ax_m.legend(fontsize=7, facecolor='#1c2433', labelcolor='white')
+
+            # MAE 트렌드
+            ax_e = axes_t[1]
+            ax_e.plot(bt_trend['date'], bt_trend['rolling_mae'],
+                      color='#58a6ff', lw=1.5, label='10일 Rolling MAE')
+            ax_e.axhline(bt_trend['price_error'].abs().mean(), color='#f0c040',
+                         lw=0.9, ls='--', label=f"전체 평균 ${bt_trend['price_error'].abs().mean():.2f}")
+            ax_e.set_title('MAE 트렌드 ($)', color='#e6edf3', fontsize=9)
+            ax_e.set_ylabel('MAE ($)', color='#ccc', fontsize=8)
+            ax_e.legend(fontsize=7, facecolor='#1c2433', labelcolor='white')
+
+            # live 확인 건 표시
+            if not live_confirmed.empty:
+                live_confirmed_plot = live_confirmed.copy()
+                live_confirmed_plot['date'] = pd.to_datetime(live_confirmed_plot['date'])
+                ax_m.scatter(live_confirmed_plot['date'],
+                             live_confirmed_plot['price_error_pct'].abs(),
+                             color='#f85149', s=40, zorder=5, label='Live 실측')
+                ax_e.scatter(live_confirmed_plot['date'],
+                             live_confirmed_plot['price_error'].abs(),
+                             color='#f85149', s=40, zorder=5, label='Live 실측')
+
+            plt.tight_layout()
+            st.pyplot(fig_t)
+            plt.close()
+        else:
+            st.info("트렌드 차트는 백테스트 10일 이상 데이터 필요")
 
         # 다운로드
         csv_bytes = pl.to_csv(index=False).encode('utf-8')

@@ -83,6 +83,14 @@ EIA_API_KEY      = os.getenv("EIA_API_KEY",      "")
 GPR_FILE         = "data_gpr_daily_recent.xls"   # 프로젝트 폴더에 위치
 DATA_YEARS       = 10                             # 학습 데이터 기간
 
+# ── 이메일 알림 설정 (.env 또는 환경변수)
+# Gmail 사용 시: Google 계정 → 보안 → 앱 비밀번호 생성 후 SMTP_PASSWORD에 입력
+SMTP_HOST     = os.getenv("SMTP_HOST",     "smtp.gmail.com")
+SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER     = os.getenv("SMTP_USER",     "")   # 발신 Gmail 주소
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")   # Gmail 앱 비밀번호 (16자리)
+ALERT_TO      = os.getenv("ALERT_TO",      "")   # 수신 이메일 주소
+
 # ── COVID 특수처리 기간
 COVID_START = '2020-03-11'   # WHO 팬데믹 선언일
 COVID_END   = '2021-06-30'   # 백신 보급 안정화 시점
@@ -1702,6 +1710,73 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
 # 8.  classify_risk()
 # ─────────────────────────────────────────────────────────────────────────────
 
+def send_risk_alert(risk_signal: dict, fc_df) -> bool:
+    """HIGH/CRITICAL 리스크 시 이메일 알림 발송. 설정 미비 시 조용히 스킵."""
+    if not SMTP_USER or not SMTP_PASSWORD or not ALERT_TO:
+        log.debug("이메일 알림 미설정 (SMTP_USER/SMTP_PASSWORD/ALERT_TO 환경변수 필요)")
+        return False
+
+    level = risk_signal.get('risk_level', '')
+    if level not in ('HIGH', 'CRITICAL'):
+        return False
+
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        r       = RISK_LEVELS[level]
+        wti     = risk_signal.get('wti_price', 0)
+        score   = risk_signal.get('risk_score', 0)
+        vol     = risk_signal.get('volatility_5d', 0) * 100
+        sent    = risk_signal.get('news_sentiment', 0)
+        geo     = '활성 ⚠' if risk_signal.get('geopolitical_alert') else '없음'
+        today   = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+        fc_lines = ""
+        if fc_df is not None and len(fc_df) > 0:
+            fc_lines = "\n".join(
+                f"  {row['date']}  ${row['forecast_price']:.2f}"
+                for _, row in fc_df.head(3).iterrows()
+            )
+
+        body = f"""
+[유가 리스크 시스템] {r['emoji']} {level} 경보 — {today}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━
+리스크 레벨  : {r['emoji']} {level} ({r['label']})
+리스크 점수  : {score:.4f}
+━━━━━━━━━━━━━━━━━━━━━━━━━
+WTI 현재가   : ${wti:.2f} / bbl
+5일 변동성   : {vol:.2f}%
+뉴스 감성    : {sent:+.4f}
+지정학 경보  : {geo}
+
+▶ 향후 3일 예측
+{fc_lines}
+━━━━━━━━━━━━━━━━━━━━━━━━━
+국제 유가 리스크 예측 시스템 MVP
+""".strip()
+
+        msg = MIMEMultipart()
+        msg['From']    = SMTP_USER
+        msg['To']      = ALERT_TO
+        msg['Subject'] = f"[유가 리스크] {r['emoji']} {level} 경보 — WTI ${wti:.2f}"
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
+
+        log.info(f"    📧 리스크 알림 이메일 발송 완료 → {ALERT_TO}")
+        return True
+
+    except Exception as exc:
+        log.warning(f"    이메일 발송 실패: {exc}")
+        return False
+
+
 def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
     """실시간 리스크 신호등: 정상 / 주의 / 급등위험 / 급락위험"""
     log.info("[6/9] 리스크 분류 중...")
@@ -2048,6 +2123,7 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     fc_df                = forecast_next_7days(model_results, feature_df, full_df)
     save_prediction_log(model_results, feature_df, fc_df, prev_fc_df, full_df)
     risk_signal          = classify_risk(feature_df, full_df)
+    send_risk_alert(risk_signal, fc_df)
     kw_df                = extract_crisis_keywords(news_df)
     generate_wordcloud(kw_df)
     plot_oil_forecast(feature_df, fc_df, risk_signal)
