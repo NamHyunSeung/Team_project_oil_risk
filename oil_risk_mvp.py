@@ -1245,6 +1245,13 @@ def train_models(feature_df: pd.DataFrame):
         log.info(f"        지수감쇠 가중치: 최신/최고참 비율={_time_w[-1]/_time_w[0]:.1f}x")
         modelA.fit(X_tr_s, y_rv_tr, sample_weight=combined_w)
 
+        # ── 홀드아웃 테스트셋 평가
+        pred_rv = modelA.predict(X_te_s)
+        rmse_ho = float(np.sqrt(mean_squared_error(y_rv_te, pred_rv)))
+        mae_ho  = float(mean_absolute_error(y_rv_te, pred_rv))
+        r2_ho   = float(r2_score(y_rv_te, pred_rv))
+        log.info(f"        Hold-out 60d → RMSE={rmse_ho:.5f}  MAE={mae_ho:.5f}  R²={r2_ho:.4f}")
+
         # ── 과적합 감지 (훈련 R² vs CV R² 비교)
         r2_train = float(r2_score(y_rv_tr, modelA.predict(X_tr_s)))
         overfit_gap = r2_train - r2_cv
