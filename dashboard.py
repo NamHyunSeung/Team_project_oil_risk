@@ -370,9 +370,47 @@ with tab3:
         if 'crisis_keywords' in data:
             kw = data['crisis_keywords'].head(25).copy()
             kw['분류'] = kw['is_crisis_word'].map({True: '🔴', False: '🔵'})
+            # 키워드 한글 변환 (oil_risk_mvp의 _KW_TRANSLATE 재사용)
+            _KW_KO = {
+                'oil':'원유','crude':'원유','brent':'브렌트','wti':'WTI','gas':'가스',
+                'energy':'에너지','fuel':'연료','fossil':'화석연료','pipeline':'파이프라인',
+                'coal':'석탄','nuclear':'원자력','lng':'LNG','shale':'셰일',
+                'opec':'OPEC','iea':'IEA','eia':'EIA',
+                'russia':'러시아','russian':'러시아','saudi':'사우디','iran':'이란',
+                'iraq':'이라크','china':'중국','ukraine':'우크라이나','israel':'이스라엘',
+                'usa':'미국','america':'미국','uae':'UAE','venezuela':'베네수엘라',
+                'nigeria':'나이지리아','kuwait':'쿠웨이트','libya':'리비아',
+                'australia':'호주','australian':'호주','britain':'영국','england':'영국',
+                'europe':'유럽','india':'인도','norway':'노르웨이','canada':'캐나다',
+                'war':'전쟁','sanctions':'제재','crisis':'위기','attack':'공격',
+                'conflict':'분쟁','ceasefire':'휴전','invasion':'침공',
+                'tension':'긴장','tensions':'긴장','military':'군사',
+                'supply':'공급','demand':'수요','production':'생산','output':'생산량',
+                'inventory':'재고','reserve':'매장량','market':'시장','markets':'시장',
+                'price':'가격','prices':'가격','cut':'감산','cuts':'감산',
+                'rise':'상승','fall':'하락','surge':'급등','slump':'급락',
+                'deal':'협상','trade':'무역','export':'수출','import':'수입',
+                'record':'기록','risk':'리스크','threat':'위협','fears':'우려',
+                'inflation':'인플레이션','recession':'경기침체','growth':'성장',
+                'economy':'경제','dollar':'달러','rate':'금리','bank':'은행',
+                'climate':'기후','renewable':'재생에너지','solar':'태양광',
+                'carbon':'탄소','emission':'탄소배출','emissions':'탄소배출',
+                'green':'친환경','warming':'온난화',
+                'trump':'트럼프','biden':'바이든','putin':'푸틴','zelensky':'젤렌스키',
+                'global':'세계','world':'세계','international':'국제',
+                'government':'정부','election':'선거','policy':'정책',
+                'industry':'산업','power':'전력','sea':'해상','north':'북쪽',
+                'labour':'노동당','tax':'세금','plan':'계획','change':'변화',
+                'hit':'타격','hits':'타격','warns':'경고','food':'식품',
+                'covid':'코로나19','pandemic':'팬데믹','brexit':'브렉시트',
+                'london':'런던','security':'안보','attack':'공격',
+            }
+            kw['키워드'] = kw['keyword'].apply(
+                lambda w: _KW_KO.get(w.lower(), w)
+            )
             st.dataframe(
-                kw[['분류', 'keyword', 'count', 'weight']].rename(columns={
-                    'keyword': '키워드', 'count': '빈도', 'weight': '가중치'
+                kw[['분류', '키워드', 'count', 'weight']].rename(columns={
+                    'count': '빈도', 'weight': '가중치'
                 }),
                 hide_index=True, use_container_width=True
             )

@@ -192,7 +192,9 @@ STOP_WORDS = {
     'live','update','updates','latest','breaking','watch','listen','read',
     'comment','opinion','analysis','explainer','guide','everything','shows',
     # 고유명사 노이즈 (인물명 등)
-    'rachel','roddy','keir',
+    'rachel','roddy','keir','starmer',
+    # 무의미 명사
+    'thing','things','stop','obituary','obituaries','life','lives',
     # 의미 없는 일반어
     'against','life','must','view','people','things','something','anything',
     'place','area','area','puts','set','sets','taking','being','doing',
@@ -2129,6 +2131,10 @@ _KW_TRANSLATE = {
     'opec+':'OPEC+', 'brexit':'브렉시트', 'covid':'코로나19',
     'pandemic':'팬데믹', 'recovery':'회복',
     'food':'식품', 'water':'수자원', 'war':'전쟁',
+    # 지역명 추가
+    'england':'영국', 'scotland':'스코틀랜드', 'wales':'웨일스',
+    # 산업/기타
+    'industry':'산업', 'industries':'산업', 'sector':'부문',
     # 추가 번역
     'government':'정부', 'governments':'정부',
     'election':'선거', 'elections':'선거',
