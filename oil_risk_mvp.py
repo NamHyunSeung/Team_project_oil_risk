@@ -191,6 +191,13 @@ STOP_WORDS = {
     'guardian','report','reports','reporting','interview','exclusive',
     'live','update','updates','latest','breaking','watch','listen','read',
     'comment','opinion','analysis','explainer','guide','everything','shows',
+    # 고유명사 노이즈 (인물명 등)
+    'rachel','roddy','keir',
+    # 의미 없는 일반어
+    'against','life','must','view','people','things','something','anything',
+    'place','area','area','puts','set','sets','taking','being','doing',
+    'goes','going','come','coming','getting','including','among','within',
+    'across','around','between','while','since','until','unless','although',
 }
 
 # 4번: 뉴스 중요도 가중치 — 핵심 산유국/기관 언급 기사에 1.5× 가중치
@@ -2122,6 +2129,21 @@ _KW_TRANSLATE = {
     'opec+':'OPEC+', 'brexit':'브렉시트', 'covid':'코로나19',
     'pandemic':'팬데믹', 'recovery':'회복',
     'food':'식품', 'water':'수자원', 'war':'전쟁',
+    # 추가 번역
+    'government':'정부', 'governments':'정부',
+    'election':'선거', 'elections':'선거',
+    'warns':'경고', 'warning':'경고', 'warnings':'경고', 'fears':'우려',
+    'labour':'노동당', 'labor':'노동', 'workers':'노동자',
+    'australian':'호주', 'australia':'호주',
+    'tax':'세금', 'taxes':'세금', 'taxation':'과세',
+    'hits':'타격', 'hit':'타격',
+    'sea':'해상', 'ocean':'해양', 'maritime':'해운',
+    'london':'런던', 'paris':'파리', 'berlin':'베를린', 'tokyo':'도쿄',
+    'washington':'워싱턴', 'moscow':'모스크바', 'riyadh':'리야드',
+    'north':'북한/북쪽', 'south':'남쪽', 'east':'동쪽', 'west':'서방',
+    'markets':'시장', 'economy':'경제', 'economies':'경제',
+    'risk':'리스크', 'risks':'리스크',
+    'emissions':'탄소배출', 'emission':'탄소배출',
 }
 
 
