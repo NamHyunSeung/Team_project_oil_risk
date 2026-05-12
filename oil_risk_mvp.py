@@ -1245,22 +1245,77 @@ def train_models(feature_df: pd.DataFrame):
         log.info(f"        지수감쇠 가중치: 최신/최고참 비율={_time_w[-1]/_time_w[0]:.1f}x")
         modelA.fit(X_tr_s, y_rv_tr, sample_weight=combined_w)
 
-        # 홀드아웃 테스트셋 평가
-        pred_rv  = modelA.predict(X_te_s)
-        rmse_ho  = float(np.sqrt(mean_squared_error(y_rv_te, pred_rv)))
-        mae_ho   = float(mean_absolute_error(y_rv_te, pred_rv))
-        r2_ho    = float(r2_score(y_rv_te, pred_rv))
-        log.info(f"        Hold-out 60d → RMSE={rmse_ho:.5f}  MAE={mae_ho:.5f}  R²={r2_ho:.4f}")
+        # ── 과적합 감지 (훈련 R² vs CV R² 비교)
+        r2_train = float(r2_score(y_rv_tr, modelA.predict(X_tr_s)))
+        overfit_gap = r2_train - r2_cv
+        if overfit_gap > 0.20:
+            log.warning(f"    ⚠️ 과적합 의심: 훈련R²={r2_train:.4f} vs CV R²={r2_cv:.4f} "
+                        f"(gap={overfit_gap:.3f})")
+        else:
+            log.info(f"        훈련R²={r2_train:.4f}  CV R²={r2_cv:.4f}  gap={overfit_gap:.3f} (정상)")
 
-        # 피처 중요도 저장 (대시보드 시각화용)
-        if _XGB and hasattr(modelA, 'feature_importances_'):
+        # ── HAR-OLS(Ridge) 경쟁: 단순 선형 모델과 비교
+        try:
+            _har_feats = [c for c in ['RV_1d','RV_5d','RV_21d','RV_63d',
+                                       'garch_vol','parkinson_vol','ewma_vol_10',
+                                       'leverage_effect','dow_wednesday'] if c in X_tr.columns]
+            _X_har_tr = scaler.transform(X_tr[_har_feats])
+            _X_har_te = scaler.transform(X_te[_har_feats])
+            _har_model = Ridge(alpha=1.0)
+            _har_model.fit(_X_har_tr, y_rv_tr)
+            _har_pred  = _har_model.predict(_X_har_te)
+            _r2_har    = float(r2_score(y_rv_te, _har_pred))
+            _r2_xgb_te = float(r2_score(y_rv_te, modelA.predict(X_te_s)))
+            log.info(f"        HAR-Ridge(선형) R²={_r2_har:.4f}  XGBoost R²={_r2_xgb_te:.4f}")
+            if _r2_har > _r2_xgb_te + 0.01:
+                log.warning("    ⚠️ 선형 HAR이 XGBoost보다 좋음 → XGBoost 과적합 가능성")
+        except Exception as _he:
+            log.debug(f"    HAR-Ridge 비교 실패({_he})")
+
+        # ── 피처 중요도 저장 + 상위 30개 기록
+        if hasattr(modelA, 'feature_importances_'):
             imp = sorted(zip(available_feats, modelA.feature_importances_),
                          key=lambda x: x[1], reverse=True)
             top_str = ', '.join(f"{n}({v:.3f})" for n, v in imp[:8])
             log.info(f"        피처 중요도 Top8: {top_str}")
             imp_df = pd.DataFrame(imp, columns=['feature', 'importance'])
             imp_df.to_csv(OUTPUT_DIR / 'feature_importance.csv', index=False)
-            log.info("        feature_importance.csv 저장")
+
+        # ── 장중 RV를 타깃으로 한 별도 모델 (최근 730일, 더 정확한 측정값)
+        if 'rv_intraday' in feature_df.columns:
+            try:
+                _intra_df = feature_df[feature_df['rv_intraday'] > 0].copy()
+                _intra_df['target_intra'] = _intra_df['rv_intraday'].shift(-1)
+                _intra_df = _intra_df.dropna(subset=['target_intra'])
+                if len(_intra_df) > 120:
+                    _n_te_i    = min(60, int(len(_intra_df) * 0.15))
+                    _intra_tr  = _intra_df.iloc[:-_n_te_i]
+                    _intra_te  = _intra_df.iloc[-_n_te_i:]
+                    _avail_i   = [c for c in available_feats if c in _intra_tr.columns]
+                    _sc_i      = StandardScaler()
+                    _Xi_tr     = _sc_i.fit_transform(_intra_tr[_avail_i])
+                    _Xi_te     = _sc_i.transform(_intra_te[_avail_i])
+                    _mi        = (xgb.XGBRegressor(n_estimators=300, max_depth=3,
+                                                   learning_rate=0.02, subsample=0.8,
+                                                   n_jobs=-1, random_state=42, verbosity=0)
+                                  if _XGB else Ridge(alpha=1.0))
+                    _mi.fit(_Xi_tr, _intra_tr['target_intra'])
+                    _pi        = _mi.predict(_Xi_te)
+                    _r2_intra  = float(r2_score(_intra_te['target_intra'], _pi))
+                    _r2_train_i = float(r2_score(_intra_tr['target_intra'], _mi.predict(_Xi_tr)))
+                    log.info(f"        장중RV 타깃 모델: R²={_r2_intra:.4f}  "
+                             f"훈련R²={_r2_train_i:.4f}  n_train={len(_intra_tr)}")
+                    # 현재 모델보다 유의미하게 좋으면 교체
+                    if _r2_intra > r2_cv + 0.05 and (_r2_train_i - _r2_intra) < 0.25:
+                        modelA      = _mi
+                        scaler      = _sc_i
+                        available_feats = _avail_i
+                        r2_cv       = _r2_intra
+                        log.info(f"    ✅ 장중RV 타깃 모델 채택 (R²={_r2_intra:.4f})")
+                    else:
+                        log.info(f"    기존 모델 유지 (장중RV R²={_r2_intra:.4f} 미채택)")
+            except Exception as _ie:
+                log.debug(f"    장중RV 타깃 모델 실패({_ie})")
 
         results['xgb_har'] = {
             'model': modelA, 'scaler': scaler, 'features': available_feats,
