@@ -1390,6 +1390,7 @@ def train_models(feature_df: pd.DataFrame):
             'type': 'vol_5d',
             'rmse': rmse_cv, 'mae': mae_cv, 'r2': r2_cv,
             'rmse_ho': rmse_ho, 'r2_ho': r2_ho,
+            'train_r2': r2_train, 'overfit_gap': overfit_gap,
             'name': 'XGBoost-HAR (WalkFwd)' if _XGB else 'GBM-HAR (WalkFwd)',
             'pred_rv_test':    pred_rv,
             'actual_rv_test':  y_rv_te.values,
@@ -1622,8 +1623,9 @@ def train_models(feature_df: pd.DataFrame):
     for v in results.values():
         row = {'model': v['name'], 'target': v['type'],
                'rmse': round(v['rmse'], 5), 'mae': round(v['mae'], 5), 'r2': round(v['r2'], 4)}
-        if 'dir_acc' in v:
-            row['dir_acc'] = round(v['dir_acc'], 4)
+        if 'dir_acc'     in v: row['dir_acc']     = round(v['dir_acc'], 4)
+        if 'train_r2'    in v: row['train_r2']    = round(v['train_r2'], 4)
+        if 'overfit_gap' in v: row['overfit_gap'] = round(v['overfit_gap'], 4)
         perf_rows.append(row)
     perf_df = pd.DataFrame(perf_rows)
     perf_df.to_csv(OUTPUT_DIR / 'model_performance.csv', index=False)

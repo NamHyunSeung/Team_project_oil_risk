@@ -430,6 +430,20 @@ with tab4:
             st.dataframe(pf, hide_index=True, use_container_width=True)
             st.caption("RMSE·MAE: 낮을수록 좋음  |  R²: 높을수록 좋음 (최대 1.0)")
 
+            # 과적합 상태 표시
+            if 'overfit_gap' in pf.columns and 'train_r2' in pf.columns:
+                _of = pf.dropna(subset=['overfit_gap'])
+                for _, _row in _of.iterrows():
+                    _gap = float(_row['overfit_gap'])
+                    _tr  = float(_row['train_r2'])
+                    _cv  = float(_row['r2'])
+                    if _gap > 0.20:
+                        st.warning(f"⚠️ **{_row['model']} 과적합 의심** — "
+                                   f"훈련 R²={_tr:.3f} vs CV R²={_cv:.3f} (gap={_gap:.3f})")
+                    else:
+                        st.success(f"✅ **{_row['model']} 과적합 정상** — "
+                                   f"훈련 R²={_tr:.3f} / CV R²={_cv:.3f} (gap={_gap:.3f})")
+
         with col_g:
             fig, axes = plt.subplots(1, 3, figsize=(8, 3.5), facecolor='#161b22')
             metrics = ['rmse', 'mae', 'r2']
