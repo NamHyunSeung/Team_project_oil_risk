@@ -1270,13 +1270,8 @@ def train_models(feature_df: pd.DataFrame):
         _ridge_fallback(results, X_tr_s, y_px_tr, X_te_s, y_px_te,
                         available_feats, scaler)
 
-    # 4번: Prophet 모델 학습 (SARIMAX와 동일한 5년 윈도우)
-    prophet_exog = [c for c in ['vix_change', 'news_sentiment_smooth', 'dxy_change']
-                    if c in feature_df.columns]
-    log.info("    [C] Prophet 학습 중...")
-    prophet_result = _train_prophet(sx_train, sx_test, prophet_exog)
-    if prophet_result:
-        results['prophet'] = prophet_result
+    # Prophet: WTI는 불연속 충격 기반이라 트렌드+계절성 모델 부적합 (R²=-4.3 확인)
+    # → 학습 생략, 2모델 앙상블(SARIMAX+XGBoost) 유지
 
     # ── 성능 저장
     perf_df = pd.DataFrame([
