@@ -39,5 +39,12 @@ Thumbs.db
 # Claude Code
 .claude/
 
-# Output (optional - remove if you want to track outputs)
-# output/
+# Output — 생성 산출물은 추적 제외, 누적 데이터만 유지
+output/*.png
+output/*.json
+output/forecast_7days.csv
+output/model_performance.csv
+output/latest_risk_signal.csv
+output/crisis_keywords.csv
+output/guardian_news_cache.csv
+output/pipeline_run.log
