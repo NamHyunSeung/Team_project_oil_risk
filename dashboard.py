@@ -201,20 +201,34 @@ with tab1:
         st.subheader("📅 7일 예측")
         if 'forecast_7days' in data:
             fc = data['forecast_7days'].copy()
-            # 요일 추가
             _DAY_KO = {0:'월',1:'화',2:'수',3:'목',4:'금',5:'토',6:'일'}
             fc['날짜'] = pd.to_datetime(fc['date']).apply(
                 lambda d: f"{d.strftime('%m/%d')}({_DAY_KO[d.weekday()]})"
             )
+
+            # 합의도 표시 (model_std 기반)
+            if 'model_std' in fc.columns:
+                def _consensus(std):
+                    if std < 2:   return '🟢 높음'
+                    if std < 5:   return '🟡 보통'
+                    return          '🔴 낮음'
+                fc['합의도'] = fc['model_std'].apply(_consensus)
+
             display_cols = {
                 '날짜': '날짜',
-                'forecast_price': '예측가($)',
-                'lower_95ci': '하단(95%)',
-                'upper_95ci': '상단(95%)',
-                'bias_correction': 'Bias보정($)',
+                'forecast_price': '앙상블($)',
+                'sarimax_forecast': 'SARIMAX($)',
+                'xgb_forecast': 'XGB($)',
+                'prophet_forecast': 'Prophet($)',
+                '합의도': '합의도',
+                'bias_correction': 'Bias($)',
             }
             show_fc = fc[[c for c in display_cols if c in fc.columns]].rename(columns=display_cols)
             st.dataframe(show_fc, hide_index=True, use_container_width=True)
+
+            # 합의도 낮으면 경고
+            if 'model_std' in fc.columns and float(fc['model_std'].iloc[0]) >= 5:
+                st.warning(f"⚠️ 모델 간 예측 편차 ${fc['model_std'].iloc[0]:.1f} — 불확실성 높음")
 
             csv_bytes = fc.to_csv(index=False).encode('utf-8')
             st.download_button(

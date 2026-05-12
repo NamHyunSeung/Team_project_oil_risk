@@ -1516,9 +1516,16 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         # Prophet 25% 고정, SARIMAX/XGBoost는 동적 가중치 75% 내 배분
         ensemble = (0.75 * (w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb'])
                     + 0.25 * forecasts['prophet'])
-        log.info(f"    3모델 앙상블: SARIMAX×{w_sarimax*0.75:.2f} Prophet×0.25 XGB×{w_xgb*0.75:.2f}")
+        log.info(f"    ✅ 3모델 앙상블 활성: SARIMAX×{w_sarimax*0.75:.2f} "
+                 f"Prophet×0.25 XGB×{w_xgb*0.75:.2f}")
+        log.info(f"       D+1 예측: SARIMAX={forecasts['sarimax'][0]:.2f} "
+                 f"Prophet={forecasts['prophet'][0]:.2f} XGB={forecasts['xgb'][0]:.2f} "
+                 f"→ 앙상블={ensemble[0]:.2f}")
     elif 'sarimax' in forecasts and 'xgb' in forecasts:
         ensemble = w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb']
+        log.info(f"    ⚠️ 2모델 앙상블 (Prophet 미채택): SARIMAX×{w_sarimax:.2f} XGB×{w_xgb:.2f}")
+        log.info(f"       D+1 예측: SARIMAX={forecasts['sarimax'][0]:.2f} "
+                 f"XGB={forecasts['xgb'][0]:.2f} → 앙상블={ensemble[0]:.2f}")
     elif 'sarimax' in forecasts:
         ensemble = forecasts['sarimax']
     elif 'xgb' in forecasts:
@@ -1548,6 +1555,14 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         fc_df['sarimax_forecast'] = np.round(forecasts['sarimax'], 2)
     if 'xgb' in forecasts:
         fc_df['xgb_forecast'] = np.round(forecasts['xgb'], 2)
+    if 'prophet' in forecasts:
+        fc_df['prophet_forecast'] = np.round(forecasts['prophet'], 2)
+
+    # 모델 합의도: 예측값들의 표준편차 (낮을수록 모델 간 일치)
+    pred_cols = [c for c in ['sarimax_forecast', 'xgb_forecast', 'prophet_forecast']
+                 if c in fc_df.columns]
+    if len(pred_cols) >= 2:
+        fc_df['model_std'] = fc_df[pred_cols].std(axis=1).round(2)
 
     fc_df.to_csv(OUTPUT_DIR / 'forecast_7days.csv', index=False)
     log.info("    forecast_7days.csv 저장")
