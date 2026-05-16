@@ -209,38 +209,6 @@ HIGH_IMPACT_ENTITIES = {
     'aramco', 'rosneft', 'kremlin', 'brics',
 }
 
-# 공급 측 키워드: 부정 감성 → 실제로 가격 상승 신호 (부호 반전 필요)
-SUPPLY_KEYWORDS = {
-    'opec', 'production', 'output', 'supply', 'cut', 'cuts', 'cutting',
-    'sanction', 'sanctions', 'embargo', 'disruption', 'pipeline',
-    'refinery', 'shutdown', 'blockade', 'seizure', 'tanker', 'hormuz',
-    'invasion', 'attack', 'strike', 'war', 'conflict', 'explosion',
-    'iran', 'russia', 'saudi', 'venezuela', 'libya', 'nigeria',
-    'quota', 'capacity', 'outage', 'offline', 'halt', 'curtail',
-}
-
-# 수요 측 키워드: 부정 감성 → 실제로 가격 하락 신호 (부호 유지)
-DEMAND_KEYWORDS = {
-    'demand', 'recession', 'slowdown', 'gdp', 'growth', 'consumption',
-    'industrial', 'manufacturing', 'china', 'india', 'economic',
-    'weakness', 'contraction', 'inventory', 'inventories', 'stockpile',
-    'surplus', 'glut', 'oversupply', 'build', 'bearish', 'downgrade',
-    'fed', 'rate', 'dollar', 'dxy', 'hawkish',
-}
-
-
-def _classify_news_type(text: str) -> str:
-    """뉴스 텍스트를 공급(supply)/수요(demand)/중립(neutral)으로 분류"""
-    t = text.lower()
-    tokens = set(t.split())
-    supply_hits = len(tokens & SUPPLY_KEYWORDS)
-    demand_hits = len(tokens & DEMAND_KEYWORDS)
-    if supply_hits > demand_hits:
-        return 'supply'
-    elif demand_hits > supply_hits:
-        return 'demand'
-    return 'neutral'
-
 # 소스별 신뢰도 가중치 (EIA 공식 > Reuters 금융 > 에너지 전문 > 일반)
 SOURCE_WEIGHTS = {
     'EIA':        2.0,
@@ -1052,7 +1020,6 @@ FEATURE_COLS = [
     'news_sentiment_lag2', 'news_count_lag2',
     'news_sentiment_smooth7', 'sentiment_magnitude',
     'extreme_neg_news', 'news_count_pos', 'news_count_neg',
-    'news_supply_count', 'news_demand_count',
     # 기술적 지표
     'price_vs_ma5', 'price_vs_ma21', 'bb_position',
     'return_lag1', 'return_lag2', 'RV_lag1',
@@ -1270,14 +1237,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         news_df = _apply_finbert(news_df)   # FinBERT 캐시 적용
         _rule_scores = news_df['title'].apply(score_sentiment).values
         # 하이브리드: FinBERT(맥락 이해) 60% + 유가 특화 규칙 40%
-        _raw_fb = news_df['finbert_score'].values
-        _hybrid = 0.6 * _raw_fb + 0.4 * _rule_scores
-
-        # ── 공급/수요 분리: 공급 충격 뉴스는 부호 반전 (부정→실제 가격 상승)
-        _news_type = news_df['title'].apply(_classify_news_type).values
-        _sign = np.where(_news_type == 'supply', -1.0, 1.0)
-        news_df['sentiment'] = _hybrid * _sign
-        news_df['news_type'] = _news_type
+        news_df['sentiment'] = 0.6 * news_df['finbert_score'].values + 0.4 * _rule_scores
 
         def _impact_w(row):
             src_w = SOURCE_WEIGHTS.get(str(row.get('source', 'RSS')), 1.0)
@@ -1288,37 +1248,30 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         news_df['w_sentiment'] = news_df['sentiment'] * news_df['impact_w']
         news_df['is_pos']      = (news_df['sentiment'] >  0.05).astype(float)
         news_df['is_neg']      = (news_df['sentiment'] < -0.05).astype(float)
-        news_df['is_supply']   = (news_df['news_type'] == 'supply').astype(float)
-        news_df['is_demand']   = (news_df['news_type'] == 'demand').astype(float)
 
         def _wavg_sent(g):
             return g['w_sentiment'].sum() / g['impact_w'].sum() if g['impact_w'].sum() > 0 else 0.0
 
         daily = news_df.groupby('date').apply(
             lambda g: pd.Series({
-                'news_count':        len(g),
-                'news_sentiment':    _wavg_sent(g),
-                'news_count_pos':    g['is_pos'].sum(),
-                'news_count_neg':    g['is_neg'].sum(),
-                'news_supply_count': g['is_supply'].sum(),
-                'news_demand_count': g['is_demand'].sum(),
+                'news_count':     len(g),
+                'news_sentiment': _wavg_sent(g),
+                'news_count_pos': g['is_pos'].sum(),
+                'news_count_neg': g['is_neg'].sum(),
             })
         )
         daily.index = pd.to_datetime(daily.index)
         df = df.join(daily, how='left')
-        df['news_count']        = df['news_count'].fillna(0)
-        df['news_count_pos']    = df['news_count_pos'].fillna(0)
-        df['news_count_neg']    = df['news_count_neg'].fillna(0)
-        df['news_supply_count'] = df['news_supply_count'].fillna(0)
-        df['news_demand_count'] = df['news_demand_count'].fillna(0)
-        df['news_sentiment']    = df['news_sentiment'].ffill().fillna(0)
+        df['news_count']     = df['news_count'].fillna(0)
+        df['news_count_pos'] = df['news_count_pos'].fillna(0)
+        df['news_count_neg'] = df['news_count_neg'].fillna(0)
+        # 뉴스 없는 날: 0(중립) 대신 전날 감성 유지 → 지속적 이벤트 반영
+        df['news_sentiment'] = df['news_sentiment'].ffill().fillna(0)
     else:
-        df['news_count']        = 0
-        df['news_count_pos']    = 0
-        df['news_count_neg']    = 0
-        df['news_supply_count'] = 0
-        df['news_demand_count'] = 0
-        df['news_sentiment']    = 0
+        df['news_count']     = 0
+        df['news_count_pos'] = 0
+        df['news_count_neg'] = 0
+        df['news_sentiment'] = 0
 
     # ── gpr_zscore 보정: 뉴스가 없는 날 GPR도 ffill로 유지됨 (이미 _attach_gpr에서 처리)
     if 'gpr_zscore' not in df.columns:
