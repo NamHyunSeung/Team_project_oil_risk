@@ -221,18 +221,45 @@ SENTIMENT_MAP = {
     'disruption':-2,'conflict':-2,'seizure':-2,'blockade':-2,
     # 중간 부정 (-1.5)
     'spike':-1.5,'plunge':-1.5,'slump':-1.5,'plummet':-1.5,
-    'halt':-1.5,'freeze':-1.5,'restrict':-1.5,
+    'halt':-1.5,'freeze':-1.5,'restrict':-1.5,'glut':-1.5,
     # 약한 부정 (-1)
     'surge':-1,'cut':-1,'fall':-1,'decline':-1,'risk':-1,
     'concern':-1,'fear':-1,'threat':-1,'tension':-1,'dispute':-1,
     'recession':-1,'downgrade':-1,'weak':-1,'bearish':-1,
     'tumble':-1,'slip':-1,'drop':-1,'loss':-1,'warning':-1,
+    'contango':-1,'oversupply':-1,'hawkish':-0.5,'tightening':-0.5,
+    'withdrawal':-1,'evacuation':-0.5,'slowdown':-1,'shrink':-1,
     # 약한 긍정 (+1)
     'recovery':1,'growth':1,'increase':1,'rise':1,'deal':1,
     'agreement':1,'stable':1,'ease':1,'lift':1,'resume':1,
     'open':1,'rally':1,'rebound':1,'strong':1,'bullish':1,
+    'draw':1,'deficit':1,'backwardation':1,'dovish':0.5,
+    'ceasefire':1.5,'truce':1.5,'compliance':1,
     # 강한 긍정 (+2)
     'boom':2,'peace':2,'resolution':2,'surplus':2,'record':1.5,
+}
+
+# 구문 패턴 (바이그램) — 단어 단독보다 맥락이 중요한 표현
+PHRASE_SENTIMENT = {
+    'production cut':-2,'output cut':-2,'supply cut':-2,'capacity cut':-1.5,
+    'deeper cut':-2,'extend cut':-1.5,'voluntary cut':-1.5,
+    'supply disruption':-2,'supply shortage':-2,'supply crunch':-2,
+    'demand destruction':-1.5,'demand weakness':-1.5,'demand slowdown':-1,
+    'refinery shutdown':-1.5,'pipeline attack':-2,'pipeline shutdown':-1.5,
+    'inventory draw':1.5,'stock draw':1.5,'crude draw':1.5,
+    'inventory build':-1,'stock build':-1,'crude build':-1,
+    'production increase':1.5,'output increase':1.5,'supply increase':1,
+    'production boost':1.5,'output boost':1.5,
+    'price cap':-1,'price ceiling':-1,'strategic release':-1,
+    'nuclear deal':1,'sanctions lifted':2,'sanctions eased':1.5,
+    'ceasefire deal':1.5,'peace deal':2,
+    'demand recovery':1.5,'demand growth':1.5,'demand surge':1.5,
+}
+
+# 강화어 (인접 단어의 감성 1.4× 증폭)
+INTENSIFIERS = {
+    'record','massive','unprecedented','sharp','dramatic','significant',
+    'major','severe','huge','deep','steep','rapidly','sharply','surging',
 }
 
 NEWS_RSS = [
@@ -788,24 +815,40 @@ def fetch_news(days_back: int = None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def score_sentiment(text: str) -> float:
-    """유가 특화 감성 점수 (-1 ~ +1); 부정어 반전 처리 + TextBlob 혼합"""
+    """유가 특화 감성 점수 (-1 ~ +1); 구문 패턴 + 강화어 + 부정어 반전 + TextBlob"""
     if not isinstance(text, str) or not text.strip():
         return 0.0
-    tokens = text.lower().split()
+    text_lower = text.lower()
+    tokens = text_lower.split()
     raw = 0.0
+
+    # 바이그램 구문 매칭 (단어 단독보다 높은 우선순위)
+    matched_idx = set()
+    for i in range(len(tokens) - 1):
+        bg = f"{tokens[i]} {tokens[i+1]}"
+        if bg in PHRASE_SENTIMENT:
+            raw += PHRASE_SENTIMENT[bg]
+            matched_idx |= {i, i + 1}
+
+    # 단어 매칭 (구문에 이미 포함된 토큰은 건너뜀)
     for i, w in enumerate(tokens):
+        if i in matched_idx:
+            continue
         base = SENTIMENT_MAP.get(w, 0)
         if base != 0:
-            # 앞 3단어 안에 부정어가 있으면 감성 부호 반전
-            context = tokens[max(0, i - 3):i]
+            context = tokens[max(0, i - 5):i]
             if any(neg in context for neg in NEGATION_WORDS):
                 base *= -1
+            if any(amp in context for amp in INTENSIFIERS):
+                base *= 1.4
         raw += base
+
     score = float(np.clip(raw / max(len(tokens) * 0.3, 1), -1, 1))
     if _TB:
         try:
             tb = TextBlob(text).sentiment.polarity
-            score = 0.55 * score + 0.45 * tb
+            # TextBlob 비중 축소: 일반 코퍼스 기반으로 유가 뉴스에 부정확
+            score = 0.75 * score + 0.25 * tb
         except Exception:
             pass
     return score
@@ -1397,12 +1440,27 @@ def train_models(feature_df: pd.DataFrame):
             'test_dates':      test_df.index,
         }
 
+        # Step 3: HAR 예측 변동성 → XGBoost-Return 피처로 추가 (vol→price 인과 활용)
+        try:
+            _hf_avail = [c for c in har_feats if c in feature_df.columns]
+            _hX_full  = scaler.transform(feature_df[_hf_avail])
+            feature_df['har_vol_pred'] = np.abs(modelA.predict(_hX_full))
+            if 'har_vol_pred' not in available_feats:
+                available_feats.append('har_vol_pred')
+            X_tr_all = feature_df.iloc[:-n_test][available_feats]
+            X_te_all = feature_df.iloc[-n_test:][available_feats]
+            log.info("    ✅ HAR vol 예측값 → XGB-Return 피처 추가 (har_vol_pred)")
+        except Exception as _he3:
+            log.debug(f"    HAR vol 피처 추가 실패({_he3})")
+
     # ─────────────────────────────────────────────────────────────────────
     # Model B: SARIMAX — 1-step ahead dynamic=False 평가 (정직한 R²)
     # ─────────────────────────────────────────────────────────────────────
-    # Exog 간소화: 통계적으로 유의하고 다중공선성 낮은 4개만 사용
-    exog_cols = [c for c in ['dxy_change', 'demand_shock', 'supply_shock', 'vix_change']
-                 if c in feature_df.columns]
+    # Exog: 거시(DXY/충격) + 원유 시장 구조(Brent스프레드/OVX/선물커브) + VIX
+    exog_cols = [c for c in [
+        'dxy_change', 'demand_shock', 'supply_shock', 'vix_change',
+        'brent_wti_spread', 'ovx_change', 'futures_spread',
+    ] if c in feature_df.columns]
     log.info("    [B] SARIMAX 학습 + 1-step ahead 평가 중...")
 
     if _SARIMAX and len(train_df) > 60:
@@ -1748,11 +1806,8 @@ def compute_ensemble_weights(window: int = 30):
         else:
             sarimax_mape = bt_mape
 
-        # MAPE 구간별 ±보정
-        if   sarimax_mape < 3.0:  mape_adj = +0.05
-        elif sarimax_mape < 5.0:  mape_adj =  0.00
-        elif sarimax_mape < 8.0:  mape_adj = -0.05
-        else:                     mape_adj = -0.10
+        # MAPE 선형 보정: 3%→+0.05, 8%→-0.10 사이 선형 보간
+        mape_adj = float(np.clip(np.interp(sarimax_mape, [3.0, 8.0], [0.05, -0.10]), -0.10, 0.05))
 
         w_s = float(np.clip(w_s_base + mape_adj, 0.30, 0.70))
         log.info(f"    최종 앙상블 가중치: SARIMAX={w_s:.2f} XGB={1-w_s:.2f} "
