@@ -155,14 +155,6 @@ RISK_LEVELS = {
     'DROP_RISK':  {'color': '#3498db', 'label': '급락위험',  'emoji': '🔵'},
 }
 
-# OPEC/OPEC+ 주요 회의 날짜 (전후 ±3 영업일 이벤트 창)
-OPEC_MEETING_DATES = pd.to_datetime([
-    '2022-06-02','2022-10-05','2022-12-04',
-    '2023-04-03','2023-06-04','2023-11-26',
-    '2024-02-01','2024-06-02','2024-11-03','2024-12-05',
-    '2025-02-03','2025-03-03','2025-05-05',
-]) if True else []   # True 유지 — 상수 초기화 보호
-
 CRISIS_SEED = {
     'war', 'conflict', 'sanction', 'opec', 'supply', 'cut', 'shortage',
     'embargo', 'attack', 'explosion', 'disruption', 'geopolitical',
@@ -946,7 +938,7 @@ FEATURE_COLS = [
     # HAR 장기 성분 + 레버리지 효과 + EIA 요일 효과
     'RV_63d', 'neg_return', 'return_neg', 'return_pos',
     'leverage_effect', 'dow_wednesday', 'dow_thursday', 'dow_monday',
-    'eia_vol_signal', 'opec_event',
+    'eia_vol_signal',
     # A: GARCH 조건부 분산
     'garch_vol',
     # B: Parkinson 장중 범위 추정
@@ -1096,13 +1088,6 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['dow_thursday']   = (_dow == 3).astype(float)
     df['dow_monday']     = (_dow == 0).astype(float)
     df['eia_vol_signal'] = df['dow_wednesday'] * df['inv_chg_zscore'].abs()
-
-    # ── OPEC 회의 이벤트 창 (±3 영업일): 회의 전후 불확실성/방향 변화 포착
-    df['opec_event'] = 0.0
-    for _md in OPEC_MEETING_DATES:
-        _lo = _md - pd.Timedelta(days=4)   # 영업일 기준 약 ±3일
-        _hi = _md + pd.Timedelta(days=4)
-        df.loc[(_lo <= df.index) & (df.index <= _hi), 'opec_event'] = 1.0
 
     # ── 이동평균 & 모멘텀
     for w in [5, 10, 21]:
@@ -1669,15 +1654,17 @@ def train_models(feature_df: pd.DataFrame):
     # → 학습 생략, 2모델 앙상블(SARIMAX+XGBoost) 유지
 
     # ─────────────────────────────────────────────────────────────────────
-    # Model D: XGBoost 수익률 예측 (log_return 타깃) + Optuna 하이퍼파라미터 최적화
+    # Model D: XGBoost 수익률 예측 (log_return 타깃)
+    # vol 시뮬레이션 대체 — 방향성+크기 직접 학습
     # ─────────────────────────────────────────────────────────────────────
     if _XGB and _SKL and scaler is not None:
         log.info("    [D] XGBoost 수익률 예측 학습 중...")
         try:
             ret_scaler = StandardScaler()
-            X_tr_ret   = ret_scaler.fit_transform(X_tr_all)
+            X_tr_ret   = ret_scaler.fit_transform(X_tr_all)   # 전체 피처 사용
             X_te_ret   = ret_scaler.transform(X_te_all)
 
+            # 지수감쇠 + COVID 가중치
             _n_ret  = len(y_ret_tr)
             _tw_ret = np.exp(np.log(2) / 252 * np.arange(_n_ret))
             _tw_ret /= _tw_ret.mean()
@@ -1685,67 +1672,22 @@ def train_models(feature_df: pd.DataFrame):
                            if 'covid_dummy' in train_df.columns else np.ones(_n_ret))
             w_ret = covid_w_ret * _tw_ret
 
-            # ── Optuna: 방향성 정확도 최적화 (30 trials, 3-fold TS-CV)
-            _best_params = dict(
+            modelD = xgb.XGBRegressor(
                 n_estimators=500, max_depth=3, learning_rate=0.015,
                 subsample=0.75, colsample_bytree=0.6,
                 min_child_weight=8, reg_alpha=0.3, reg_lambda=3.0,
+                n_jobs=-1, random_state=42, verbosity=0,
             )
-            try:
-                import optuna as _optuna
-                _optuna.logging.set_verbosity(_optuna.logging.WARNING)
-
-                _y_ret_arr = y_ret_tr.values
-                _tscv_opt  = TimeSeriesSplit(n_splits=3)
-
-                def _obj(trial):
-                    p = dict(
-                        n_estimators    = trial.suggest_int('n_estimators', 200, 800),
-                        max_depth       = trial.suggest_int('max_depth', 2, 5),
-                        learning_rate   = trial.suggest_float('lr', 0.005, 0.05, log=True),
-                        subsample       = trial.suggest_float('subsample', 0.55, 0.95),
-                        colsample_bytree= trial.suggest_float('colsample', 0.4, 0.85),
-                        min_child_weight= trial.suggest_int('min_child', 3, 25),
-                        reg_alpha       = trial.suggest_float('alpha', 0.05, 3.0, log=True),
-                        reg_lambda      = trial.suggest_float('lambda', 0.5, 8.0, log=True),
-                        n_jobs=-1, random_state=42, verbosity=0,
-                    )
-                    scores = []
-                    for _ti, _vi in _tscv_opt.split(X_tr_ret):
-                        _m = xgb.XGBRegressor(**p)
-                        _m.fit(X_tr_ret[_ti], _y_ret_arr[_ti], sample_weight=w_ret[_ti])
-                        _pred = _m.predict(X_tr_ret[_vi])
-                        scores.append((np.sign(_pred) == np.sign(_y_ret_arr[_vi])).mean())
-                    return float(np.mean(scores))
-
-                _study = _optuna.create_study(direction='maximize',
-                                              sampler=_optuna.samplers.TPESampler(seed=42))
-                _study.optimize(_obj, n_trials=40, show_progress_bar=False)
-                _bp = _study.best_params
-                _best_params = dict(
-                    n_estimators    = _bp['n_estimators'],
-                    max_depth       = _bp['max_depth'],
-                    learning_rate   = _bp['lr'],
-                    subsample       = _bp['subsample'],
-                    colsample_bytree= _bp['colsample'],
-                    min_child_weight= _bp['min_child'],
-                    reg_alpha       = _bp['alpha'],
-                    reg_lambda      = _bp['lambda'],
-                )
-                log.info(f"    ✅ Optuna 완료: best CV 방향성={_study.best_value*100:.1f}% "
-                         f"depth={_bp['max_depth']} lr={_bp['lr']:.4f}")
-            except Exception as _oe:
-                log.warning(f"    Optuna 실패({_oe}) → 기본 파라미터 사용")
-
-            modelD = xgb.XGBRegressor(**_best_params, n_jobs=-1, random_state=42, verbosity=0)
             modelD.fit(X_tr_ret, y_ret_tr, sample_weight=w_ret)
 
             pred_ret   = modelD.predict(X_te_ret)
+            # 수익률 → 가격 역변환 후 평가
             pred_px_d  = test_df['WTI'].values * np.exp(pred_ret)
             rmse_d     = float(np.sqrt(mean_squared_error(y_px_te, pred_px_d)))
             mae_d      = float(mean_absolute_error(y_px_te, pred_px_d))
             r2_d       = float(r2_score(y_px_te, pred_px_d))
 
+            # 방향성 정확도 (상승/하락 예측 일치율)
             actual_dir  = np.sign(y_ret_te.values)
             pred_dir    = np.sign(pred_ret)
             dir_acc     = float((actual_dir == pred_dir).mean())
