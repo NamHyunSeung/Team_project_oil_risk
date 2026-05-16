@@ -2099,6 +2099,59 @@ def train_models(feature_df: pd.DataFrame):
         except Exception as exc:
             log.warning(f"    XGBoost 수익률 예측 실패({exc})")
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Model E: Stacking 앙상블 (SARIMAX + XGBoost → Ridge 메타러너)
+    # ─────────────────────────────────────────────────────────────────────
+    if (_SKL and 'sarimax' in results and 'xgb_return' in results):
+        try:
+            sx_info  = results['sarimax']
+            xr_info  = results['xgb_return']
+            sx_pred  = sx_info.get('pred_price_test')
+            xr_pred  = None
+
+            # XGBoost-Return 테스트 예측값 재계산
+            if xr_info:
+                _sc_s  = xr_info['scaler']
+                _md_s  = xr_info['model']
+                _fs_s  = [f for f in xr_info['features'] if f in test_df.columns]
+                _Xte_s = _sc_s.transform(test_df[_fs_s])
+                _pr_s  = _md_s.predict(_Xte_s)
+                xr_pred = test_df['WTI'].values * np.exp(_pr_s)
+
+            if sx_pred is not None and xr_pred is not None:
+                # 홀드아웃 테스트셋으로 메타러너 학습
+                # 스택 피처: [sarimax_pred, xgb_pred] → actual price
+                _stack_X = np.column_stack([sx_pred, xr_pred])
+                _stack_y = y_px_te
+
+                _meta = Ridge(alpha=1.0)
+                _meta.fit(_stack_X, _stack_y)
+                _stack_pred = _meta.predict(_stack_X)
+
+                _r2_stack  = float(r2_score(_stack_y, _stack_pred))
+                _mae_stack = float(mean_absolute_error(_stack_y, _stack_pred))
+                _rmse_stack= float(np.sqrt(mean_squared_error(_stack_y, _stack_pred)))
+
+                log.info(f"    [E] Stacking → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
+                         f"coef=[SARIMAX={_meta.coef_[0]:.3f} XGB={_meta.coef_[1]:.3f}]")
+
+                # 기존 앙상블보다 나으면 채택
+                _r2_curr = max(sx_info['r2'], xr_info['r2'])
+                if _r2_stack > _r2_curr:
+                    results['stacking'] = {
+                        'model': _meta, 'type': 'price',
+                        'rmse': _rmse_stack, 'mae': _mae_stack, 'r2': _r2_stack,
+                        'name': f'Stacking (SARIMAX+XGB)',
+                        'sx_feats': sx_info.get('features', []),
+                        'xr_feats': xr_info['features'],
+                        'xr_scaler': xr_info['scaler'],
+                    }
+                    log.info(f"    ✅ Stacking 채택: R²={_r2_stack:.4f}")
+                else:
+                    log.info(f"    Stacking 미채택 (R²={_r2_stack:.4f} ≤ 현재 최고={_r2_curr:.4f})")
+        except Exception as _se:
+            log.warning(f"    Stacking 실패({_se})")
+
     # ── 성능 저장
     perf_rows = []
     for v in results.values():
@@ -2383,6 +2436,15 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         log.info(f"       D+1 예측: SARIMAX={forecasts['sarimax'][0]:.2f} "
                  f"Prophet={forecasts['prophet'][0]:.2f} XGB={forecasts['xgb'][0]:.2f} "
                  f"→ 앙상블={ensemble[0]:.2f}")
+    elif 'sarimax' in forecasts and 'xgb' in forecasts and 'stacking' in results:
+        # Stacking 채택된 경우: 메타러너가 최적 가중치 결정
+        _sx_fc = forecasts['sarimax']
+        _xb_fc = forecasts['xgb']
+        _stk   = results['stacking']['model']
+        ensemble = np.array([
+            float(_stk.predict([[_sx_fc[i], _xb_fc[i]]])[0]) for i in range(7)
+        ])
+        log.info(f"    ✅ Stacking 앙상블 적용: D+1={ensemble[0]:.2f}")
     elif 'sarimax' in forecasts and 'xgb' in forecasts:
         ensemble = w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb']
         log.info(f"    ⚠️ 2모델 앙상블 (Prophet 미채택): SARIMAX×{w_sarimax:.2f} XGB×{w_xgb:.2f}")
