@@ -1020,7 +1020,6 @@ FEATURE_COLS = [
     'news_sentiment_lag2', 'news_count_lag2',
     'news_sentiment_smooth7', 'sentiment_magnitude',
     'extreme_neg_news', 'news_count_pos', 'news_count_neg',
-    'finbert_daily',
     # 기술적 지표
     'price_vs_ma5', 'price_vs_ma21', 'bb_position',
     'return_lag1', 'return_lag2', 'RV_lag1',
@@ -1237,28 +1236,8 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     if not news_df.empty:
         news_df = _apply_finbert(news_df)   # FinBERT 캐시 적용
         _rule_scores = news_df['title'].apply(score_sentiment).values
-        news_df['rule_score'] = _rule_scores
-
-        # ── 동적 FinBERT 비중: 최근 252일 수익률 상관관계 기반 자동 조정
-        _w_fb = 0.60   # 기본값
-        if 'return_1d' in df.columns and len(df) > 120:
-            try:
-                _dly_fb   = news_df.groupby('date')['finbert_score'].mean()
-                _dly_rule = news_df.groupby('date')['rule_score'].mean()
-                _dly_fb.index   = pd.to_datetime(_dly_fb.index)
-                _dly_rule.index = pd.to_datetime(_dly_rule.index)
-                _tmp = pd.DataFrame({'fb': _dly_fb, 'rule': _dly_rule}).reindex(df.index).ffill().fillna(0)
-                _ret_next = df['return_1d'].shift(-1)
-                _w = min(252, len(df) - 10)
-                _c_fb   = abs(float(_tmp['fb'].tail(_w).corr(_ret_next.tail(_w)) or 0))
-                _c_rule = abs(float(_tmp['rule'].tail(_w).corr(_ret_next.tail(_w)) or 0))
-                _w_fb = float(np.clip(_c_fb / (_c_fb + _c_rule + 1e-8), 0.30, 0.80))
-                log.info(f"    동적 FinBERT 비중: {_w_fb:.2f} "
-                         f"(|corr_fb|={_c_fb:.3f} |corr_rule|={_c_rule:.3f})")
-            except Exception as _we:
-                log.debug(f"    동적 비중 계산 실패({_we}) → 기본값 0.60 사용")
-
-        news_df['sentiment'] = _w_fb * news_df['finbert_score'].values + (1 - _w_fb) * _rule_scores
+        # 하이브리드: FinBERT(맥락 이해) 60% + 유가 특화 규칙 40%
+        news_df['sentiment'] = 0.6 * news_df['finbert_score'].values + 0.4 * _rule_scores
 
         def _impact_w(row):
             src_w = SOURCE_WEIGHTS.get(str(row.get('source', 'RSS')), 1.0)
@@ -1273,16 +1252,12 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         def _wavg_sent(g):
             return g['w_sentiment'].sum() / g['impact_w'].sum() if g['impact_w'].sum() > 0 else 0.0
 
-        def _wavg_fb(g):
-            return (g['finbert_score'] * g['impact_w']).sum() / g['impact_w'].sum() if g['impact_w'].sum() > 0 else 0.0
-
         daily = news_df.groupby('date').apply(
             lambda g: pd.Series({
                 'news_count':     len(g),
                 'news_sentiment': _wavg_sent(g),
                 'news_count_pos': g['is_pos'].sum(),
                 'news_count_neg': g['is_neg'].sum(),
-                'finbert_daily':  _wavg_fb(g),
             })
         )
         daily.index = pd.to_datetime(daily.index)
@@ -1290,14 +1265,13 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df['news_count']     = df['news_count'].fillna(0)
         df['news_count_pos'] = df['news_count_pos'].fillna(0)
         df['news_count_neg'] = df['news_count_neg'].fillna(0)
+        # 뉴스 없는 날: 0(중립) 대신 전날 감성 유지 → 지속적 이벤트 반영
         df['news_sentiment'] = df['news_sentiment'].ffill().fillna(0)
-        df['finbert_daily']  = df['finbert_daily'].ffill().fillna(0)
     else:
         df['news_count']     = 0
         df['news_count_pos'] = 0
         df['news_count_neg'] = 0
         df['news_sentiment'] = 0
-        df['finbert_daily']  = 0
 
     # ── gpr_zscore 보정: 뉴스가 없는 날 GPR도 ffill로 유지됨 (이미 _attach_gpr에서 처리)
     if 'gpr_zscore' not in df.columns:
@@ -1614,11 +1588,10 @@ def train_models(feature_df: pd.DataFrame):
     # ─────────────────────────────────────────────────────────────────────
     # Model B: SARIMAX — 1-step ahead dynamic=False 평가 (정직한 R²)
     # ─────────────────────────────────────────────────────────────────────
-    # Exog: 거시(DXY/충격) + 원유 시장 구조(Brent스프레드/OVX/선물커브) + VIX + 감성
+    # Exog: 거시(DXY/충격) + 원유 시장 구조(Brent스프레드/OVX/선물커브) + VIX
     exog_cols = [c for c in [
         'dxy_change', 'demand_shock', 'supply_shock', 'vix_change',
         'brent_wti_spread', 'ovx_change', 'futures_spread',
-        'news_sentiment_smooth',
     ] if c in feature_df.columns]
     log.info("    [B] SARIMAX 학습 + 1-step ahead 평가 중...")
 
