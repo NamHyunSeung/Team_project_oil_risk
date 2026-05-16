@@ -209,6 +209,18 @@ HIGH_IMPACT_ENTITIES = {
     'aramco', 'rosneft', 'kremlin', 'brics',
 }
 
+# 소스별 신뢰도 가중치 (EIA 공식 > Reuters 금융 > 에너지 전문 > 일반)
+SOURCE_WEIGHTS = {
+    'EIA':        2.0,
+    'Reuters':    1.5,
+    'OilPrice':   1.3,
+    'Rigzone':    1.2,
+    'Guardian':   1.2,
+    'MarketWatch':1.1,
+    'RSS':        1.0,
+    'dummy':      0.3,
+}
+
 NEGATION_WORDS = {
     'not','no','never','without','halt','stop','end','cease',
     'avoid','prevent','block','reverse','reject','deny','fail',
@@ -768,7 +780,15 @@ def fetch_news(days_back: int = None):
     if len(new_articles) < 20 and _FEED:
         cutoff = datetime.today() - timedelta(days=60)
         OIL_FILTER = {'oil','crude','brent','wti','opec','energy','barrel','petroleum','pipeline'}
+        _RSS_DOMAIN_MAP = {
+            'reuters.com':    'Reuters',
+            'eia.gov':        'EIA',
+            'oilprice.com':   'OilPrice',
+            'rigzone.com':    'Rigzone',
+            'marketwatch.com':'MarketWatch',
+        }
         for url in NEWS_RSS:
+            src_name = next((v for k, v in _RSS_DOMAIN_MAP.items() if k in url), 'RSS')
             try:
                 feed = _feedparser_mod.parse(url)
                 for entry in feed.entries[:30]:
@@ -779,7 +799,7 @@ def fetch_news(days_back: int = None):
                     title = entry.get('title', '')
                     if pub >= cutoff and any(kw in title.lower() for kw in OIL_FILTER):
                         new_articles.append({'date': pub.strftime('%Y-%m-%d'),
-                                             'title': title, 'source': 'RSS'})
+                                             'title': title, 'source': src_name})
             except Exception:
                 pass
 
@@ -897,6 +917,8 @@ FEATURE_COLS = [
     'news_sentiment_smooth', 'news_count',
     'news_sentiment_lag1', 'news_count_lag1',
     'news_sentiment_lag2', 'news_count_lag2',
+    'news_sentiment_smooth7', 'sentiment_magnitude',
+    'extreme_neg_news', 'news_count_pos', 'news_count_neg',
     # 기술적 지표
     'price_vs_ma5', 'price_vs_ma21', 'bb_position',
     'return_lag1', 'return_lag2', 'RV_lag1',
@@ -1109,30 +1131,43 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         (df['WTI'].rolling(252).std() + 1e-8)
     ).fillna(0)   # 초기 252일 NaN → 0 (평균 수준으로 처리)
 
-    # ── 뉴스 집계 (4번: 핵심 기관/국가 언급 기사에 1.5× 중요도 가중치)
+    # ── 뉴스 집계: 소스 신뢰도 × 핵심 기관 언급 복합 가중치
     if not news_df.empty:
         news_df = news_df.copy()
         news_df['sentiment'] = news_df['title'].apply(score_sentiment)
-        news_df['impact_w']  = news_df['title'].apply(
-            lambda t: 1.5 if any(k in str(t).lower() for k in HIGH_IMPACT_ENTITIES) else 1.0
-        )
-        news_df['w_sentiment'] = news_df['sentiment'] * news_df['impact_w']
 
-        def _wavg_sentiment(g):
+        def _impact_w(row):
+            src_w = SOURCE_WEIGHTS.get(str(row.get('source', 'RSS')), 1.0)
+            ent_w = 1.5 if any(k in str(row['title']).lower() for k in HIGH_IMPACT_ENTITIES) else 1.0
+            return src_w * ent_w
+
+        news_df['impact_w']    = news_df.apply(_impact_w, axis=1)
+        news_df['w_sentiment'] = news_df['sentiment'] * news_df['impact_w']
+        news_df['is_pos']      = (news_df['sentiment'] >  0.05).astype(float)
+        news_df['is_neg']      = (news_df['sentiment'] < -0.05).astype(float)
+
+        def _wavg_sent(g):
             return g['w_sentiment'].sum() / g['impact_w'].sum() if g['impact_w'].sum() > 0 else 0.0
 
         daily = news_df.groupby('date').apply(
             lambda g: pd.Series({
-                'news_count':    len(g),
-                'news_sentiment': _wavg_sentiment(g),
+                'news_count':     len(g),
+                'news_sentiment': _wavg_sent(g),
+                'news_count_pos': g['is_pos'].sum(),
+                'news_count_neg': g['is_neg'].sum(),
             })
         )
         daily.index = pd.to_datetime(daily.index)
         df = df.join(daily, how='left')
         df['news_count']     = df['news_count'].fillna(0)
-        df['news_sentiment'] = df['news_sentiment'].fillna(0)
+        df['news_count_pos'] = df['news_count_pos'].fillna(0)
+        df['news_count_neg'] = df['news_count_neg'].fillna(0)
+        # 뉴스 없는 날: 0(중립) 대신 전날 감성 유지 → 지속적 이벤트 반영
+        df['news_sentiment'] = df['news_sentiment'].ffill().fillna(0)
     else:
         df['news_count']     = 0
+        df['news_count_pos'] = 0
+        df['news_count_neg'] = 0
         df['news_sentiment'] = 0
 
     # ── gpr_zscore 보정: 뉴스가 없는 날 GPR도 ffill로 유지됨 (이미 _attach_gpr에서 처리)
@@ -1141,8 +1176,14 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     if 'geo_dummy' not in df.columns:
         df['geo_dummy'] = 0.0
 
-    # 지수가중 평활 + 시차
-    df['news_sentiment_smooth'] = df['news_sentiment'].ewm(span=3, min_periods=1).mean()
+    # ── 뉴스 감성 파생 피처
+    df['news_sentiment_smooth']  = df['news_sentiment'].ewm(span=3, min_periods=1).mean()
+    df['news_sentiment_smooth7'] = df['news_sentiment'].ewm(span=7, min_periods=1).mean()
+    # 감성 강도: 절댓값 × log(뉴스수+1) — 큰 감성 + 많은 기사 = 강한 신호
+    df['sentiment_magnitude']    = df['news_sentiment'].abs() * np.log1p(df['news_count'])
+    # 극단 감성 더미 (EWM 평활 기준 ±0.35 초과)
+    df['extreme_neg_news'] = (df['news_sentiment_smooth'] < -0.35).astype(float)
+    df['extreme_pos_news'] = (df['news_sentiment_smooth'] >  0.35).astype(float)
     for lag in [1, 2]:
         df[f'news_sentiment_lag{lag}'] = df['news_sentiment'].shift(lag)
         df[f'news_count_lag{lag}']     = df['news_count'].shift(lag)
@@ -2287,13 +2328,21 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
     hist_vol_75 = float(feature_df['vol_5d'].quantile(0.75)) if 'vol_5d' in feature_df.columns else 0.022
 
     # 리스크 점수 계산
-    vol_ratio      = vol / (hist_vol_75 + 1e-8)
-    news_amp       = 1 + min(n_count / 8, 1.0)      # 뉴스 건수 증폭
-    geo_amp        = 1.35 if geo > 0.5 else 1.0     # 지정학 증폭
-    sentiment_amp  = 1 + max(-sentiment, 0) * 0.5   # 부정 감성 증폭
+    n_neg     = float(row.get('news_count_neg', 0.0))
+    n_pos     = float(row.get('news_count_pos', 0.0))
+    extreme_n = float(row.get('extreme_neg_news', 0.0))
+    sent_mag  = float(row.get('sentiment_magnitude', 0.0))
 
-    risk_score      = vol_ratio * news_amp * geo_amp * sentiment_amp
-    directional     = mom + sentiment * 0.4 + bb * 0.2
+    vol_ratio     = vol / (hist_vol_75 + 1e-8)
+    # 부정 기사 수 기반 증폭 (긍정 기사로 상쇄)
+    news_amp      = 1 + min((n_neg - n_pos * 0.5) / 8, 1.0)
+    news_amp      = max(news_amp, 1.0)
+    geo_amp       = 1.35 if geo > 0.5 else 1.0
+    # 부정 감성 증폭 + 극단 감성 시 추가 10%
+    sentiment_amp = 1 + max(-sentiment, 0) * 0.5 + extreme_n * 0.1
+
+    risk_score    = vol_ratio * news_amp * geo_amp * sentiment_amp
+    directional   = mom + sentiment * 0.4 + bb * 0.2
 
     # 분류 규칙
     if   risk_score >= 2.2 and directional >  0.025:  level = 'SURGE_RISK'
