@@ -58,3 +58,6 @@ streamlit_log.txt
 
 # Task Scheduler XML (민감 경로 포함 가능)
 task_schedule.xml
+
+# FinBERT fine-tuned 모델 (대용량, 로컬 생성)
+finbert_finetuned/
