@@ -50,7 +50,6 @@ from collections import Counter
 # ── Output directory ──────────────────────────────────────────────────────────
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
-FINBERT_FT_DIR = Path("finbert_finetuned")   # WTI 방향 예측 fine-tuned 모델
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
@@ -890,17 +889,14 @@ def _load_finbert():
         from transformers import pipeline as _hf_pipeline
         import torch as _torch
         _dev = 0 if _torch.cuda.is_available() else -1
-        # fine-tuned 모델 우선 (WTI 방향 직접 최적화)
-        _model_path = str(FINBERT_FT_DIR) if FINBERT_FT_DIR.exists() else 'ProsusAI/finbert'
         _FINBERT_PIPE = _hf_pipeline(
             'text-classification',
-            model=_model_path,
+            model='ProsusAI/finbert',
             device=_dev,
             top_k=None,
         )
         _FINBERT_READY = True
-        _src = 'fine-tuned✨' if FINBERT_FT_DIR.exists() else 'ProsusAI/finbert'
-        log.info(f"    ✅ FinBERT 로드 완료 ({'GPU' if _dev == 0 else 'CPU'}, {_src})")
+        log.info(f"    ✅ FinBERT 로드 완료 ({'GPU' if _dev == 0 else 'CPU'})")
     except Exception as _fe:
         _FINBERT_READY = False
         log.warning(f"    FinBERT 로드 실패({_fe}) → 규칙 기반 사용")
@@ -977,108 +973,6 @@ def _apply_finbert(news_df: pd.DataFrame) -> pd.DataFrame:
 
     news_df['finbert_score'] = pd.to_numeric(news_df['finbert_score'], errors='coerce').fillna(0.0)
     return news_df
-
-
-def _finetune_finbert(news_df: pd.DataFrame, wti_series: pd.Series) -> bool:
-    """
-    Guardian 뉴스 + WTI 익일 수익률 레이블로 FinBERT fine-tuning.
-    레이블: 수익률 > +0.5% → positive(1=bullish), < -0.5% → negative(0=bearish)
-    fine-tuned 모델 → FINBERT_FT_DIR 저장, 이후 _load_finbert()가 우선 로드.
-    """
-    try:
-        import torch
-        from transformers import AutoTokenizer, AutoModelForSequenceClassification
-        from torch.utils.data import Dataset, DataLoader
-        from torch.optim import AdamW
-
-        log.info("  [FinBERT Fine-tuning] 시작...")
-
-        # ── 레이블 생성 (익일 수익률 기준)
-        ret_next = wti_series.dropna().pct_change().shift(-1).dropna()
-        day_label = {}
-        for dt, r in ret_next.items():
-            if r > 0.005:   day_label[dt.date()] = 1   # bullish
-            elif r < -0.005: day_label[dt.date()] = 0  # bearish
-            # neutral(±0.5% 이내) 제외 → 명확한 신호만 학습
-
-        news_df = news_df.copy()
-        news_df['_date_key'] = pd.to_datetime(news_df['date']).dt.date
-        news_df['_label']    = news_df['_date_key'].map(day_label)
-        labeled = news_df.dropna(subset=['_label']).copy()
-        labeled['_label'] = labeled['_label'].astype(int)
-        labeled = labeled.sort_values('date').reset_index(drop=True)
-
-        n_bull = int(labeled['_label'].sum())
-        n_bear = len(labeled) - n_bull
-        log.info(f"  학습 데이터: {len(labeled)}건 (bullish={n_bull}, bearish={n_bear})")
-
-        if len(labeled) < 200:
-            log.warning("  레이블 데이터 부족 → fine-tuning 생략")
-            return False
-
-        # ── 시계열 분할: 80% 학습 / 20% 검증 (미래 데이터 누수 방지)
-        split    = int(len(labeled) * 0.8)
-        tr_texts = labeled['title'].iloc[:split].tolist()
-        tr_lbls  = labeled['_label'].iloc[:split].tolist()
-        va_texts = labeled['title'].iloc[split:].tolist()
-        va_lbls  = labeled['_label'].iloc[split:].tolist()
-
-        device    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        tokenizer = AutoTokenizer.from_pretrained('ProsusAI/finbert')
-        model     = AutoModelForSequenceClassification.from_pretrained(
-            'ProsusAI/finbert', num_labels=2, ignore_mismatched_sizes=True,
-        ).to(device)
-        # 레이블 이름 설정 → _finbert_batch()와 호환
-        model.config.id2label = {0: 'negative', 1: 'positive'}
-        model.config.label2id = {'negative': 0, 'positive': 1}
-
-        class _DS(Dataset):
-            def __init__(self, texts, labels, tok):
-                self.enc    = tok(texts, truncation=True, padding=True,
-                                  max_length=128, return_tensors='pt')
-                self.labels = torch.tensor(labels, dtype=torch.long)
-            def __len__(self): return len(self.labels)
-            def __getitem__(self, i):
-                return {k: v[i] for k, v in self.enc.items()}, self.labels[i]
-
-        tr_ld = DataLoader(_DS(tr_texts, tr_lbls, tokenizer), batch_size=32, shuffle=True)
-        va_ld = DataLoader(_DS(va_texts, va_lbls, tokenizer), batch_size=64, shuffle=False)
-
-        optimizer = AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)
-        best_acc  = 0.0
-
-        for epoch in range(3):
-            model.train()
-            for enc_b, lbl_b in tr_ld:
-                enc_b = {k: v.to(device) for k, v in enc_b.items()}
-                loss  = model(**enc_b, labels=lbl_b.to(device)).loss
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-
-            model.eval()
-            correct = total = 0
-            with torch.no_grad():
-                for enc_b, lbl_b in va_ld:
-                    enc_b = {k: v.to(device) for k, v in enc_b.items()}
-                    preds = model(**enc_b).logits.argmax(-1).cpu()
-                    correct += (preds == lbl_b).sum().item()
-                    total   += len(lbl_b)
-            acc = correct / max(total, 1)
-            log.info(f"    Epoch {epoch+1}/3  val_acc={acc:.3f}")
-
-            if acc > best_acc:
-                best_acc = acc
-                FINBERT_FT_DIR.mkdir(exist_ok=True)
-                model.save_pretrained(FINBERT_FT_DIR)
-                tokenizer.save_pretrained(FINBERT_FT_DIR)
-
-        log.info(f"  ✅ Fine-tuning 완료: best val_acc={best_acc:.3f} → {FINBERT_FT_DIR}")
-        return best_acc > 0.50   # 50% 이상일 때만 성공으로 인정
-
-    except Exception as _fte:
-        log.warning(f"  Fine-tuning 실패({_fte})")
-        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3044,25 +2938,6 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
 
     # EIA
     api_status['EIA'] = '✅ 정상' if EIA_API_KEY else '❌ 미설정'
-
-    # ── FinBERT Fine-tuning (최초 1회: FINBERT_FT_DIR 없을 때만 실행)
-    if not FINBERT_FT_DIR.exists():
-        log.info("[0/9] FinBERT fine-tuning 실행 (최초 1회)...")
-        _ft_ok = _finetune_finbert(news_df, price_df['WTI'].dropna())
-        if _ft_ok:
-            # 기존 캐시된 finbert_score 무효화 → fine-tuned 모델로 재계산
-            global _FINBERT_PIPE, _FINBERT_READY
-            _FINBERT_PIPE  = None
-            _FINBERT_READY = None
-            try:
-                _nc = pd.read_csv(NEWS_CACHE_FILE)
-                _nc['finbert_score'] = np.nan
-                _nc.to_csv(NEWS_CACHE_FILE, index=False)
-                log.info("    기존 FinBERT 캐시 무효화 → fine-tuned 모델로 재계산")
-            except Exception:
-                pass
-        else:
-            log.warning("  Fine-tuning 미채택 → 기존 ProsusAI/finbert 유지")
 
     feature_df, full_df  = build_features(price_df, news_df)
     model_results, _     = train_models(feature_df)
