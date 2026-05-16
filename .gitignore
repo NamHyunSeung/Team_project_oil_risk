@@ -58,3 +58,7 @@ streamlit_log.txt
 
 # Task Scheduler XML (민감 경로 포함 가능)
 task_schedule.xml
+
+# 대용량 캐시 (로컬 생성)
+output/news_embed_cache.pkl
+finbert_finetuned/

@@ -50,6 +50,9 @@ from collections import Counter
 # ── Output directory ──────────────────────────────────────────────────────────
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
+EMBED_CACHE_FILE = OUTPUT_DIR / 'news_embed_cache.pkl'
+EMBED_MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
+EMBED_TOP_K      = 15   # WTI 수익률 상관관계 상위 차원 수
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
@@ -976,6 +979,90 @@ def _apply_finbert(news_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 3c. Sentence Embedding (all-MiniLM-L6-v2) + WTI 상관관계 기반 피처 선택
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EMBED_MDL  = None
+_EMBED_TOK  = None
+_EMBED_REDY = None
+
+def _load_embed_model():
+    global _EMBED_MDL, _EMBED_TOK, _EMBED_REDY
+    if _EMBED_REDY is not None:
+        return _EMBED_MDL, _EMBED_TOK
+    try:
+        from transformers import AutoTokenizer, AutoModel
+        import torch as _t
+        _EMBED_TOK = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME)
+        _EMBED_MDL = AutoModel.from_pretrained(EMBED_MODEL_NAME)
+        _dev = _t.device('cuda' if _t.cuda.is_available() else 'cpu')
+        _EMBED_MDL = _EMBED_MDL.to(_dev).eval()
+        _EMBED_REDY = True
+        log.info(f"    ✅ Sentence Embedding 로드 ({_dev})")
+    except Exception as _ee:
+        _EMBED_REDY = False
+        log.warning(f"    Embedding 로드 실패({_ee})")
+    return _EMBED_MDL, _EMBED_TOK
+
+
+def _embed_texts(texts: list) -> 'np.ndarray':
+    """texts → (N, 384) 정규화 sentence embedding (mean pooling)"""
+    mdl, tok = _load_embed_model()
+    if mdl is None:
+        return np.zeros((len(texts), 384), dtype=np.float32)
+    import torch
+    dev = next(mdl.parameters()).device
+    parts = []
+    for i in range(0, len(texts), 64):
+        batch = [str(t)[:512] for t in texts[i:i+64]]
+        enc = tok(batch, padding=True, truncation=True, max_length=128, return_tensors='pt')
+        enc = {k: v.to(dev) for k, v in enc.items()}
+        with torch.no_grad():
+            out = mdl(**enc)
+            mask = enc['attention_mask'].unsqueeze(-1).float()
+            emb  = (out.last_hidden_state * mask).sum(1) / mask.clamp(min=1e-9).sum(1)
+            emb  = torch.nn.functional.normalize(emb, p=2, dim=1)
+        parts.append(emb.cpu().numpy())
+    return np.vstack(parts).astype(np.float32)
+
+
+def _apply_embeddings(news_df: pd.DataFrame) -> pd.DataFrame:
+    """뉴스 기사별 sentence embedding 추가 (캐시 활용)"""
+    import hashlib, pickle
+    news_df = news_df.copy()
+
+    # 캐시 로드
+    cache: dict = {}
+    if EMBED_CACHE_FILE.exists():
+        try:
+            with open(EMBED_CACHE_FILE, 'rb') as _f:
+                cache = pickle.load(_f)
+        except Exception:
+            cache = {}
+
+    def _h(t): return hashlib.md5(str(t).encode('utf-8', errors='ignore')).hexdigest()
+    news_df['_ehash'] = news_df['title'].apply(_h)
+
+    # 미처리 기사 임베딩
+    new_mask = ~news_df['_ehash'].isin(cache)
+    n_new    = int(new_mask.sum())
+    if n_new > 0:
+        log.info(f"    Sentence Embedding 신규: {n_new}건...")
+        new_embs = _embed_texts(news_df.loc[new_mask, 'title'].tolist())
+        for h, e in zip(news_df.loc[new_mask, '_ehash'], new_embs):
+            cache[h] = e
+        try:
+            with open(EMBED_CACHE_FILE, 'wb') as _f:
+                pickle.dump(cache, _f, protocol=4)
+        except Exception as _ce:
+            log.debug(f"    Embedding 캐시 저장 실패({_ce})")
+
+    _zero = np.zeros(384, dtype=np.float32)
+    news_df['_emb'] = news_df['_ehash'].apply(lambda h: cache.get(h, _zero))
+    return news_df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 4.  build_features()
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1273,6 +1360,44 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df['news_count_neg'] = 0
         df['news_sentiment'] = 0
 
+    # ── Sentence Embedding → WTI 상관관계 상위 피처
+    if not news_df.empty:
+        try:
+            _ne = _apply_embeddings(news_df)  # '_emb' 컬럼 추가
+            # 뉴스가 있는 날짜별 impact_w 가중 평균 임베딩 계산
+            _news_dates = pd.to_datetime(_ne['date']).dt.date
+            _emb_matrix = np.zeros((len(df), 384), dtype=np.float32)
+            for _d, _grp in _ne.groupby(_news_dates):
+                _ts = pd.Timestamp(_d)
+                if _ts in df.index:
+                    _idx = df.index.get_loc(_ts)
+                    _e   = np.stack(_grp['_emb'].values)          # (n, 384)
+                    _w   = _grp.get('impact_w', pd.Series(np.ones(len(_grp)))).values.reshape(-1, 1)
+                    _emb_matrix[_idx] = (_e * _w).sum(0) / _w.sum()
+            # 영업일 비뉴스 날: ffill
+            _prev = np.zeros(384, dtype=np.float32)
+            for _i in range(len(_emb_matrix)):
+                if _emb_matrix[_i].any():
+                    _prev = _emb_matrix[_i].copy()
+                else:
+                    _emb_matrix[_i] = _prev
+            # 수익률(return_1d 다음날)과의 상관관계로 top-K 차원 선택
+            if 'return_1d' in df.columns and len(df) > 200:
+                _ret_next = df['return_1d'].shift(-1).values
+                _valid    = ~np.isnan(_ret_next) & (_emb_matrix.sum(1) != 0)
+                _corrs = np.array([
+                    float(np.corrcoef(_emb_matrix[_valid, _d], _ret_next[_valid])[0, 1])
+                    if _emb_matrix[_valid, _d].std() > 1e-8 else 0.0
+                    for _d in range(384)
+                ])
+                _top_idx = np.argsort(np.abs(_corrs))[-EMBED_TOP_K:]
+                for _rank, _dim in enumerate(sorted(_top_idx)):
+                    df[f'emb_d{_rank}'] = _emb_matrix[:, _dim]
+                log.info(f"    Embedding top-{EMBED_TOP_K}: max|corr|={np.abs(_corrs).max():.4f} "
+                         f"mean|corr|={np.abs(_corrs[_top_idx]).mean():.4f}")
+        except Exception as _emb_e:
+            log.warning(f"    Embedding 피처 생성 실패({_emb_e})")
+
     # ── gpr_zscore 보정: 뉴스가 없는 날 GPR도 ffill로 유지됨 (이미 _attach_gpr에서 처리)
     if 'gpr_zscore' not in df.columns:
         df['gpr_zscore'] = 0.0
@@ -1379,6 +1504,8 @@ def train_models(feature_df: pd.DataFrame):
     log.info("[4/9] 모델 훈련 중...")
 
     available_feats = [c for c in FEATURE_COLS if c in feature_df.columns]
+    # sentence embedding 피처 자동 포함 (emb_d0 ~ emb_d{K-1})
+    available_feats += [c for c in feature_df.columns if c.startswith('emb_d') and c not in available_feats]
     # HAR 전용 피처: regime/뉴스/거시 제외로 과적합 방지
     har_feats = [c for c in HAR_FEATURE_COLS if c in feature_df.columns]
     log.info(f"    HAR 피처: {len(har_feats)}개 / 전체: {len(available_feats)}개")
