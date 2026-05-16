@@ -1481,18 +1481,6 @@ def train_models(feature_df: pd.DataFrame):
             'test_dates':      test_df.index,
         }
 
-        # Step 3: HAR 예측 변동성 → XGBoost-Return 피처로 추가 (vol→price 인과 활용)
-        try:
-            _hf_avail = [c for c in har_feats if c in feature_df.columns]
-            _hX_full  = scaler.transform(feature_df[_hf_avail])
-            feature_df['har_vol_pred'] = np.abs(modelA.predict(_hX_full))
-            if 'har_vol_pred' not in available_feats:
-                available_feats.append('har_vol_pred')
-            X_tr_all = feature_df.iloc[:-n_test][available_feats]
-            X_te_all = feature_df.iloc[-n_test:][available_feats]
-            log.info("    ✅ HAR vol 예측값 → XGB-Return 피처 추가 (har_vol_pred)")
-        except Exception as _he3:
-            log.debug(f"    HAR vol 피처 추가 실패({_he3})")
 
     # ─────────────────────────────────────────────────────────────────────
     # Model B: SARIMAX — 1-step ahead dynamic=False 평가 (정직한 R²)
