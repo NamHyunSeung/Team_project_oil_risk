@@ -82,7 +82,7 @@ GUARDIAN_API_KEY = os.getenv("GUARDIAN_API_KEY", "3a287cda-6e49-49f0-8998-309265
 EIA_API_KEY      = os.getenv("EIA_API_KEY",      "")
 GPR_FILE         = "data_gpr_daily_recent.xls"   # 프로젝트 폴더에 위치
 DATA_YEARS       = 10                             # 데이터 수집 기간 (XGBoost 학습용)
-SARIMAX_YEARS    = 5                              # SARIMAX 학습 기간 (최근 가격 패턴 집중)
+SARIMAX_YEARS    = 3                              # SARIMAX 학습 기간 (최근 3년 고유가 레짐 집중)
 
 # ── 이메일 알림 설정 (.env 또는 환경변수)
 # Gmail 사용 시: Google 계정 → 보안 → 앱 비밀번호 생성 후 SMTP_PASSWORD에 입력
@@ -2307,30 +2307,44 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
     row = feature_df.iloc[-1]
 
     vol       = float(row.get('vol_5d',               0.015))
-    mom       = float(row.get('mom_5d',               0.0))
+    mom_5     = float(row.get('mom_5d',               0.0))
+    mom_21    = float(row.get('mom_21d',              0.0))
     sentiment = float(row.get('news_sentiment_smooth', 0.0))
     n_count   = float(row.get('news_count',            0.0))
     bb        = float(row.get('bb_position',           0.0))
     geo       = float(row.get('geo_dummy',             0.0))
+    ovx_z     = float(row.get('ovx_zscore',            0.0))
+    ovx_chg   = float(row.get('ovx_change',            0.0))
+    price_z   = float(row.get('price_zscore',          0.0))
+    n_neg     = float(row.get('news_count_neg',        0.0))
+    n_pos     = float(row.get('news_count_pos',        0.0))
+    extreme_n = float(row.get('extreme_neg_news',      0.0))
 
     hist_vol_75 = float(feature_df['vol_5d'].quantile(0.75)) if 'vol_5d' in feature_df.columns else 0.022
 
-    # 리스크 점수 계산
-    n_neg     = float(row.get('news_count_neg', 0.0))
-    n_pos     = float(row.get('news_count_pos', 0.0))
-    extreme_n = float(row.get('extreme_neg_news', 0.0))
-    sent_mag  = float(row.get('sentiment_magnitude', 0.0))
-
+    # ── 리스크 점수
     vol_ratio     = vol / (hist_vol_75 + 1e-8)
-    # 부정 기사 수 기반 증폭 (긍정 기사로 상쇄)
-    news_amp      = 1 + min((n_neg - n_pos * 0.5) / 8, 1.0)
-    news_amp      = max(news_amp, 1.0)
+    news_amp      = max(1 + min((n_neg - n_pos * 0.5) / 8, 1.0), 1.0)
     geo_amp       = 1.35 if geo > 0.5 else 1.0
-    # 부정 감성 증폭 + 극단 감성 시 추가 10%
     sentiment_amp = 1 + max(-sentiment, 0) * 0.5 + extreme_n * 0.1
+    # OVX(원유 공포지수) z-score > 1σ 부터 리스크 점수 증폭
+    ovx_amp       = 1.0 + max(ovx_z - 1.0, 0) * 0.15
 
-    risk_score    = vol_ratio * news_amp * geo_amp * sentiment_amp
-    directional   = mom + sentiment * 0.4 + bb * 0.2
+    risk_score = vol_ratio * news_amp * geo_amp * sentiment_amp * ovx_amp
+
+    # ── 방향성 편향: 단기(5d) + 중기(21d) 모멘텀 합성
+    # OVX 상승 = 하락 공포 신호 (음수 방향), 가격 과열/과매도 조정
+    directional = (mom_5 * 0.5 + mom_21 * 0.3
+                   + sentiment * 0.3 + bb * 0.15
+                   - ovx_chg * 0.1)
+    # 단기·중기 모멘텀이 같은 방향이면 신호 강화 (합의 확인)
+    if mom_5 * mom_21 > 0:
+        directional *= 1.3
+    # 가격 과열(z>1.5) → 하락 편향 / 과매도(z<-1.5) → 상승 편향
+    if price_z > 1.5:
+        directional -= 0.01
+    elif price_z < -1.5:
+        directional += 0.01
 
     # 분류 규칙
     if   risk_score >= 2.2 and directional >  0.025:  level = 'SURGE_RISK'
@@ -2346,7 +2360,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
         'risk_label':        RISK_LEVELS[level]['label'],
         'wti_price':         round(current_wti, 2),
         'volatility_5d':     round(vol, 5),
-        'momentum_5d':       round(mom, 5),
+        'momentum_5d':       round(mom_5, 5),
         'news_sentiment':    round(sentiment, 4),
         'news_count':        int(n_count),
         'geopolitical_alert': bool(geo > 0.5),
