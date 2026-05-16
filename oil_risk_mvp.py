@@ -82,7 +82,7 @@ GUARDIAN_API_KEY = os.getenv("GUARDIAN_API_KEY", "3a287cda-6e49-49f0-8998-309265
 EIA_API_KEY      = os.getenv("EIA_API_KEY",      "")
 GPR_FILE         = "data_gpr_daily_recent.xls"   # 프로젝트 폴더에 위치
 DATA_YEARS       = 10                             # 데이터 수집 기간 (XGBoost 학습용)
-SARIMAX_YEARS    = 3                              # SARIMAX 학습 기간 (최근 3년 고유가 레짐 집중)
+SARIMAX_YEARS    = 5                              # SARIMAX 학습 기간 (최근 가격 패턴 집중)
 
 # ── 이메일 알림 설정 (.env 또는 환경변수)
 # Gmail 사용 시: Google 계정 → 보안 → 앱 비밀번호 생성 후 SMTP_PASSWORD에 입력
