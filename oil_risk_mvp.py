@@ -1761,46 +1761,83 @@ def train_models(feature_df: pd.DataFrame):
     # vol 시뮬레이션 대체 — 방향성+크기 직접 학습
     # ─────────────────────────────────────────────────────────────────────
     if _XGB and _SKL and scaler is not None:
-        log.info("    [D] XGBoost 수익률 예측 학습 중...")
+        log.info("    [D] XGBoost 수익률 예측 학습 중 (2-pass 피처 선택)...")
         try:
-            ret_scaler = StandardScaler()
-            X_tr_ret   = ret_scaler.fit_transform(X_tr_all)   # 전체 피처 사용
-            X_te_ret   = ret_scaler.transform(X_te_all)
+            _xgb_p = dict(n_estimators=500, max_depth=3, learning_rate=0.015,
+                          subsample=0.75, colsample_bytree=0.6,
+                          min_child_weight=8, reg_alpha=0.3, reg_lambda=3.0,
+                          n_jobs=-1, random_state=42, verbosity=0)
 
-            # 지수감쇠 + COVID 가중치
             _n_ret  = len(y_ret_tr)
-            _tw_ret = np.exp(np.log(2) / 252 * np.arange(_n_ret))
-            _tw_ret /= _tw_ret.mean()
+            _tw_ret = np.exp(np.log(2) / 252 * np.arange(_n_ret)) ; _tw_ret /= _tw_ret.mean()
             covid_w_ret = (np.where(train_df['covid_dummy'].values == 1, 0.35, 1.0)
                            if 'covid_dummy' in train_df.columns else np.ones(_n_ret))
             w_ret = covid_w_ret * _tw_ret
 
-            modelD = xgb.XGBRegressor(
-                n_estimators=500, max_depth=3, learning_rate=0.015,
-                subsample=0.75, colsample_bytree=0.6,
-                min_child_weight=8, reg_alpha=0.3, reg_lambda=3.0,
-                n_jobs=-1, random_state=42, verbosity=0,
+            # ── 1차: 전체 피처로 학습 → 중요도 추출
+            _sc_full = StandardScaler()
+            _Xtr_full = _sc_full.fit_transform(X_tr_all)
+            _Xte_full = _sc_full.transform(X_te_all)
+            _mD_full  = xgb.XGBRegressor(**_xgb_p)
+            _mD_full.fit(_Xtr_full, y_ret_tr, sample_weight=w_ret)
+
+            # XGBoost-Return 전용 피처 중요도 저장
+            _imp = _mD_full.feature_importances_
+            _imp_df = pd.DataFrame(
+                sorted(zip(available_feats, _imp), key=lambda x: x[1], reverse=True),
+                columns=['feature','importance']
             )
-            modelD.fit(X_tr_ret, y_ret_tr, sample_weight=w_ret)
+            _imp_df.to_csv(OUTPUT_DIR / 'xgb_return_importance.csv', index=False)
 
-            pred_ret   = modelD.predict(X_te_ret)
-            # 수익률 → 가격 역변환 후 평가
-            pred_px_d  = test_df['WTI'].values * np.exp(pred_ret)
-            rmse_d     = float(np.sqrt(mean_squared_error(y_px_te, pred_px_d)))
-            mae_d      = float(mean_absolute_error(y_px_te, pred_px_d))
-            r2_d       = float(r2_score(y_px_te, pred_px_d))
+            # 누적 중요도 90% 또는 상위 25개 이하로 피처 선택
+            _sorted_imp = sorted(zip(available_feats, _imp), key=lambda x: x[1], reverse=True)
+            _cum, _sel_feats = 0.0, []
+            for _fn, _fv in _sorted_imp:
+                _sel_feats.append(_fn)
+                _cum += _fv
+                if _cum >= 0.90 or len(_sel_feats) >= 25:
+                    break
+            _sel_feats = [f for f in _sel_feats if f in train_df.columns]
+            log.info(f"    피처 선택: {len(available_feats)}개 → {len(_sel_feats)}개 (누적 중요도 {_cum:.1%})")
 
-            # 방향성 정확도 (상승/하락 예측 일치율)
-            actual_dir  = np.sign(y_ret_te.values)
-            pred_dir    = np.sign(pred_ret)
-            dir_acc     = float((actual_dir == pred_dir).mean())
+            # ── 2차: 선택 피처로 재학습
+            _sc_sel = StandardScaler()
+            _Xtr_sel = _sc_sel.fit_transform(train_df[_sel_feats])
+            _Xte_sel = _sc_sel.transform(test_df[_sel_feats])
+            _mD_sel  = xgb.XGBRegressor(**_xgb_p)
+            _mD_sel.fit(_Xtr_sel, y_ret_tr, sample_weight=w_ret)
 
-            log.info(f"        XGB-Return → RMSE={rmse_d:.4f}  MAE={mae_d:.4f}  "
-                     f"R²={r2_d:.4f}  방향성={dir_acc*100:.1f}%")
+            # ── 두 모델 평가
+            def _eval(model, Xte, label):
+                _pr = model.predict(Xte)
+                _px = test_df['WTI'].values * np.exp(_pr)
+                _r2 = float(r2_score(y_px_te, _px))
+                _mae = float(mean_absolute_error(y_px_te, _px))
+                _dir = float((np.sign(_pr) == np.sign(y_ret_te.values)).mean())
+                log.info(f"        [{label}] R²={_r2:.4f} MAE={_mae:.4f} dir={_dir*100:.1f}%")
+                return _pr, _px, _r2, _mae, _dir
 
+            _pr_f, _px_f, _r2_f, _mae_f, _dir_f = _eval(_mD_full, _Xte_full, '전체피처')
+            _pr_s, _px_s, _r2_s, _mae_s, _dir_s = _eval(_mD_sel,  _Xte_sel,  '선택피처')
+
+            # MAE 기준으로 더 나은 모델 채택
+            if _mae_s <= _mae_f:
+                modelD, ret_scaler = _mD_sel, _sc_sel
+                pred_ret, pred_px_d = _pr_s, _px_s
+                r2_d, mae_d, dir_acc = _r2_s, _mae_s, _dir_s
+                _use_feats = _sel_feats
+                log.info(f"    ✅ 선택 피처 모델 채택 ({len(_sel_feats)}개)")
+            else:
+                modelD, ret_scaler = _mD_full, _sc_full
+                pred_ret, pred_px_d = _pr_f, _px_f
+                r2_d, mae_d, dir_acc = _r2_f, _mae_f, _dir_f
+                _use_feats = available_feats
+                log.info(f"    전체 피처 모델 유지")
+
+            rmse_d = float(np.sqrt(mean_squared_error(y_px_te, pred_px_d)))
             results['xgb_return'] = {
                 'model': modelD, 'scaler': ret_scaler,
-                'features': available_feats, 'type': 'price',
+                'features': _use_feats, 'type': 'price',
                 'rmse': rmse_d, 'mae': mae_d, 'r2': r2_d,
                 'dir_acc': dir_acc,
                 'name': f'XGBoost-Return (방향성={dir_acc*100:.1f}%)',
