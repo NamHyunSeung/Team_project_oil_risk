@@ -875,6 +875,107 @@ def score_sentiment(text: str) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 3b. FinBERT 금융 감성 모델 (ProsusAI/finbert)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FINBERT_PIPE  = None
+_FINBERT_READY = None   # None=미확인, True=OK, False=실패
+
+def _load_finbert():
+    global _FINBERT_PIPE, _FINBERT_READY
+    if _FINBERT_READY is not None:
+        return _FINBERT_PIPE
+    try:
+        from transformers import pipeline as _hf_pipeline
+        import torch as _torch
+        _dev = 0 if _torch.cuda.is_available() else -1
+        _FINBERT_PIPE = _hf_pipeline(
+            'text-classification',
+            model='ProsusAI/finbert',
+            device=_dev,
+            top_k=None,
+        )
+        _FINBERT_READY = True
+        log.info(f"    ✅ FinBERT 로드 완료 ({'GPU' if _dev == 0 else 'CPU'})")
+    except Exception as _fe:
+        _FINBERT_READY = False
+        log.warning(f"    FinBERT 로드 실패({_fe}) → 규칙 기반 사용")
+    return _FINBERT_PIPE
+
+
+def _finbert_batch(texts: list) -> list:
+    """FinBERT 배치 추론 → positive-negative 점수 (-1~+1) 리스트"""
+    pipe = _load_finbert()
+    if pipe is None:
+        return [0.0] * len(texts)
+    try:
+        results = pipe(
+            [t[:512] for t in texts],
+            batch_size=32,
+            truncation=True,
+            max_length=512,
+        )
+        out = []
+        for res in results:
+            pos = next((r['score'] for r in res if r['label'] == 'positive'), 0.0)
+            neg = next((r['score'] for r in res if r['label'] == 'negative'), 0.0)
+            out.append(float(pos - neg))
+        return out
+    except Exception as _e:
+        log.warning(f"    FinBERT 추론 실패({_e})")
+        return [0.0] * len(texts)
+
+
+def _apply_finbert(news_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    news_df에 finbert_score 컬럼 추가.
+    guardian_news_cache.csv에 점수를 캐시하여 재계산 생략.
+    """
+    news_df = news_df.copy()
+
+    # ── 캐시에서 기존 점수 로드
+    cached = {}
+    if NEWS_CACHE_FILE.exists():
+        try:
+            _c = pd.read_csv(NEWS_CACHE_FILE)
+            if 'finbert_score' in _c.columns:
+                cached = dict(zip(
+                    _c['title'].astype(str),
+                    pd.to_numeric(_c['finbert_score'], errors='coerce'),
+                ))
+        except Exception:
+            pass
+
+    news_df['finbert_score'] = news_df['title'].astype(str).map(cached)
+
+    # ── 미처리 기사만 FinBERT 실행
+    mask = news_df['finbert_score'].isna()
+    n_new = int(mask.sum())
+    if n_new > 0:
+        log.info(f"    FinBERT 신규 처리: {n_new}건...")
+        new_scores = _finbert_batch(news_df.loc[mask, 'title'].tolist())
+        news_df.loc[mask, 'finbert_score'] = new_scores
+
+        # ── 캐시 업데이트
+        try:
+            _c = pd.read_csv(NEWS_CACHE_FILE) if NEWS_CACHE_FILE.exists() else news_df[['date','title','source']].copy()
+            if 'finbert_score' not in _c.columns:
+                _c['finbert_score'] = np.nan
+            _upd = dict(zip(
+                news_df.loc[mask, 'title'].astype(str),
+                news_df.loc[mask, 'finbert_score'],
+            ))
+            _idx = _c['title'].astype(str).isin(_upd)
+            _c.loc[_idx, 'finbert_score'] = _c.loc[_idx, 'title'].astype(str).map(_upd)
+            _c.to_csv(NEWS_CACHE_FILE, index=False)
+        except Exception as _ce:
+            log.debug(f"    FinBERT 캐시 저장 실패({_ce})")
+
+    news_df['finbert_score'] = pd.to_numeric(news_df['finbert_score'], errors='coerce').fillna(0.0)
+    return news_df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 4.  build_features()
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1133,8 +1234,10 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
 
     # ── 뉴스 집계: 소스 신뢰도 × 핵심 기관 언급 복합 가중치
     if not news_df.empty:
-        news_df = news_df.copy()
-        news_df['sentiment'] = news_df['title'].apply(score_sentiment)
+        news_df = _apply_finbert(news_df)   # FinBERT 캐시 적용
+        _rule_scores = news_df['title'].apply(score_sentiment).values
+        # 하이브리드: FinBERT(맥락 이해) 60% + 유가 특화 규칙 40%
+        news_df['sentiment'] = 0.6 * news_df['finbert_score'].values + 0.4 * _rule_scores
 
         def _impact_w(row):
             src_w = SOURCE_WEIGHTS.get(str(row.get('source', 'RSS')), 1.0)
