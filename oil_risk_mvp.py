@@ -509,70 +509,6 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
     # ── 지정학 더미: GPR Index (Caldara & Iacoviello) ─────────────────────
     df = _attach_gpr(df)
 
-    # ── CFTC COT: Managed Money WTI 포지셔닝 (역발상 선행 지표) ────────────
-    try:
-        import urllib.request as _ur, io as _io, zipfile as _zf, csv as _csv
-        _cot_headers = {'User-Agent': 'Mozilla/5.0 (compatible)'}
-        _cot_rows = []
-        _start_yr = int(start_date[:4]) if start_date else 2015
-        for _yr in range(_start_yr, datetime.today().year + 1):
-            for _pf in ['com_disagg_txt', 'fut_disagg_txt']:
-                _url = f'https://www.cftc.gov/files/dea/history/{_pf}_{_yr}.zip'
-                try:
-                    _req = _ur.Request(_url, headers=_cot_headers)
-                    with _ur.urlopen(_req, timeout=15) as _r:
-                        _z = _zf.ZipFile(_io.BytesIO(_r.read()))
-                        _lines = _z.read(_z.namelist()[0]).decode('utf-8', errors='ignore').splitlines()
-                        for _row in _csv.DictReader(_lines):
-                            _nm = _row.get('Market_and_Exchange_Names', '')
-                            if ('CRUDE OIL' in _nm.upper() and 'LIGHT SWEET' in _nm.upper()
-                                    and 'WTI' in _nm.upper()):
-                                _cot_rows.append(_row)
-                except Exception:
-                    pass
-
-        if _cot_rows:
-            _cot_data = []
-            for _row in _cot_rows:
-                _ds = str(_row.get('As_of_Date_In_Form_YYMMDD', ''))
-                if len(_ds) == 6:
-                    _dt = pd.Timestamp(f'20{_ds[:2]}-{_ds[2:4]}-{_ds[4:6]}')
-                    _ml = int(_row.get('M_Money_Positions_Long_All',  0) or 0)
-                    _ms = int(_row.get('M_Money_Positions_Short_All', 0) or 0)
-                    _cot_data.append({'date': _dt, 'mm_net': _ml - _ms,
-                                      'mm_long': _ml, 'mm_short': _ms})
-
-            _cot_df = (pd.DataFrame(_cot_data)
-                       .drop_duplicates('date').set_index('date')
-                       .sort_index())
-
-            # 주간 → 영업일 ffill
-            _cot_bday = _cot_df.resample('B').first().ffill()
-
-            # z-score (52주 롤링) + 주간 변화
-            _w52 = 52 * 5   # 52주 × 5 영업일
-            _mu  = _cot_bday['mm_net'].rolling(_w52).mean()
-            _sg  = _cot_bday['mm_net'].rolling(_w52).std() + 1
-            df['cot_mm_net_z']    = (_cot_bday['mm_net'] - _mu) / _sg
-            df['cot_mm_net_z']    = df['cot_mm_net_z'].reindex(df.index).ffill().bfill().fillna(0)
-            df['cot_mm_chg']      = _cot_bday['mm_net'].diff(5)   # 주간 변화
-            df['cot_mm_chg']      = df['cot_mm_chg'].reindex(df.index).ffill().bfill().fillna(0)
-            # 롱/숏 비율 (포지셔닝 편중도)
-            _ls_ratio = (_cot_bday['mm_long'] / (_cot_bday['mm_short'] + 1)).clip(0, 10)
-            df['cot_ls_ratio']    = _ls_ratio.reindex(df.index).ffill().bfill().fillna(1)
-            log.info(f"    CFTC COT WTI: {len(_cot_df)}주치 "
-                     f"(최근 MM net z-score={df['cot_mm_net_z'].iloc[-1]:.2f})")
-        else:
-            df['cot_mm_net_z'] = 0.0
-            df['cot_mm_chg']   = 0.0
-            df['cot_ls_ratio'] = 1.0
-            log.warning("    CFTC COT 데이터 없음 → 0 사용")
-    except Exception as _ce:
-        df['cot_mm_net_z'] = 0.0
-        df['cot_mm_chg']   = 0.0
-        df['cot_ls_ratio'] = 1.0
-        log.warning(f"    CFTC COT 수집 실패({_ce}) → 0 사용")
-
     log.info("    FRED 실제 데이터 연결 완료 ✓")
     return df
 
@@ -1300,8 +1236,6 @@ FEATURE_COLS = [
     'futures_spread', 'futures_spread_chg', 'contango_dummy',
     # EIA 미국 원유 재고 (실물 수급 지표)
     'inv_chg_zscore', 'inv_lvl_zscore',
-    # CFTC COT — Managed Money WTI 포지셔닝 (역발상 선행 지표)
-    'cot_mm_net_z', 'cot_mm_chg', 'cot_ls_ratio',
     # HAR 장기 성분 + 레버리지 효과 + EIA 요일 효과
     'RV_63d', 'neg_return', 'return_neg', 'return_pos',
     'leverage_effect', 'dow_wednesday', 'dow_thursday', 'dow_monday',
