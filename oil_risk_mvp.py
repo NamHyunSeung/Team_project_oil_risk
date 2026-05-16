@@ -980,7 +980,86 @@ def _apply_finbert(news_df: pd.DataFrame) -> pd.DataFrame:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3c. Sentence Embedding (all-MiniLM-L6-v2) + WTI 상관관계 기반 피처 선택
+#     + Oil Event 라이브러리 기반 유가 방향 스코어
 # ─────────────────────────────────────────────────────────────────────────────
+
+# WTI 가격 방향이 알려진 캐노니컬 이벤트 라이브러리
+# 양수 = WTI 상승, 음수 = WTI 하락 (경제 감성과 무관, 유가 방향 직접 매핑)
+OIL_EVENT_LIBRARY = {
+    # ── 공급 감소 → WTI 상승
+    "OPEC production cut agreement extended deeper barrels per day":        +0.90,
+    "OPEC surprise voluntary output cut announced":                         +0.85,
+    "Saudi Arabia announces unilateral production cut":                     +0.80,
+    "Russia restricts oil export volumes crude shipments":                  +0.75,
+    "Iran nuclear deal collapsed sanctions tightened":                      +0.75,
+    "US Iran sanctions intensify oil supply restricted":                    +0.70,
+    "pipeline attack disruption shutdown oil supply":                       +0.80,
+    "refinery fire explosion shutdown production offline":                  +0.70,
+    "Libya oil field shutdown civil conflict":                              +0.65,
+    "Nigeria oil production disrupted militant attack":                     +0.65,
+    "Iraq oil exports suspended Kurdistan dispute":                         +0.60,
+    "hurricane threatens Gulf Mexico oil platform":                         +0.65,
+    "Houthi attack Red Sea oil tanker shipping":                            +0.70,
+    "OPEC+ compliance exceeds quota output below target":                   +0.55,
+    "crude oil inventory draw stockpile fell unexpected":                   +0.65,
+    "EIA inventory draw crude stockpile decline":                           +0.65,
+    # ── 공급 증가 → WTI 하락
+    "OPEC agrees increase output production quota":                        -0.80,
+    "Iran nuclear deal reached sanctions lifted":                           -0.80,
+    "US Strategic Petroleum Reserve SPR release":                          -0.65,
+    "Libya oil production resumes resumed restart":                         -0.60,
+    "US shale oil production record high output":                           -0.65,
+    "Saudi Arabia increases output production boost":                       -0.70,
+    "Russia Ukraine ceasefire deal energy supply restored":                 -0.60,
+    "EIA crude inventory build stockpile rose unexpected":                  -0.65,
+    "crude oil inventory surplus build stockpile increase":                 -0.60,
+    # ── 수요 감소 → WTI 하락
+    "China economic slowdown GDP misses oil demand falls":                  -0.75,
+    "global recession fears oil demand outlook weakens":                    -0.70,
+    "US recession economic contraction demand destruction":                 -0.65,
+    "Fed rate hike interest rates rise dollar strengthens":                 -0.50,
+    "weak oil demand forecast IEA lowers outlook":                          -0.65,
+    "India oil imports decline slowing economy":                            -0.50,
+    "manufacturing PMI falls contraction economic weakness":                -0.45,
+    # ── 수요 증가 → WTI 상승
+    "China economic recovery demand surge oil imports":                     +0.65,
+    "global oil demand growth forecast raised IEA":                         +0.60,
+    "emerging market demand recovery economic growth":                      +0.50,
+    "summer driving season demand peak travel":                             +0.40,
+    "Fed rate cut interest rates fall dollar weakens":                      +0.40,
+}
+
+_OIL_EVENT_EMBS: 'np.ndarray | None' = None   # (N_events, 384)
+_OIL_EVENT_SCORES: 'list | None'     = None   # [float, ...]
+
+
+def _get_oil_event_embeddings():
+    """캐노니컬 이벤트 임베딩 (최초 1회 계산 후 캐시)"""
+    global _OIL_EVENT_EMBS, _OIL_EVENT_SCORES
+    if _OIL_EVENT_EMBS is not None:
+        return _OIL_EVENT_EMBS, _OIL_EVENT_SCORES
+    texts  = list(OIL_EVENT_LIBRARY.keys())
+    scores = list(OIL_EVENT_LIBRARY.values())
+    embs   = _embed_texts(texts)              # (N, 384)
+    _OIL_EVENT_EMBS  = embs
+    _OIL_EVENT_SCORES = scores
+    return _OIL_EVENT_EMBS, _OIL_EVENT_SCORES
+
+
+def _oil_event_score(article_emb: 'np.ndarray') -> float:
+    """
+    기사 임베딩과 캐노니컬 이벤트의 코사인 유사도 가중합
+    → WTI 가격 방향 점수 (-1 ~ +1)
+    """
+    ev_embs, ev_scores = _get_oil_event_embeddings()
+    if ev_embs is None:
+        return 0.0
+    # 코사인 유사도 (이미 L2 정규화된 벡터끼리 내적)
+    sims   = ev_embs @ article_emb            # (N_events,)
+    # softmax 가중합 (유사한 이벤트에 집중)
+    sims_s = np.exp(sims * 5)                 # temperature=5 로 sharp하게
+    sims_s /= sims_s.sum() + 1e-8
+    return float(np.dot(sims_s, ev_scores))
 
 _EMBED_MDL  = None
 _EMBED_TOK  = None
@@ -1107,6 +1186,7 @@ FEATURE_COLS = [
     'news_sentiment_lag2', 'news_count_lag2',
     'news_sentiment_smooth7', 'sentiment_magnitude',
     'extreme_neg_news', 'news_count_pos', 'news_count_neg',
+    'oil_event_score', 'oil_event_score_smooth',
     # 기술적 지표
     'price_vs_ma5', 'price_vs_ma21', 'bb_position',
     'return_lag1', 'return_lag2', 'RV_lag1',
@@ -1360,10 +1440,24 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df['news_count_neg'] = 0
         df['news_sentiment'] = 0
 
-    # ── Sentence Embedding → WTI 상관관계 상위 피처
+    # ── Sentence Embedding → WTI 상관관계 상위 피처 + Oil Event 스코어
     if not news_df.empty:
         try:
             _ne = _apply_embeddings(news_df)  # '_emb' 컬럼 추가
+            # ── Oil Event 라이브러리 스코어: 기사별 유가 방향 점수
+            _get_oil_event_embeddings()   # 캐노니컬 이벤트 임베딩 초기화
+            _ne['_oil_score'] = [_oil_event_score(e) for e in _ne['_emb']]
+            # 일별 impact_w 가중평균
+            _oil_daily = _ne.groupby(pd.to_datetime(_ne['date']).dt.date).apply(
+                lambda g: (g['_oil_score'] * g.get('impact_w', pd.Series(np.ones(len(g)))).values).sum()
+                          / g.get('impact_w', pd.Series(np.ones(len(g)))).values.sum()
+            )
+            _oil_daily.index = pd.to_datetime(_oil_daily.index)
+            _oil_s = _oil_daily.reindex(df.index).ffill().fillna(0)
+            df['oil_event_score']        = _oil_s.values
+            df['oil_event_score_smooth'] = _oil_s.ewm(span=3, min_periods=1).mean().values
+            log.info(f"    Oil Event 스코어: μ={df['oil_event_score'].mean():.4f} "
+                     f"σ={df['oil_event_score'].std():.4f}")
             # 뉴스가 있는 날짜별 impact_w 가중 평균 임베딩 계산
             _news_dates = pd.to_datetime(_ne['date']).dt.date
             _emb_matrix = np.zeros((len(df), 384), dtype=np.float32)
