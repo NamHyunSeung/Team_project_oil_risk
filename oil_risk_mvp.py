@@ -986,47 +986,80 @@ def _apply_finbert(news_df: pd.DataFrame) -> pd.DataFrame:
 # WTI 가격 방향이 알려진 캐노니컬 이벤트 라이브러리
 # 양수 = WTI 상승, 음수 = WTI 하락 (경제 감성과 무관, 유가 방향 직접 매핑)
 OIL_EVENT_LIBRARY = {
-    # ── 공급 감소 → WTI 상승
-    "OPEC production cut agreement extended deeper barrels per day":        +0.90,
-    "OPEC surprise voluntary output cut announced":                         +0.85,
-    "Saudi Arabia announces unilateral production cut":                     +0.80,
-    "Russia restricts oil export volumes crude shipments":                  +0.75,
-    "Iran nuclear deal collapsed sanctions tightened":                      +0.75,
-    "US Iran sanctions intensify oil supply restricted":                    +0.70,
-    "pipeline attack disruption shutdown oil supply":                       +0.80,
-    "refinery fire explosion shutdown production offline":                  +0.70,
-    "Libya oil field shutdown civil conflict":                              +0.65,
-    "Nigeria oil production disrupted militant attack":                     +0.65,
-    "Iraq oil exports suspended Kurdistan dispute":                         +0.60,
-    "hurricane threatens Gulf Mexico oil platform":                         +0.65,
-    "Houthi attack Red Sea oil tanker shipping":                            +0.70,
-    "OPEC+ compliance exceeds quota output below target":                   +0.55,
-    "crude oil inventory draw stockpile fell unexpected":                   +0.65,
-    "EIA inventory draw crude stockpile decline":                           +0.65,
+    # ── 공급 감소 → WTI 상승 (대규모)
+    "OPEC production cut two million barrels per day deep":                +0.95,
+    "OPEC production cut agreement extended deeper barrels per day":       +0.90,
+    "OPEC surprise voluntary output cut announced":                        +0.85,
+    "Saudi Arabia announces unilateral production cut one million":        +0.85,
+    "Saudi Arabia voluntary cut extended deeper barrel reduction":         +0.80,
+    "OPEC+ ministerial meeting agrees production cut quota":               +0.80,
+    "Russia restricts oil export volumes crude shipments":                 +0.75,
+    "Iran nuclear deal collapsed sanctions tightened maximum pressure":    +0.75,
+    "US Iran sanctions intensify oil supply restricted":                   +0.70,
+    "Venezuela sanctions tightened oil exports blocked":                   +0.65,
+    # ── 공급 감소 → WTI 상승 (물리적 충격)
+    "pipeline attack disruption shutdown oil supply":                      +0.80,
+    "refinery fire explosion shutdown production offline":                 +0.70,
+    "Libya oil field shutdown civil conflict armed":                       +0.65,
+    "Nigeria oil production disrupted militant attack":                    +0.65,
+    "Iraq oil exports suspended Kurdistan dispute":                        +0.60,
+    "Kazakhstan oil output disrupted Tengiz field":                        +0.60,
+    "Ecuador oil production halted indigenous protest":                    +0.55,
+    "hurricane threatens Gulf Mexico oil platform production":             +0.65,
+    "Houthi attack Red Sea oil tanker shipping disruption":                +0.70,
+    "Strait Hormuz tension blockade tanker seizure":                       +0.75,
+    "OPEC+ compliance exceeds quota output below target":                  +0.55,
+    # ── 재고 감소 → WTI 상승
+    "crude oil inventory draw stockpile fell unexpected large":            +0.70,
+    "EIA inventory draw crude stockpile decline million barrels":          +0.65,
+    "US crude stockpile falls sharply drawdown":                           +0.60,
+    "gasoline distillate inventory draw product shortage":                 +0.55,
     # ── 공급 증가 → WTI 하락
-    "OPEC agrees increase output production quota":                        -0.80,
-    "Iran nuclear deal reached sanctions lifted":                           -0.80,
-    "US Strategic Petroleum Reserve SPR release":                          -0.65,
-    "Libya oil production resumes resumed restart":                         -0.60,
-    "US shale oil production record high output":                           -0.65,
-    "Saudi Arabia increases output production boost":                       -0.70,
-    "Russia Ukraine ceasefire deal energy supply restored":                 -0.60,
-    "EIA crude inventory build stockpile rose unexpected":                  -0.65,
-    "crude oil inventory surplus build stockpile increase":                 -0.60,
+    "OPEC agrees increase output production quota barrels":               -0.80,
+    "OPEC+ eases cuts production increase members":                       -0.75,
+    "Iran nuclear deal reached sanctions lifted export":                  -0.80,
+    "US Strategic Petroleum Reserve SPR release million barrels":         -0.65,
+    "Libya oil production resumes resumed restart field":                  -0.60,
+    "US shale oil production record high output rig":                     -0.65,
+    "Saudi Arabia increases output production boost barrels":             -0.70,
+    "Russia Ukraine ceasefire deal energy supply restored":               -0.60,
+    "Venezuela US sanctions eased oil exports resume":                    -0.55,
+    # ── 재고 증가 → WTI 하락
+    "EIA crude inventory build stockpile rose unexpected million":        -0.70,
+    "crude oil inventory surplus build stockpile increase":               -0.65,
+    "US crude stockpile rises large build glut":                          -0.60,
+    "global oil supply surplus inventory overhang":                       -0.60,
     # ── 수요 감소 → WTI 하락
-    "China economic slowdown GDP misses oil demand falls":                  -0.75,
-    "global recession fears oil demand outlook weakens":                    -0.70,
-    "US recession economic contraction demand destruction":                 -0.65,
-    "Fed rate hike interest rates rise dollar strengthens":                 -0.50,
-    "weak oil demand forecast IEA lowers outlook":                          -0.65,
-    "India oil imports decline slowing economy":                            -0.50,
-    "manufacturing PMI falls contraction economic weakness":                -0.45,
+    "China economic slowdown GDP misses oil demand falls":                -0.75,
+    "China manufacturing PMI contracts economy slows":                    -0.65,
+    "global recession fears oil demand outlook weakens":                  -0.70,
+    "US recession economic contraction demand destruction":               -0.65,
+    "Fed rate hike interest rates rise dollar strengthens":               -0.50,
+    "weak oil demand forecast IEA OPEC lowers outlook":                   -0.65,
+    "India oil imports decline slowing economy growth":                   -0.50,
+    "manufacturing PMI falls contraction economic weakness":              -0.50,
+    "electric vehicle adoption accelerates oil demand peak":              -0.45,
+    "airline flights cancelled reduced fuel demand":                      -0.50,
+    "Covid lockdown China economy shutdown demand":                       -0.80,
     # ── 수요 증가 → WTI 상승
-    "China economic recovery demand surge oil imports":                     +0.65,
-    "global oil demand growth forecast raised IEA":                         +0.60,
-    "emerging market demand recovery economic growth":                      +0.50,
-    "summer driving season demand peak travel":                             +0.40,
-    "Fed rate cut interest rates fall dollar weakens":                      +0.40,
+    "China economic recovery strong demand surge oil imports":            +0.70,
+    "China reopening post-covid demand recovery oil":                     +0.75,
+    "global oil demand growth forecast raised IEA OPEC":                  +0.60,
+    "emerging market demand recovery economic growth strong":             +0.55,
+    "summer driving season peak demand travel gasoline":                  +0.45,
+    "winter heating demand natural gas oil surge":                        +0.50,
+    "jet fuel aviation demand recovery airline travel":                   +0.45,
+    # ── 달러/금리 영향
+    "Fed rate cut interest rates fall dollar weakens oil":                +0.45,
+    "dollar index weakens risk assets rally oil":                         +0.40,
+    "dollar strengthens DXY risk off oil pressure":                       -0.45,
+    "Fed hawkish tightening dollar rally oil falls":                      -0.50,
+    # ── 지정학 프리미엄
+    "Middle East war escalation risk premium oil":                        +0.70,
+    "Israel Gaza conflict escalates regional war risk":                   +0.65,
+    "Russia Ukraine war energy security risk":                            +0.60,
+    "geopolitical tension risk premium crude oil":                        +0.50,
+    "ceasefire agreement peace deal risk premium falls":                  -0.50,
 }
 
 _OIL_EVENT_EMBS: 'np.ndarray | None' = None   # (N_events, 384)
@@ -1034,9 +1067,9 @@ _OIL_EVENT_SCORES: 'list | None'     = None   # [float, ...]
 
 
 def _get_oil_event_embeddings():
-    """캐노니컬 이벤트 임베딩 (최초 1회 계산 후 캐시)"""
+    """캐노니컬 이벤트 임베딩 (이벤트 수 변경 시 자동 재계산)"""
     global _OIL_EVENT_EMBS, _OIL_EVENT_SCORES
-    if _OIL_EVENT_EMBS is not None:
+    if _OIL_EVENT_EMBS is not None and len(_OIL_EVENT_EMBS) == len(OIL_EVENT_LIBRARY):
         return _OIL_EVENT_EMBS, _OIL_EVENT_SCORES
     texts  = list(OIL_EVENT_LIBRARY.keys())
     scores = list(OIL_EVENT_LIBRARY.values())
