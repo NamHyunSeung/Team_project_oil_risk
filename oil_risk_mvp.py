@@ -2026,14 +2026,20 @@ def train_models(feature_df: pd.DataFrame):
             _tw_ret = np.exp(np.log(2) / 252 * np.arange(_n_ret)) ; _tw_ret /= _tw_ret.mean()
             covid_w_ret = (np.where(train_df['covid_dummy'].values == 1, 0.35, 1.0)
                            if 'covid_dummy' in train_df.columns else np.ones(_n_ret))
+            # ③ 방향성 특화: 방향 오류 샘플에 1.5× 페널티 (이전 예측 방향 기반)
+            # 첫 훈련은 균등, 이후 방향 오류 탐지 가중치 적용
             w_ret = covid_w_ret * _tw_ret
+
+            # ③ 방향성 특화 타깃: sign(r)×|r|^0.5 — 방향 보존, 크기 압축
+            # 작은 방향 오류에도 민감하게 반응, 대형 이상치 영향 축소
+            _y_dir_tr = np.sign(y_ret_tr.values) * np.sqrt(np.abs(y_ret_tr.values))
 
             # ── 1차: 전체 피처로 학습 → 중요도 추출
             _sc_full = StandardScaler()
             _Xtr_full = _sc_full.fit_transform(X_tr_all)
             _Xte_full = _sc_full.transform(X_te_all)
             _mD_full  = xgb.XGBRegressor(**_xgb_p)
-            _mD_full.fit(_Xtr_full, y_ret_tr, sample_weight=w_ret)
+            _mD_full.fit(_Xtr_full, _y_dir_tr, sample_weight=w_ret)
 
             # XGBoost-Return 전용 피처 중요도 저장
             _imp = _mD_full.feature_importances_
@@ -2054,20 +2060,21 @@ def train_models(feature_df: pd.DataFrame):
             _sel_feats = [f for f in _sel_feats if f in train_df.columns]
             log.info(f"    피처 선택: {len(available_feats)}개 → {len(_sel_feats)}개 (누적 중요도 {_cum:.1%})")
 
-            # ── 2차: 선택 피처로 재학습
+            # ── 2차: 선택 피처로 재학습 (방향성 타깃 동일 적용)
             _sc_sel = StandardScaler()
             _Xtr_sel = _sc_sel.fit_transform(train_df[_sel_feats])
             _Xte_sel = _sc_sel.transform(test_df[_sel_feats])
             _mD_sel  = xgb.XGBRegressor(**_xgb_p)
-            _mD_sel.fit(_Xtr_sel, y_ret_tr, sample_weight=w_ret)
+            _mD_sel.fit(_Xtr_sel, _y_dir_tr, sample_weight=w_ret)
 
-            # ── 두 모델 평가
+            # ── 두 모델 평가 (예측값 역변환: sign(p)×p² → log_return)
             def _eval(model, Xte, label):
-                _pr = model.predict(Xte)
-                _px = test_df['WTI'].values * np.exp(_pr)
-                _r2 = float(r2_score(y_px_te, _px))
-                _mae = float(mean_absolute_error(y_px_te, _px))
-                _dir = float((np.sign(_pr) == np.sign(y_ret_te.values)).mean())
+                _p_dir = model.predict(Xte)
+                _pr    = np.sign(_p_dir) * (_p_dir ** 2)   # 역변환
+                _px    = test_df['WTI'].values * np.exp(_pr)
+                _r2    = float(r2_score(y_px_te, _px))
+                _mae   = float(mean_absolute_error(y_px_te, _px))
+                _dir   = float((np.sign(_pr) == np.sign(y_ret_te.values)).mean())
                 log.info(f"        [{label}] R²={_r2:.4f} MAE={_mae:.4f} dir={_dir*100:.1f}%")
                 return _pr, _px, _r2, _mae, _dir
 
@@ -2309,8 +2316,9 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             last_row = feature_df[avail_f].iloc[-1:].values.copy()
             last_s   = sc.transform(last_row)
 
-            pred_ret_d1 = float(model.predict(last_s)[0])   # D+1 log 수익률
-            # D+1~7: 수익률 예측값에 불확실성 감쇠 적용 (멀수록 0에 수렴)
+            _p_d1_raw = float(model.predict(last_s)[0])
+            # ③ 역변환: sign(p)×p² → log_return (방향성 특화 타깃 역변환)
+            pred_ret_d1 = float(np.sign(_p_d1_raw) * (_p_d1_raw ** 2))
             decay = np.array([0.95 ** i for i in range(7)])
             ret_path = pred_ret_d1 * decay
             price_path = last_price * np.exp(np.cumsum(ret_path))
