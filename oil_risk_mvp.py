@@ -2395,6 +2395,7 @@ def train_models(feature_df: pd.DataFrame):
         except Exception as exc:
             log.warning(f"    LightGBM 수익률 예측 실패({exc})")
 
+
     # ─────────────────────────────────────────────────────────────────────
     # Model E: Stacking 앙상블 (SARIMAX + XGBoost → Ridge 메타러너)
     # ─────────────────────────────────────────────────────────────────────
@@ -2434,7 +2435,6 @@ def train_models(feature_df: pd.DataFrame):
                     if _n_align == len(sx_pred):
                         _stack_parts.append(_var_pred_raw[-len(sx_pred):])
                         _stack_names.append('VAR')
-
 
                 _stack_X = np.column_stack(_stack_parts)
                 _stack_y = y_px_te
