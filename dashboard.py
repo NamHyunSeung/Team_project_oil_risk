@@ -504,7 +504,6 @@ with tab4:
     if 'model_performance' not in data:
         st.info("파이프라인 실행 후 성능 데이터가 표시됩니다.")
     elif not _is_admin:
-        # 일반 사용자: 간단 요약만
         pf = data['model_performance']
         _stk = pf[pf['model'].str.contains('Stacking', na=False)]
         _xgb = pf[pf['model'].str.contains('XGBoost-Return', na=False)]
@@ -512,11 +511,10 @@ with tab4:
         if not _stk.empty:
             _r2 = float(_stk['r2'].iloc[0])
             _grade = '높음 🟢' if _r2 >= 0.85 else ('보통 🟡' if _r2 >= 0.75 else '낮음 🔴')
-            c1.metric('���측 정확도', _grade)
+            c1.metric('예측 정확도', _grade)
             c2.metric('예측 오차 (MAE)', f"${float(_stk['mae'].iloc[0]):.2f}")
         if not _xgb.empty and 'dir_acc' in _xgb.columns:
-            _dir = float(_xgb['dir_acc'].iloc[0]) * 100
-            c3.metric('방향성 정확도', f"{_dir:.0f}%")
+            c3.metric('방향성 정확도', f"{float(_xgb['dir_acc'].iloc[0])*100:.0f}%")
     else:
         pf = data['model_performance']
         col_t, col_g = st.columns([1, 1.2])
@@ -524,10 +522,8 @@ with tab4:
         with col_t:
             st.dataframe(pf, hide_index=True, use_container_width=True)
             st.caption("RMSE·MAE: 낮을수록 좋음  |  R²: 높을수록 좋음 (최대 1.0)")
-
             if 'overfit_gap' in pf.columns and 'train_r2' in pf.columns:
-                _of = pf.dropna(subset=['overfit_gap'])
-                for _, _row in _of.iterrows():
+                for _, _row in pf.dropna(subset=['overfit_gap']).iterrows():
                     _gap = float(_row['overfit_gap'])
                     _tr  = float(_row['train_r2'])
                     _cv  = float(_row['r2'])
@@ -540,11 +536,10 @@ with tab4:
 
         with col_g:
             fig, axes = plt.subplots(1, 3, figsize=(8, 3.5), facecolor='#161b22')
-            metrics = ['rmse', 'mae', 'r2']
-            ylabels = ['RMSE (↓)', 'MAE (↓)', 'R² (↑)']
-            colors  = ['#58a6ff', '#3fb950', '#f0c040']
-
-            for ax, met, ylbl, clr in zip(axes, metrics, ylabels, colors):
+            for ax, met, ylbl, clr in zip(axes,
+                                          ['rmse', 'mae', 'r2'],
+                                          ['RMSE (↓)', 'MAE (↓)', 'R² (↑)'],
+                                          ['#58a6ff', '#3fb950', '#f0c040']):
                 ax.set_facecolor('#1c2433')
                 bars = ax.bar(pf['model'], pf[met], color=clr, alpha=0.85)
                 ax.set_title(ylbl, color='#e6edf3', fontsize=9)
@@ -555,77 +550,61 @@ with tab4:
                 for bar in bars:
                     h = bar.get_height()
                     ax.text(bar.get_x() + bar.get_width()/2, h * 1.03,
-                            f'{h:.3f}', ha='center', va='bottom',
-                            color='white', fontsize=7)
-
+                            f'{h:.3f}', ha='center', va='bottom', color='white', fontsize=7)
             plt.tight_layout()
             st.pyplot(fig)
             plt.close()
-    else:
-        st.info("파이프라인 실행 후 성능 데이터가 표시됩니다.")
 
-    # ── XGBoost 피처 중요도 차트
-    st.markdown("---")
-    _FEAT_KO = {
-        'RV_5d':'5일 실현변동성', 'RV_22d':'22일 실현변동성', 'RV_1d':'1일 실현변동성',
-        'return_1d':'1일 수익률', 'log_return':'로그 수익률',
-        'vol_5d':'5일 변동성', 'vol_21d':'21일 변동성',
-        'momentum_5d':'5일 모멘텀', 'momentum_21d':'21일 모멘텀',
-        'price_vs_ma5':'MA5 대비 가격', 'price_vs_ma21':'MA21 대비 가격',
-        'bb_position':'볼린저밴드 위치',
-        'Brent':'브렌트 가격', 'DXY':'달러인덱스', 'WTI':'WTI 가격',
-        'VIX':'VIX 공포지수', 'OVX':'OVX 원유변동성',
-        'dxy_change':'달러인덱스 변화', 'vix_change':'VIX 변화',
-        'vix_zscore':'VIX Z-스코어', 'ovx_change':'OVX 변화',
-        'ovx_zscore':'OVX Z-스코어', 'ovx_rv_spread':'내재-실현변동성 스프레드',
-        'demand_shock':'수요 충격', 'supply_shock':'공급 충격',
-        'inv_chg_zscore':'재고 변화 Z-스코어', 'inv_lvl_zscore':'재고 수준 Z-스코어',
-        'news_sentiment':'뉴스 감성', 'news_sentiment_smooth':'뉴스 감성(평활)',
-        'news_count':'뉴스 건수', 'news_sentiment_lag1':'뉴스 감성(1일 전)',
-        'news_sentiment_lag2':'뉴스 감성(2일 전)',
-        'news_count_lag1':'뉴스 건수(1일 전)', 'news_count_lag2':'뉴스 건수(2일 전)',
-        'geo_dummy':'지정학 위기 더미', 'gpr_zscore':'GPR Z-스코어',
-        'fear_composite':'공포 복합지수', 'vix_amplified':'VIX 증폭 감성',
-        'vix_sent_diverge':'VIX-감성 괴리',
-        'regime':'시장 국면', 'regime_x_mom':'국면×모멘텀',
-        'regime_x_sent':'국면×감성', 'regime_x_gpr':'국면×지정학',
-        'futures_spread':'선물 커브 스프레드', 'futures_spread_chg':'선물 스프레드 변화',
-        'contango_dummy':'콘탱고 더미', 'covid_dummy':'COVID 더미',
-    }
+        # ── 피처 중요도 (관리자)
+        st.markdown("---")
+        _FEAT_KO = {
+            'RV_5d':'5일 실현변동성', 'RV_22d':'22일 실현변동성', 'RV_1d':'1일 실현변동성',
+            'return_1d':'1일 수익률', 'vol_5d':'5일 변동성', 'vol_21d':'21일 변동성',
+            'price_vs_ma5':'MA5 대비 가격', 'price_vs_ma21':'MA21 대비 가격',
+            'bb_position':'볼린저밴드 위치', 'Brent':'브렌트 가격',
+            'DXY':'달러인덱스', 'WTI':'WTI 가격', 'VIX':'VIX 공포지수',
+            'OVX':'OVX 원유변동성', 'dxy_change':'달러인덱스 변화', 'vix_change':'VIX 변화',
+            'vix_zscore':'VIX Z-스코어', 'ovx_change':'OVX 변화', 'ovx_zscore':'OVX Z-스코어',
+            'demand_shock':'수요 충격', 'supply_shock':'공급 충격',
+            'inv_chg_zscore':'재고 변화 Z-스코어', 'inv_lvl_zscore':'재고 수준 Z-스코어',
+            'news_sentiment':'뉴스 감성', 'news_sentiment_smooth':'뉴스 감성(평활)',
+            'news_count':'뉴스 건수', 'geo_dummy':'지정학 위기 더미',
+            'gpr_zscore':'GPR Z-스코어', 'fear_composite':'공포 복합지수',
+            'regime':'시장 국면', 'futures_spread':'선물 커브 스프레드',
+            'contango_dummy':'콘탱고 더미', 'covid_dummy':'COVID 더미',
+        }
+        _fi_path = OUTPUT_DIR / 'feature_importance.csv'
+        if _fi_path.exists():
+            fi = pd.read_csv(_fi_path).head(15)
+            fi['feature_ko'] = fi['feature'].map(_FEAT_KO).fillna(fi['feature'])
+            fi = fi.sort_values('importance')
+            fig_fi, ax_fi = plt.subplots(figsize=(8, 4.5), facecolor='#161b22')
+            ax_fi.set_facecolor('#1c2433')
+            bars = ax_fi.barh(fi['feature_ko'], fi['importance'], color='#58a6ff', alpha=0.85)
+            ax_fi.set_title('XGBoost-HAR 피처 중요도 (Top 15)', color='#e6edf3', fontsize=10)
+            ax_fi.tick_params(colors='#ccc', labelsize=8)
+            ax_fi.set_xlabel('Importance', color='#ccc', fontsize=8)
+            for sp in ax_fi.spines.values(): sp.set_color('#30363d')
+            ax_fi.grid(axis='x', color='#21262d', lw=0.5)
+            for bar in bars:
+                w = bar.get_width()
+                ax_fi.text(w + 0.001, bar.get_y() + bar.get_height()/2,
+                           f'{w:.3f}', va='center', color='#ccc', fontsize=7)
+            plt.tight_layout()
+            st.pyplot(fig_fi)
+            plt.close()
+        else:
+            st.info("파이프라인 실행 후 피처 중요도가 표시됩니다.")
 
-    _fi_path = OUTPUT_DIR / 'feature_importance.csv'
-    if _fi_path.exists():
-        fi = pd.read_csv(_fi_path).head(15)
-        fi['feature_ko'] = fi['feature'].map(_FEAT_KO).fillna(fi['feature'])
-        fi = fi.sort_values('importance')
-
-        fig_fi, ax_fi = plt.subplots(figsize=(8, 4.5), facecolor='#161b22')
-        ax_fi.set_facecolor('#1c2433')
-        bars = ax_fi.barh(fi['feature_ko'], fi['importance'], color='#58a6ff', alpha=0.85)
-        ax_fi.set_title('XGBoost-HAR 피처 중요도 (Top 15)', color='#e6edf3', fontsize=10)
-        ax_fi.tick_params(colors='#ccc', labelsize=8)
-        ax_fi.set_xlabel('Importance', color='#ccc', fontsize=8)
-        for sp in ax_fi.spines.values(): sp.set_color('#30363d')
-        ax_fi.grid(axis='x', color='#21262d', lw=0.5)
-        for bar in bars:
-            w = bar.get_width()
-            ax_fi.text(w + 0.001, bar.get_y() + bar.get_height()/2,
-                       f'{w:.3f}', va='center', color='#ccc', fontsize=7)
-        plt.tight_layout()
-        st.pyplot(fig_fi)
-        plt.close()
-    else:
-        st.info("파이프라인 실행 후 피처 중요도가 표시됩니다.")
-
-    st.markdown("---")
-    st.markdown("""
-    **모델 설명**
-    | 모델 | 역할 | 특징 |
-    |------|------|------|
-    | **XGBoost-HAR** | 변동성(리스크) 예측 | HAR 구성요소 + 뉴스/지정학 외생변수 |
-    | **SARIMAX** | 7일 가격 예측 | AR(2,1,2) × 주간 계절성 + 외생변수 |
-    | **Ensemble** | 최종 예측 | SARIMAX 65% + XGBoost 35% 가중 평균 |
-    """)
+        st.markdown("---")
+        st.markdown("""
+        **모델 설명**
+        | 모델 | 역할 | 특징 |
+        |------|------|------|
+        | **XGBoost-HAR** | 변동성(리스크) 예측 | HAR 구성요소 + 뉴스/지정학 외생변수 |
+        | **SARIMAX** | 7일 가격 예측 | AR(2,1,2) × 주간 계절성 + 외생변수 |
+        | **Stacking** | 최종 예측 | SARIMAX + XGBoost + LGB → Ridge 메타러너 |
+        """)
 
 # ── Tab 5: 예측 오차 로그 ─────────────────────────────────────────────────────
 with tab5:
