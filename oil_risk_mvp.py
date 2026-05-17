@@ -250,12 +250,29 @@ SENTIMENT_MAP = {
     'tumble':-1,'slip':-1,'drop':-1,'loss':-1,'warning':-1,
     'contango':-1,'oversupply':-1,'hawkish':-0.5,'tightening':-0.5,
     'withdrawal':-1,'evacuation':-0.5,'slowdown':-1,'shrink':-1,
+    # 유가 도메인 추가 부정 (Loughran-McDonald + 유가 특화)
+    'depletion':-1.5,'outage':-1.5,'sabotage':-2,'confiscate':-1.5,
+    'nationalize':-1.5,'nationalization':-2,'expropriation':-2,
+    'quota':-0.5,'oversold':-0.5,'drawdown':-1,'curtail':-1.5,
+    'worsening':-1,'deteriorate':-1.5,'deterioration':-1.5,
+    'default':-2,'bankrupt':-2,'insolvency':-1.5,'delinquent':-1,
+    'overproduction':-1,'gluts':-1.5,'stranded':-1,'impairment':-1,
+    'deplete':-1,'dwindle':-1,'dwindling':-1.5,'capacityloss':-1.5,
+    'bearmarket':-1.5,'rout':-1.5,'selloff':-1.5,'meltdown':-2,
     # 약한 긍정 (+1)
     'recovery':1,'growth':1,'increase':1,'rise':1,'deal':1,
     'agreement':1,'stable':1,'ease':1,'lift':1,'resume':1,
     'open':1,'rally':1,'rebound':1,'strong':1,'bullish':1,
     'draw':1,'deficit':1,'backwardation':1,'dovish':0.5,
     'ceasefire':1.5,'truce':1.5,'compliance':1,
+    # 유가 도메인 추가 긍정 (Loughran-McDonald + 유가 특화)
+    'restoring':1,'reopening':1.5,'normalization':1,'normalize':1,
+    'stabilize':1,'stabilizing':1,'stabilization':1.5,
+    'drawdown':1,'undersupply':1.5,'tightening':1,  # 공급 문맥에서 긍정
+    'backwardation':1.5,'contraction':0.5,
+    'upgrade':1,'outperform':1,'exceeds':1,'beat':1,'robust':1,
+    'breakthrough':1.5,'accord':1.5,'pact':1,'ratify':1.5,
+    'ramp':1,'ramping':1,'expand':1,'expanding':1.5,
     # 강한 긍정 (+2)
     'boom':2,'peace':2,'resolution':2,'surplus':2,'record':1.5,
 }
@@ -275,12 +292,36 @@ PHRASE_SENTIMENT = {
     'nuclear deal':1,'sanctions lifted':2,'sanctions eased':1.5,
     'ceasefire deal':1.5,'peace deal':2,
     'demand recovery':1.5,'demand growth':1.5,'demand surge':1.5,
+    # 유가 도메인 추가 바이그램 (Loughran-McDonald 기반)
+    'force majeure':-2,'declared emergency':-1.5,
+    'strategic reserve':-1,'spr release':-1.5,
+    'rig count':0.5,'rig counts':0.5,
+    'spare capacity':1,'excess capacity':-1,
+    'tight market':1.5,'tight supply':1.5,
+    'loose market':-1,'loose supply':-1,
+    'supply tightens':1.5,'supply loosens':-1,
+    'price floor':1,'price support':1,
+    'import ban':-1.5,'export ban':-1.5,
+    'transit disruption':-1.5,'shipping disruption':-1.5,
+    'output freeze':-1.5,'production freeze':-1.5,
+    'demand rebound':1.5,'demand pickup':1,'demand uptick':1,
+    'field restart':1.5,'production restart':1.5,
+    'pipeline resumes':1,'refinery resumes':1,
 }
 
 # 강화어 (인접 단어의 감성 1.4× 증폭)
 INTENSIFIERS = {
     'record','massive','unprecedented','sharp','dramatic','significant',
     'major','severe','huge','deep','steep','rapidly','sharply','surging',
+}
+
+# 불확실성 표현 (논문: intensity + uncertainty가 polarity보다 예측력 높음)
+HEDGE_WORDS = {
+    'may','might','could','uncertain','uncertainty','unclear','possibly','possibly',
+    'likely','unlikely','risk','risks','concern','concerns','worry','worries',
+    'fear','fears','doubt','doubts','question','questionable','volatile','volatility',
+    'unpredictable','unresolved','pending','awaiting','expect','expected','forecast',
+    'projected','estimated','potential','possibly','tentative','ambiguous',
 }
 
 NEWS_RSS = [
@@ -1672,6 +1713,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     for lag in [1, 2]:
         df[f'news_sentiment_lag{lag}'] = df['news_sentiment'].shift(lag)
         df[f'news_count_lag{lag}']     = df['news_count'].shift(lag)
+
 
     # ── 시차 수익률 & 변동성
     for lag in [1, 2]:
