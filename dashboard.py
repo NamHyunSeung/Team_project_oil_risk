@@ -839,7 +839,7 @@ with tab5:
 if _is_admin and tab_admin is not None:
     with tab_admin:
         st.subheader('🔧 관리자 패널')
-        adm1, adm2, adm3 = st.tabs(['👤 사용자 관리', '⚙️ 시스템 모니터링', '🚀 파이프라인 실행'])
+        adm1, adm2, adm3, adm4 = st.tabs(['👤 사용자 관리', '⚙️ 시스템 모니터링', '🚀 파이프라인 실행', '📧 이메일 알림'])
 
         # ── 사용자 관리 ──────────────────────────────────────────────────────
         with adm1:
@@ -979,6 +979,73 @@ if _is_admin and tab_admin is not None:
             if st.session_state['pipeline_output']:
                 st.markdown(f"**{'실행 중...' if st.session_state['pipeline_running'] else '실행 완료'}**")
                 st.text_area('출력 로그', st.session_state['pipeline_output'], height=350)
+
+
+        # ── 이메일 알림 설정 ─────────────────────────────────────────────
+        with adm4:
+            from pathlib import Path as _PL3
+            _env_path = _PL3(__file__).parent / '.env'
+
+            def _read_env():
+                env = {}
+                if _env_path.exists():
+                    for line in _env_path.read_text(encoding='utf-8').splitlines():
+                        if '=' in line and not line.startswith('#'):
+                            k, v = line.split('=', 1)
+                            env[k.strip()] = v.strip()
+                return env
+
+            def _write_env_key(key, val):
+                if not _env_path.exists():
+                    return
+                lines = _env_path.read_text(encoding='utf-8').splitlines()
+                updated = False
+                for i, line in enumerate(lines):
+                    if line.startswith(key + '='):
+                        lines[i] = f'{key}={val}'
+                        updated = True
+                        break
+                if not updated:
+                    lines.append(f'{key}={val}')
+                _env_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+            _env = _read_env()
+            st.markdown('#### 현재 설정')
+            st.markdown(f"발신 계정: `{_env.get('SMTP_USER', '미설정')}`")
+            st.markdown(f"수신 주소: `{_env.get('ALERT_TO', '미설정')}`")
+            st.caption('SURGE_RISK / DROP_RISK 감지 시 자동 발송')
+
+            st.markdown('---')
+            st.markdown('#### 수신 주소 변경')
+            with st.form('email_cfg_form'):
+                _new_to = st.text_input('수신 이메일', value=_env.get('ALERT_TO', ''))
+                _new_pw = st.text_input('Gmail 앱 비밀번호 (변경 시만)', type='password')
+                if st.form_submit_button('저장'):
+                    _write_env_key('ALERT_TO', _new_to)
+                    if _new_pw:
+                        _write_env_key('SMTP_PASSWORD', _new_pw)
+                    st.success('저장 완료. 다음 파이프라인 실행부터 적용됩니다.')
+
+            st.markdown('---')
+            st.markdown('#### 테스트 발송')
+            if st.button('📧 테스트 이메일 발송'):
+                from pathlib import Path as _PL4
+                import importlib.util as _ilu
+                _spec = _ilu.spec_from_file_location('mvp', str(_PL4(__file__).parent / 'oil_risk_mvp.py'))
+                _mvp  = _ilu.module_from_spec(_spec)
+                try:
+                    _spec.loader.exec_module(_mvp)
+                    _test_sig = {'risk_level': 'SURGE_RISK', 'wti_price': 0.0,
+                                 'risk_score': 0.0, 'volatility_5d': 0.0,
+                                 'news_sentiment': 0.0, 'geopolitical_alert': False}
+                    ok = _mvp.send_risk_alert(_test_sig, None)
+                    if ok:
+                        _to = _read_env().get('ALERT_TO', '')
+                        st.success(f'발송 완료 → {_to}')
+                    else:
+                        st.error('발송 실패. SMTP 설정(.env)을 확인하세요.')
+                except Exception as _e:
+                    st.error(f'오류: {_e}')
 
 st.markdown("---")
 st.caption("국제 유가 리스크 예측 시스템 MVP  |  XGBoost-HAR + SARIMAX Ensemble  |  News Sentiment + Geopolitical Risk")

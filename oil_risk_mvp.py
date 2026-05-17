@@ -2821,7 +2821,7 @@ def send_risk_alert(risk_signal: dict, fc_df) -> bool:
         return False
 
     level = risk_signal.get('risk_level', '')
-    if level not in ('HIGH', 'CRITICAL'):
+    if level not in ('SURGE_RISK', 'DROP_RISK'):
         return False
 
     try:
@@ -2829,7 +2829,7 @@ def send_risk_alert(risk_signal: dict, fc_df) -> bool:
         from email.mime.text import MIMEText
         from email.mime.multipart import MIMEMultipart
 
-        r       = RISK_LEVELS[level]
+        r       = RISK_LEVELS.get(level, {'emoji': '⚠', 'label': level, 'color': '#888'})
         wti     = risk_signal.get('wti_price', 0)
         score   = risk_signal.get('risk_score', 0)
         vol     = risk_signal.get('volatility_5d', 0) * 100
