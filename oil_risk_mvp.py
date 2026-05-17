@@ -555,7 +555,19 @@ def fetch_data(start_date=None, end_date=None):
             s.name = ticker
             return s
 
-        wti   = _dl("CL=F")
+        # CL=F 전 컬럼 일괄 수집 (중복 다운로드 방지)
+        _clf_raw = yf.download("CL=F", start=start_date, end=end_date, progress=False, auto_adjust=True)
+        if isinstance(_clf_raw.columns, pd.MultiIndex):
+            _clf_raw.columns = _clf_raw.columns.droplevel(1)
+        def _from_clf(col):
+            s = _clf_raw[col] if col in _clf_raw.columns else pd.Series(dtype=float)
+            return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
+        wti      = _from_clf('Close'); wti.name = "CL=F"
+        wti_high = _from_clf('High').rename("WTI_High")
+        wti_low  = _from_clf('Low').rename("WTI_Low")
+        wti_open = _from_clf('Open').rename("WTI_Open")
+        wti_vol  = _from_clf('Volume').rename("WTI_Volume")
+
         brent = _dl("BZ=F")
         dxy   = _dl("DX-Y.NYB")
         try:
@@ -577,19 +589,6 @@ def fetch_data(start_date=None, end_date=None):
         except Exception:
             futures_spread = pd.Series(dtype=float, name="futures_spread")
             log.warning("    WTI 2번째 월물 수집 실패 → futures_spread=0")
-
-        # Parkinson 추정을 위한 WTI High/Low + Open + Volume 수집
-        try:
-            wti_high = _dl("CL=F", col='High').rename("WTI_High")
-            wti_low  = _dl("CL=F", col='Low').rename("WTI_Low")
-            wti_open = _dl("CL=F", col='Open').rename("WTI_Open")
-            wti_vol  = _dl("CL=F", col='Volume').rename("WTI_Volume")
-            log.info("    WTI High/Low/Open/Volume 수집 완료")
-        except Exception:
-            wti_high = pd.Series(dtype=float, name="WTI_High")
-            wti_low  = pd.Series(dtype=float, name="WTI_Low")
-            wti_open = pd.Series(dtype=float, name="WTI_Open")
-            wti_vol  = pd.Series(dtype=float, name="WTI_Volume")
 
         # VIX 기간구조 + SKEW (파생상품 꼬리위험)
         try:
@@ -1093,81 +1092,63 @@ OIL_EVENT_LIBRARY = {
     "ceasefire agreement peace deal risk premium falls":                  -0.50,
 }
 
-# 이벤트 카테고리 태그 (공급/수요/지정학)
-OIL_EVENT_CATEGORY = {
-    # 공급
-    "OPEC production cut two million barrels per day deep":               "supply",
-    "OPEC production cut agreement extended deeper barrels per day":      "supply",
-    "OPEC surprise voluntary output cut announced":                       "supply",
-    "Saudi Arabia announces unilateral production cut one million":       "supply",
-    "Saudi Arabia voluntary cut extended deeper barrel reduction":        "supply",
-    "OPEC+ ministerial meeting agrees production cut quota":              "supply",
-    "Russia restricts oil export volumes crude shipments":                "supply",
-    "Iran nuclear deal collapsed sanctions tightened maximum pressure":   "supply",
-    "US Iran sanctions intensify oil supply restricted":                  "supply",
-    "Venezuela sanctions tightened oil exports blocked":                  "supply",
-    "pipeline attack disruption shutdown oil supply":                     "supply",
-    "refinery fire explosion shutdown production offline":                "supply",
-    "Libya oil field shutdown civil conflict armed":                      "supply",
-    "Nigeria oil production disrupted militant attack":                   "supply",
-    "Iraq oil exports suspended Kurdistan dispute":                       "supply",
-    "Kazakhstan oil output disrupted Tengiz field":                       "supply",
-    "Ecuador oil production halted indigenous protest":                   "supply",
-    "hurricane threatens Gulf Mexico oil platform production":            "supply",
-    "Houthi attack Red Sea oil tanker shipping disruption":               "supply",
-    "Strait Hormuz tension blockade tanker seizure":                      "supply",
-    "OPEC+ compliance exceeds quota output below target":                 "supply",
-    "crude oil inventory draw stockpile fell unexpected large":           "supply",
-    "EIA inventory draw crude stockpile decline million barrels":         "supply",
-    "US crude stockpile falls sharply drawdown":                          "supply",
-    "gasoline distillate inventory draw product shortage":                "supply",
-    "OPEC agrees increase output production quota barrels":               "supply",
-    "OPEC+ eases cuts production increase members":                       "supply",
-    "Iran nuclear deal reached sanctions lifted export":                  "supply",
-    "US Strategic Petroleum Reserve SPR release million barrels":         "supply",
-    "Libya oil production resumes resumed restart field":                 "supply",
-    "US shale oil production record high output rig":                     "supply",
-    "Saudi Arabia increases output production boost barrels":             "supply",
-    "Russia Ukraine ceasefire deal energy supply restored":               "supply",
-    "Venezuela US sanctions eased oil exports resume":                    "supply",
-    "EIA crude inventory build stockpile rose unexpected million":        "supply",
-    "crude oil inventory surplus build stockpile increase":               "supply",
-    "US crude stockpile rises large build glut":                          "supply",
-    "global oil supply surplus inventory overhang":                       "supply",
-    # 수요
-    "China economic slowdown GDP misses oil demand falls":                "demand",
-    "China manufacturing PMI contracts economy slows":                    "demand",
-    "global recession fears oil demand outlook weakens":                  "demand",
-    "US recession economic contraction demand destruction":               "demand",
-    "Fed rate hike interest rates rise dollar strengthens":               "demand",
-    "weak oil demand forecast IEA OPEC lowers outlook":                   "demand",
-    "India oil imports decline slowing economy growth":                   "demand",
-    "manufacturing PMI falls contraction economic weakness":              "demand",
-    "electric vehicle adoption accelerates oil demand peak":              "demand",
-    "airline flights cancelled reduced fuel demand":                      "demand",
-    "Covid lockdown China economy shutdown demand":                       "demand",
-    "China economic recovery strong demand surge oil imports":            "demand",
-    "China reopening post-covid demand recovery oil":                     "demand",
-    "global oil demand growth forecast raised IEA OPEC":                  "demand",
-    "emerging market demand recovery economic growth strong":             "demand",
-    "summer driving season peak demand travel gasoline":                  "demand",
-    "winter heating demand natural gas oil surge":                        "demand",
-    "jet fuel aviation demand recovery airline travel":                   "demand",
-    "Fed rate cut interest rates fall dollar weakens oil":                "demand",
-    "dollar index weakens risk assets rally oil":                         "demand",
-    "dollar strengthens DXY risk off oil pressure":                       "demand",
-    "Fed hawkish tightening dollar rally oil falls":                      "demand",
-    # 지정학
-    "Middle East war escalation risk premium oil":                        "geo",
-    "Israel Gaza conflict escalates regional war risk":                   "geo",
-    "Russia Ukraine war energy security risk":                            "geo",
-    "geopolitical tension risk premium crude oil":                        "geo",
-    "ceasefire agreement peace deal risk premium falls":                  "geo",
+# 이벤트 카테고리: OIL_EVENT_LIBRARY 키 → 카테고리 매핑 (중복 dict 대신 집합으로 관리)
+_SUPPLY_EVENTS = {
+    "OPEC production cut two million barrels per day deep",
+    "OPEC production cut agreement extended deeper barrels per day",
+    "OPEC surprise voluntary output cut announced",
+    "Saudi Arabia announces unilateral production cut one million",
+    "Saudi Arabia voluntary cut extended deeper barrel reduction",
+    "OPEC+ ministerial meeting agrees production cut quota",
+    "Russia restricts oil export volumes crude shipments",
+    "Iran nuclear deal collapsed sanctions tightened maximum pressure",
+    "US Iran sanctions intensify oil supply restricted",
+    "Venezuela sanctions tightened oil exports blocked",
+    "pipeline attack disruption shutdown oil supply",
+    "refinery fire explosion shutdown production offline",
+    "Libya oil field shutdown civil conflict armed",
+    "Nigeria oil production disrupted militant attack",
+    "Iraq oil exports suspended Kurdistan dispute",
+    "Kazakhstan oil output disrupted Tengiz field",
+    "Ecuador oil production halted indigenous protest",
+    "hurricane threatens Gulf Mexico oil platform production",
+    "Houthi attack Red Sea oil tanker shipping disruption",
+    "Strait Hormuz tension blockade tanker seizure",
+    "OPEC+ compliance exceeds quota output below target",
+    "crude oil inventory draw stockpile fell unexpected large",
+    "EIA inventory draw crude stockpile decline million barrels",
+    "US crude stockpile falls sharply drawdown",
+    "gasoline distillate inventory draw product shortage",
+    "OPEC agrees increase output production quota barrels",
+    "OPEC+ eases cuts production increase members",
+    "Iran nuclear deal reached sanctions lifted export",
+    "US Strategic Petroleum Reserve SPR release million barrels",
+    "Libya oil production resumes resumed restart field",
+    "US shale oil production record high output rig",
+    "Saudi Arabia increases output production boost barrels",
+    "Russia Ukraine ceasefire deal energy supply restored",
+    "Venezuela US sanctions eased oil exports resume",
+    "EIA crude inventory build stockpile rose unexpected million",
+    "crude oil inventory surplus build stockpile increase",
+    "US crude stockpile rises large build glut",
+    "global oil supply surplus inventory overhang",
+}
+_GEO_EVENTS = {
+    "Middle East war escalation risk premium oil",
+    "Israel Gaza conflict escalates regional war risk",
+    "Russia Ukraine war energy security risk",
+    "geopolitical tension risk premium crude oil",
+    "ceasefire agreement peace deal risk premium falls",
 }
 
-_OIL_EVENT_EMBS: 'np.ndarray | None' = None   # (N_events, 384)
-_OIL_EVENT_SCORES: 'list | None'     = None   # [float, ...]
-_OIL_EVENT_CATS: 'list | None'       = None   # [category str, ...]
+def _event_category(text):
+    if text in _GEO_EVENTS: return 'geo'
+    if text in _SUPPLY_EVENTS: return 'supply'
+    return 'demand'
+
+_OIL_EVENT_EMBS: 'np.ndarray | None' = None
+_OIL_EVENT_SCORES: 'list | None'     = None
+_OIL_EVENT_CATS: 'list | None'       = None
 
 
 def _get_oil_event_embeddings():
@@ -1177,10 +1158,10 @@ def _get_oil_event_embeddings():
         return _OIL_EVENT_EMBS, _OIL_EVENT_SCORES
     texts  = list(OIL_EVENT_LIBRARY.keys())
     scores = list(OIL_EVENT_LIBRARY.values())
-    embs   = _embed_texts(texts)              # (N, 384)
+    embs   = _embed_texts(texts)
     _OIL_EVENT_EMBS   = embs
     _OIL_EVENT_SCORES = scores
-    _OIL_EVENT_CATS   = [OIL_EVENT_CATEGORY.get(t, 'supply') for t in texts]
+    _OIL_EVENT_CATS   = [_event_category(t) for t in texts]
     return _OIL_EVENT_EMBS, _OIL_EVENT_SCORES
 
 
@@ -1428,86 +1409,6 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df['parkinson_vol']     = 0.0
         df['parkinson_vol_5d']  = 0.0
         df['parkinson_vol_21d'] = 0.0
-
-    # ── 캔들스틱 패턴 피처 (논문: OHLC 기반 방향 신호, 70-80% 달성 보고)
-    if 'WTI_Open' in df.columns and 'WTI_High' in df.columns and 'WTI_Low' in df.columns:
-        _op  = df['WTI_Open'].replace(0, np.nan).ffill().clip(lower=1.0)
-        _hi  = df['WTI_High'].replace(0, np.nan).ffill().clip(lower=1.0)
-        _lo  = df['WTI_Low'].replace(0, np.nan).ffill().clip(lower=0.01)
-        _cl  = df['WTI']
-        _body     = _cl - _op
-        _rng      = (_hi - _lo).clip(lower=0.01)
-        _abs_body = _body.abs()
-        df['cs_body_pct']   = (_body / _op).fillna(0)                              # 몸통 크기 (%)
-        df['cs_upper_wick'] = ((_hi - np.maximum(_op, _cl)) / _cl.clip(1)).fillna(0)  # 윗 꼬리
-        df['cs_lower_wick'] = ((np.minimum(_op, _cl) - _lo) / _cl.clip(1)).fillna(0)  # 아랫 꼬리
-        df['cs_body_range'] = (_abs_body / _rng).fillna(0.5)                       # 몸통/범위 비율
-        df['cs_wick_ratio'] = (df['cs_lower_wick'] / (df['cs_upper_wick'] + 1e-8)).fillna(1)  # 해머 신호
-        df['cs_gap']        = ((_op - _cl.shift(1)) / _cl.shift(1).clip(1)).fillna(0)  # 갭
-        # 패턴 신호 (이진)
-        _uw_n = (_hi - np.maximum(_op, _cl)) / _cl.clip(1)
-        _lw_n = (np.minimum(_op, _cl) - _lo) / _cl.clip(1)
-        _bpct = _abs_body / _cl.clip(1)
-        df['cs_hammer']     = ((_lw_n > 2*_bpct) & (_uw_n < _bpct + 0.001)).astype(float)
-        df['cs_star']       = ((_uw_n > 2*_bpct) & (_lw_n < _bpct + 0.001)).astype(float)
-        df['cs_bull_eng']   = ((_body > 0) & (_body.shift(1) < 0) &
-                                (_body > _body.shift(1).abs())).astype(float)
-        df['cs_bear_eng']   = ((_body < 0) & (_body.shift(1) > 0) &
-                                (_abs_body > _body.shift(1))).astype(float)
-        df['cs_doji']       = (_bpct < 0.002).astype(float)                        # 도지 (방향 불확실)
-        log.info("    캔들스틱 패턴 피처 생성 (10개)")
-    else:
-        for _csc in ['cs_body_pct','cs_upper_wick','cs_lower_wick','cs_body_range',
-                     'cs_wick_ratio','cs_gap','cs_hammer','cs_star','cs_bull_eng',
-                     'cs_bear_eng','cs_doji']:
-            df[_csc] = 0.0
-
-    # ── 거래량 기반 방향 신호 (가격 방향 × 거래량 압력)
-    if 'WTI_Volume' in df.columns and df['WTI_Volume'].notna().sum() > 100:
-        _vol = df['WTI_Volume'].replace(0, np.nan).ffill().clip(lower=1)
-        _vol_ma20  = _vol.rolling(20).mean()
-        _vol_z     = ((_vol - _vol_ma20) / (_vol.rolling(20).std() + 1e-8)).fillna(0)
-        _ret_sign  = np.sign(df['return_1d'])
-        df['vol_pressure']   = (_vol_z * _ret_sign).fillna(0)      # 거래량 압력 (방향 가중)
-        df['vol_up_surge']   = ((_vol_z > 1) & (_ret_sign > 0)).astype(float)   # 강한 거래량+상승
-        df['vol_down_surge'] = ((_vol_z > 1) & (_ret_sign < 0)).astype(float)   # 강한 거래량+하락
-        df['vol_ma_ratio']   = (_vol / _vol_ma20).fillna(1).clip(0, 5)
-        # 연속 방향 누적 거래량 (OBV 방향 모멘텀)
-        _obv = (_vol * _ret_sign).fillna(0)
-        df['obv_mom5']       = _obv.rolling(5).sum()
-        _obv_std = df['obv_mom5'].rolling(63).std().replace(0, 1)
-        df['obv_mom5_z']     = (df['obv_mom5'] / _obv_std).fillna(0)
-        log.info("    거래량 방향 신호 피처 생성 (6개)")
-    else:
-        for _vc in ['vol_pressure','vol_up_surge','vol_down_surge',
-                    'vol_ma_ratio','obv_mom5','obv_mom5_z']:
-            df[_vc] = 0.0
-
-    # ── 웨이블릿 분해 피처 (논문: 다중 주파수 방향 신호 포착)
-    try:
-        import pywt as _pywt
-        _wti_arr = df['WTI'].fillna(method='ffill').values
-        _cA, _cD3, _cD2, _cD1 = _pywt.wavedec(_wti_arr, 'db4', level=3)
-        # 각 레벨 재구성 후 원 길이로 정렬
-        def _wav_recon(coeffs, level_idx, n):
-            _c = [np.zeros_like(coeffs[i]) if i != level_idx else coeffs[i]
-                  for i in range(len(coeffs))]
-            _r = _pywt.waverec(_c, 'db4')
-            return _r[:n] if len(_r) >= n else np.pad(_r, (0, n-len(_r)))
-        _n = len(_wti_arr)
-        _trend  = _wav_recon([_cA, _cD3, _cD2, _cD1], 0, _n)  # 저주파 추세
-        _mid    = _wav_recon([_cA, _cD3, _cD2, _cD1], 1, _n)  # 중간 주파수
-        _hi_f   = _wav_recon([_cA, _cD3, _cD2, _cD1], 3, _n)  # 고주파 노이즈
-        _wm     = df['WTI'].mean()
-        df['wav_trend_chg']  = pd.Series(_trend, index=df.index).diff().fillna(0) / _wm
-        df['wav_mid_chg']    = pd.Series(_mid,   index=df.index).diff().fillna(0) / _wm
-        df['wav_hi_std5']    = pd.Series(_hi_f,  index=df.index).rolling(5).std().fillna(0) / _wm
-        df['wav_trend_mom5'] = pd.Series(_trend, index=df.index).diff(5).fillna(0) / _wm
-        log.info("    웨이블릿 분해 피처 생성 (4개)")
-    except Exception as _we:
-        log.warning(f"    웨이블릿 실패({_we}) → wav=0")
-        for _wc in ['wav_trend_chg','wav_mid_chg','wav_hi_std5','wav_trend_mom5']:
-            df[_wc] = 0.0
 
     # ── C: EWMA 변동성 (RiskMetrics λ=0.94)
     df['ewma_vol_10']  = df['log_return'].ewm(span=10,  adjust=False).std().fillna(0)
@@ -2395,9 +2296,8 @@ def train_models(feature_df: pd.DataFrame):
                     maes.append(mean_absolute_error(_y_px, _px_w))
                 return float(np.mean(maes)) if maes else 999.0
 
-            _wf_full = _wf_mae(X_tr_all.values, y_ret_tr.values, available_feats)
             _wf_sel  = _wf_mae(train_df[_sel_feats].values, y_ret_tr.values, _sel_feats)
-            log.info(f"        WF-CV MAE: 전체={_wf_full:.4f} 선택={_wf_sel:.4f}")
+            log.info(f"        WF-CV MAE (선택피처)={_wf_sel:.4f}")
 
             # ── XGBoost 이진 분류기 (방향성 특화 학습)
             # 논문 근거: WTI 방향성 71~80% 보고 (binary:logistic + 회귀 크기 결합)
@@ -2430,160 +2330,12 @@ def train_models(feature_df: pd.DataFrame):
                     _best_svm = _sm
                     log.info(f"        [SVM-RBF] dir={_best_svm_dir*100:.1f}%")
 
-                    # SVM + 캔들스틱·웨이블릿 피처 (방향성 특화, 회귀선택 영향 없음)
-                    _dir_cols = [c for c in
-                                 ['cs_body_pct','cs_upper_wick','cs_lower_wick','cs_body_range',
-                                  'cs_wick_ratio','cs_gap','cs_hammer','cs_star',
-                                  'cs_bull_eng','cs_bear_eng','cs_doji',
-                                  'wav_trend_chg','wav_mid_chg','wav_hi_std5','wav_trend_mom5',
-                                  'vol_pressure','vol_up_surge','vol_down_surge',
-                                  'vol_ma_ratio','obv_mom5_z']
-                                 if c in train_df.columns and train_df[c].abs().sum() > 0]
-
                     if _best_svm_dir > ((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean():
                         _prob_up_te = _best_svm_prob
                         _mD_cls_dir = _best_svm
                         log.info(f"        → SVM 채택 (dir={_best_svm_dir*100:.1f}%)")
                 except Exception as _se:
                     log.warning(f"    SVM 실패({_se})")
-
-
-                # ── ② 5일 방향 융합 (다중 시계열 논문: SVM F1 0.70~0.72)
-                try:
-                    _n_tr = len(_Xtr_sel)
-                    _wti_tr = train_df['WTI'].values
-                    _y_5d = (_wti_tr[5:] > _wti_tr[:-5]).astype(int)   # 5일 후 방향
-                    _X_5d = _Xtr_sel[:len(_y_5d)]
-                    _w_5d = w_ret[:len(_y_5d)]
-                    _mc5 = xgb.XGBClassifier(**_xgb_cls_p)
-                    _mc5.fit(_X_5d, _y_5d, sample_weight=_w_5d)
-                    _prob_5d = _mc5.predict_proba(_Xte_sel)[:, 1]
-                    # 1일+5일 확률 평균 → 합의 방향
-                    _prob_fused = 0.5 * _prob_up_te + 0.5 * _prob_5d
-                    _dir_fused  = float(((_prob_fused > 0.5).astype(int) == _y_cls_te).mean())
-                    log.info(f"        [5일 융합] dir={_dir_fused*100:.1f}%")
-                    if _dir_fused > ((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean():
-                        _prob_up_te = _prob_fused
-                        log.info("        → 5일 융합 채택")
-                except Exception as _f5e:
-                    log.warning(f"    5일 융합 실패({_f5e})")
-
-                # ── 딥러닝 방향성 분류기 (GRU + Attention, 소규모 금융 데이터 특화)
-                _lstm_model_store = None
-                try:
-                    import torch as _torch
-                    import torch.nn as _nn
-                    import io as _io
-
-                    _DEVICE = _torch.device('cuda' if _torch.cuda.is_available() else 'cpu')
-                    _NFEAT  = _Xtr_sel.shape[1]
-
-                    class _AttnGRU(_nn.Module):
-                        """단일 GRU + 시간 어텐션: 소규모 데이터에 최적화"""
-                        def __init__(self, n_in, h=48, drop=0.4):
-                            super().__init__()
-                            self.gru  = _nn.GRU(n_in, h, batch_first=True)
-                            self.attn = _nn.Linear(h, 1)
-                            self.head = _nn.Sequential(
-                                _nn.Dropout(drop),
-                                _nn.Linear(h, 1), _nn.Sigmoid())
-                        def forward(self, x):
-                            out, _ = self.gru(x)            # (B, T, h)
-                            w = _torch.softmax(self.attn(out), dim=1)  # (B, T, 1)
-                            ctx = (w * out).sum(dim=1)      # (B, h)
-                            return self.head(ctx).squeeze(-1)
-
-                    class _CNN1D(_nn.Module):
-                        """1D CNN: 지역 패턴 포착, 소규모 데이터에 효율적"""
-                        def __init__(self, n_in, drop=0.4):
-                            super().__init__()
-                            self.net = _nn.Sequential(
-                                _nn.Conv1d(n_in, 32, kernel_size=3, padding=1), _nn.ReLU(),
-                                _nn.Conv1d(32, 64, kernel_size=3, padding=1),   _nn.ReLU(),
-                                _nn.AdaptiveAvgPool1d(1))
-                            self.head = _nn.Sequential(
-                                _nn.Dropout(drop), _nn.Linear(64, 1), _nn.Sigmoid())
-                        def forward(self, x):                      # x: (B, T, F)
-                            return self.head(self.net(x.permute(0,2,1)).squeeze(-1)).squeeze(-1)
-
-                    _best_dl_dir, _best_dl_prob, _best_dl_mdl = 0.0, None, None
-                    _cur_dir = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
-
-                    for _SEQ in [5, 10, 15]:
-                        for _Arch, _AName in [(_AttnGRU, 'GRU'), (_CNN1D, 'CNN')]:
-                          try:
-                            # 시퀀스 생성 (train만 사용, test는 앞에 train tail 붙임)
-                            _n_tr = len(_Xtr_sel)
-                            _Xtr_seq = np.array([_Xtr_sel[i-_SEQ:i]
-                                                 for i in range(_SEQ, _n_tr)], dtype=np.float32)
-                            _ytr_seq = _y_cls_tr[_SEQ:].astype(np.float32)
-                            _wtr_seq = w_ret[_SEQ:].astype(np.float32)
-                            # test 시퀀스: train/test 연결 후 슬라이딩 윈도우
-                            _full_lm = np.vstack([_Xtr_sel, _Xte_sel])
-                            _Xte_seq = np.array(
-                                [_full_lm[_n_tr+i-_SEQ:_n_tr+i]
-                                 for i in range(len(_Xte_sel))], dtype=np.float32)
-                            _yte_seq = _y_cls_te.astype(np.float32)
-
-                            # 검증셋: 훈련 시퀀스 마지막 15%
-                            _nv = max(int(len(_Xtr_seq) * 0.15), 20)
-                            _Xv, _yv = _Xtr_seq[-_nv:], _ytr_seq[-_nv:]
-                            _Xtr2, _ytr2, _wtr2 = _Xtr_seq[:-_nv], _ytr_seq[:-_nv], _wtr_seq[:-_nv]
-
-                            _mdl = _Arch(_NFEAT).to(_DEVICE)
-                            _opt = _torch.optim.Adam(_mdl.parameters(), lr=3e-3, weight_decay=1e-3)
-                            _bce = _nn.BCELoss(reduction='none')
-                            _Xt  = _torch.FloatTensor(_Xtr2).to(_DEVICE)
-                            _yt  = _torch.FloatTensor(_ytr2).to(_DEVICE)
-                            _wt  = _torch.FloatTensor(_wtr2).to(_DEVICE)
-                            _ds  = _torch.utils.data.TensorDataset(_Xt, _yt, _wt)
-                            _dl2 = _torch.utils.data.DataLoader(_ds, batch_size=64, shuffle=True)
-
-                            _buf, _best_vacc, _pat = _io.BytesIO(), 0.0, 0
-                            for _ep in range(80):
-                                _mdl.train()
-                                for _xb, _yb, _wb in _dl2:
-                                    _opt.zero_grad()
-                                    _loss = (_bce(_mdl(_xb), _yb) * _wb).mean()
-                                    _loss.backward(); _opt.step()
-                                # 검증 정확도 기반 조기 종료
-                                _mdl.eval()
-                                with _torch.no_grad():
-                                    _pv = _mdl(_torch.FloatTensor(_Xv).to(_DEVICE)).cpu().numpy()
-                                _vacc = float(((_pv > 0.5).astype(int) == _yv).mean())
-                                if _vacc > _best_vacc:
-                                    _best_vacc = _vacc; _pat = 0
-                                    _buf.seek(0); _torch.save(_mdl.state_dict(), _buf)
-                                else:
-                                    _pat += 1
-                                    if _pat >= 15: break
-
-                            _buf.seek(0)
-                            _mdl.load_state_dict(_torch.load(_buf, weights_only=True))
-                            _mdl.eval()
-                            with _torch.no_grad():
-                                _pte = _mdl(_torch.FloatTensor(_Xte_seq).to(_DEVICE)).cpu().numpy()
-                            _dir_dl = float(((_pte > 0.5).astype(int) == _yte_seq).mean())
-                            log.info(f"        [{_AName} seq={_SEQ}] dir={_dir_dl*100:.1f}%")
-                            if _dir_dl > _best_dl_dir:
-                                _best_dl_dir = _dir_dl
-                                _best_dl_prob = _pte
-                                _best_dl_mdl  = (_mdl, _SEQ)
-                          except Exception as _se2:
-                            log.warning(f"    {_AName} seq={_SEQ} 실패({_se2})")
-
-                    if _best_dl_prob is not None and _best_dl_dir > _cur_dir:
-                        _prob_up_te = _best_dl_prob
-                        _mdl_best, _seq_best = _best_dl_mdl
-                        _lstm_model_store = {
-                            'model': _mdl_best, 'seq': _seq_best,
-                            'scaler': _sc_sel, 'features': _sel_feats,
-                        }
-                        log.info(f"        → GRU-Attn 채택 (dir={_best_dl_dir*100:.1f}%)")
-                except ImportError:
-                    log.info("        PyTorch 없음 → DL 건너뜀")
-                except Exception as _le:
-                    log.warning(f"    DL 분류기 실패({_le})")
 
                 _best_th = 0.5
                 _dir_cls = float(((_prob_up_te > _best_th).astype(int) == _y_cls_te).mean())
@@ -2597,7 +2349,6 @@ def train_models(feature_df: pd.DataFrame):
                 log.info(f"        [Classifier-adj] dir={_dir_cls*100:.1f}%  MAE={_mae_cls:.4f}  R²={_r2_cls:.4f}")
                 results['xgb_classifier'] = {
                     'model': _mD_cls_dir, 'scaler': _sc_sel, 'features': _sel_feats,
-                    'lstm': _lstm_model_store,   # LSTM 채택 시 저장
                     'dir_acc': _dir_cls, 'type': 'price',
                     'rmse': _rmse_cls, 'mae': _mae_cls, 'r2': _r2_cls,
                     'name': f'XGBoost-Classifier (방향성={_dir_cls*100:.1f}%)',
@@ -2645,7 +2396,7 @@ def train_models(feature_df: pd.DataFrame):
                 'features': _use_feats, 'type': 'price',
                 'rmse': rmse_d, 'mae': mae_d, 'r2': r2_d,
                 'dir_acc': dir_acc,
-                'wf_cv_mae': round(min(_wf_full, _wf_sel), 4),
+                'wf_cv_mae': round(_wf_sel, 4),
                 'name': f'XGBoost-Return (방향성={dir_acc*100:.1f}%)',
                 'model_q10': _mD_q10, 'model_q90': _mD_q90,
             }
@@ -2886,60 +2637,6 @@ def _ridge_fallback(results, Xtr, ytr, Xte, yte, feats, scaler):
 
 
 
-def _train_prophet(train_df: pd.DataFrame, test_df: pd.DataFrame,
-                   exog_feats: list) -> dict | None:
-    """4번: Prophet 모델 학습 및 hold-out 평가"""
-    if not _PROPHET or not _SKL:
-        return None
-    try:
-        prophet_df = pd.DataFrame({
-            'ds': pd.to_datetime(train_df.index),
-            'y':  train_df['WTI'].values,
-        })
-        reg_cols = [c for c in exog_feats if c in train_df.columns]
-        for c in reg_cols:
-            prophet_df[c] = train_df[c].fillna(0).values
-
-        m = _Prophet(
-            daily_seasonality=False,
-            weekly_seasonality=True,
-            yearly_seasonality=True,
-            changepoint_prior_scale=0.05,
-            seasonality_prior_scale=5.0,
-        )
-        for c in reg_cols:
-            m.add_regressor(c, standardize=True)
-        m.fit(prophet_df)
-
-        # hold-out 평가
-        test_future = pd.DataFrame({'ds': pd.to_datetime(test_df.index)})
-        for c in reg_cols:
-            test_future[c] = test_df[c].fillna(0).values
-        fc = m.predict(test_future)
-        pred = fc['yhat'].values
-
-        rmse_p = float(np.sqrt(mean_squared_error(test_df['WTI'].values, pred)))
-        mae_p  = float(mean_absolute_error(test_df['WTI'].values, pred))
-        r2_p   = float(r2_score(test_df['WTI'].values, pred))
-        log.info(f"        Prophet Hold-out → RMSE={rmse_p:.4f}  R²={r2_p:.4f}")
-
-        # R² < 0.3이면 실용성 없음 → 미사용
-        if r2_p < 0.3:
-            log.info(f"        Prophet 미채택 (R²={r2_p:.4f} < 0.3 기준)")
-            return None
-
-        return {
-            'model': m, 'type': 'price',
-            'rmse': rmse_p, 'mae': mae_p, 'r2': r2_p,
-            'reg_cols': reg_cols,
-            'pred_price_test': pred,
-            'name': 'Prophet',
-        }
-    except Exception as exc:
-        log.warning(f"    Prophet 학습 실패({exc}) → 미사용")
-        return None
-
-
 def compute_ensemble_weights(window: int = 30):
     """R² 기반 초기 가중치 + MAPE 미세조정으로 SARIMAX/XGBoost 동적 가중치 산출.
 
@@ -3069,44 +2766,7 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             if hasattr(model, 'predict_proba'):
                 _reg_m = info.get('_reg_model')
                 _mag_ret = float(_reg_m.predict(last_s)[0]) if _reg_m is not None else 0.001
-                # SVM+COT 피처 처리
-                _cot_sc  = info.get('cot_scaler')
-                _cot_fts = info.get('cot_feats', [])
-                if _cot_sc is not None and _cot_fts:
-                    _avf_cot = [f for f in _cot_fts if f in feature_df.columns]
-                    _cot_row = _cot_sc.transform(feature_df[_avf_cot].iloc[-1:].values)
-                    _cls_input = np.hstack([last_s, _cot_row])
-                else:
-                    _cls_input = last_s
-                # LSTM이 채택된 경우: 최근 seq일 시퀀스로 방향 예측
-                _lstm_info = info.get('lstm')
-                if _lstm_info is not None:
-                    try:
-                        import torch as _torch
-                        _lm     = _lstm_info['model']
-                        _lseq   = _lstm_info['seq']
-                        _lsc    = _lstm_info['scaler']
-                        _lft    = _lstm_info['features']
-                        _lavf   = [f for f in _lft if f in feature_df.columns]
-                        _lX_raw = _lsc.transform(feature_df[_lavf].values)
-                        _lX_seq = _lX_raw[-_lseq:][np.newaxis].astype(np.float32)
-                        _lt     = _torch.FloatTensor(_lX_seq)
-                        _lm.eval()
-                        with _torch.no_grad():
-                            _prob_up_fc = float(_lm(_lt).item())
-                    except Exception as _lfe:
-                        log.warning(f"    LSTM forecast 실패({_lfe}) → SVM 폴백")
-                        _prob_up_fc = float(model.predict_proba(last_s)[0, 1])
-                else:
-                    _cot_sc  = info.get('cot_scaler')
-                    _cot_fts = info.get('cot_feats', [])
-                    if _cot_sc is not None and _cot_fts:
-                        _avf_cot = [f for f in _cot_fts if f in feature_df.columns]
-                        _cot_row = _cot_sc.transform(feature_df[_avf_cot].iloc[-1:].values)
-                        _cls_input = np.hstack([last_s, _cot_row])
-                    else:
-                        _cls_input = last_s
-                    _prob_up_fc = float(model.predict_proba(_cls_input)[0, 1])
+                _prob_up_fc = float(model.predict_proba(last_s)[0, 1])
                 _cls_th = info.get('threshold', 0.5)
                 pred_ret_d1 = abs(_mag_ret) * (1.0 if _prob_up_fc > _cls_th else -1.0)
             else:
