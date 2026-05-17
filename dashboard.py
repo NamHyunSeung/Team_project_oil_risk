@@ -61,9 +61,67 @@ _authenticator = _load_authenticator()
 
 # 미인증 상태일 때만 로그인 폼 렌더링
 if not st.session_state.get("authentication_status"):
+    # ── 구독 플랜 안내
+    st.markdown("""
+<div style='text-align:center; padding: 32px 0 8px 0;'>
+  <span style='font-size:2.4rem;'>🛢</span>
+  <h2 style='color:#e6edf3; margin:8px 0 4px 0; font-size:1.6rem;'>국제 유가 리스크 예측 시스템</h2>
+  <p style='color:#8b949e; margin:0 0 28px 0; font-size:0.9rem;'>AI 기반 WTI 유가 예측 · 리스크 신호 · 뉴스 감성 분석</p>
+</div>
+""", unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns(3)
+    _plan_css = """
+    border-radius:12px; padding:20px 16px; text-align:center;
+    border:1px solid {border}; background:{bg};
+    """
+    with col1:
+        st.markdown(f"""
+<div style='{_plan_css.format(bg="#161b22", border="#30363d")}'>
+  <p style='color:#8b949e; font-size:0.8rem; margin:0 0 4px 0; letter-spacing:1px;'>BASIC</p>
+  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0;'>$29<span style='font-size:0.9rem; font-weight:400; color:#8b949e;'>/월</span></p>
+  <hr style='border-color:#30363d; margin:12px 0;'>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 7일 가격 예측</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 리스크 신호 (NORMAL~SURGE)</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 뉴스 감성 분석</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 대시보드 접근</p>
+  <p style='color:#484f58; font-size:0.82rem; margin:4px 0;'>✗ 이메일 알림</p>
+  <p style='color:#484f58; font-size:0.82rem; margin:4px 0;'>✗ API 접근</p>
+</div>""", unsafe_allow_html=True)
+
+    with col2:
+        st.markdown(f"""
+<div style='{_plan_css.format(bg="#0d2137", border="#1f6feb")}'>
+  <p style='color:#58a6ff; font-size:0.8rem; margin:0 0 4px 0; letter-spacing:1px;'>PRO ⭐ 추천</p>
+  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0;'>$79<span style='font-size:0.9rem; font-weight:400; color:#8b949e;'>/월</span></p>
+  <hr style='border-color:#1f6feb; margin:12px 0;'>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ Basic 전체 포함</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 변동성·VIX 상세 분석</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 이메일 알림 (급등/급락)</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 리스크 히스토리 차트</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ CSV 데이터 다운로드</p>
+  <p style='color:#484f58; font-size:0.82rem; margin:4px 0;'>✗ API 접근</p>
+</div>""", unsafe_allow_html=True)
+
+    with col3:
+        st.markdown(f"""
+<div style='{_plan_css.format(bg="#161b22", border="#30363d")}'>
+  <p style='color:#f0883e; font-size:0.8rem; margin:0 0 4px 0; letter-spacing:1px;'>ENTERPRISE</p>
+  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0;'>문의<span style='font-size:0.9rem; font-weight:400; color:#8b949e;'> /맞춤</span></p>
+  <hr style='border-color:#30363d; margin:12px 0;'>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ Pro 전체 포함</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ REST API 접근</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 맞춤형 모델 학습</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 전담 기술 지원</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 다중 사용자 계정</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ SLA 보장</p>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+
     _authenticator.login(
         location="main",
-        fields={"Form name": "🛢  유가 리스크 시스템",
+        fields={"Form name": "🔐  로그인",
                 "Username": "아이디", "Password": "비밀번호", "Login": "로그인"},
     )
     _auth_status = st.session_state.get("authentication_status")
