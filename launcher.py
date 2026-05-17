@@ -11,9 +11,17 @@ import webbrowser
 import sys
 import os
 import time
+import shutil
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
+# PyInstaller EXE로 실행 중이면 sys.executable = EXE 자신 → Python 별도 탐색
+if getattr(sys, 'frozen', False):
+    BASE_DIR  = Path(sys.executable).parent          # OilRisk.exe 위치 = 프로젝트 루트
+    _PYTHON   = shutil.which('python') or shutil.which('python3') or shutil.which('pythonw')
+else:
+    BASE_DIR  = Path(__file__).parent
+    _PYTHON   = sys.executable
+
 DASHBOARD_URL = "http://localhost:8501"
 
 # ── 다크 테마 색상 ─────────────────────────────────────────────
@@ -151,7 +159,7 @@ class OilRiskLauncher(tk.Tk):
 
         try:
             self._proc = subprocess.Popen(
-                [sys.executable, "-m", "streamlit", "run",
+                [_PYTHON, "-m", "streamlit", "run",
                  str(BASE_DIR / "dashboard.py"),
                  "--server.headless", "true",
                  "--server.port", "8501"],
