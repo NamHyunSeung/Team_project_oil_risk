@@ -1624,29 +1624,38 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         news_df['is_pos']      = (news_df['sentiment'] >  0.05).astype(float)
         news_df['is_neg']      = (news_df['sentiment'] < -0.05).astype(float)
 
+        def _hedge_score(text):
+            if not isinstance(text, str): return 0.0
+            toks = text.lower().split()
+            return min(sum(1 for t in toks if t in HEDGE_WORDS) / (len(toks) * 0.1 + 1e-8), 1.0)
+        news_df['uncertainty'] = news_df['title'].apply(_hedge_score)
+
         def _wavg_sent(g):
             return g['w_sentiment'].sum() / g['impact_w'].sum() if g['impact_w'].sum() > 0 else 0.0
 
         daily = news_df.groupby('date').apply(
             lambda g: pd.Series({
-                'news_count':     len(g),
-                'news_sentiment': _wavg_sent(g),
-                'news_count_pos': g['is_pos'].sum(),
-                'news_count_neg': g['is_neg'].sum(),
+                'news_count':       len(g),
+                'news_sentiment':   _wavg_sent(g),
+                'news_count_pos':   g['is_pos'].sum(),
+                'news_count_neg':   g['is_neg'].sum(),
+                'news_uncertainty': g['uncertainty'].mean(),
             })
         )
         daily.index = pd.to_datetime(daily.index)
         df = df.join(daily, how='left')
-        df['news_count']     = df['news_count'].fillna(0)
-        df['news_count_pos'] = df['news_count_pos'].fillna(0)
-        df['news_count_neg'] = df['news_count_neg'].fillna(0)
+        df['news_count']       = df['news_count'].fillna(0)
+        df['news_count_pos']   = df['news_count_pos'].fillna(0)
+        df['news_count_neg']   = df['news_count_neg'].fillna(0)
+        df['news_uncertainty'] = df['news_uncertainty'].ffill().fillna(0)
         # 뉴스 없는 날: 0(중립) 대신 전날 감성 유지 → 지속적 이벤트 반영
         df['news_sentiment'] = df['news_sentiment'].ffill().fillna(0)
     else:
         df['news_count']     = 0
-        df['news_count_pos'] = 0
-        df['news_count_neg'] = 0
-        df['news_sentiment'] = 0
+        df['news_count_pos']   = 0
+        df['news_count_neg']   = 0
+        df['news_sentiment']   = 0
+        df['news_uncertainty'] = 0
 
     # ── Sentence Embedding → WTI 상관관계 상위 피처 + Oil Event 스코어
     if not news_df.empty:
