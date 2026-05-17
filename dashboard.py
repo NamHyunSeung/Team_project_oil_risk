@@ -70,51 +70,21 @@ if not st.session_state.get("authentication_status"):
 </div>
 """, unsafe_allow_html=True)
 
-    col1, col2, col3 = st.columns(3)
-    _plan_css = """
-    border-radius:12px; padding:20px 16px; text-align:center;
-    border:1px solid {border}; background:{bg};
-    """
-    with col1:
-        st.markdown(f"""
-<div style='{_plan_css.format(bg="#161b22", border="#30363d")}'>
-  <p style='color:#8b949e; font-size:0.8rem; margin:0 0 4px 0; letter-spacing:1px;'>BASIC</p>
-  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0;'>$29<span style='font-size:0.9rem; font-weight:400; color:#8b949e;'>/월</span></p>
-  <hr style='border-color:#30363d; margin:12px 0;'>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 7일 가격 예측</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 리스크 신호 (NORMAL~SURGE)</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 뉴스 감성 분석</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 대시보드 접근</p>
-  <p style='color:#484f58; font-size:0.82rem; margin:4px 0;'>✗ 이메일 알림</p>
-  <p style='color:#484f58; font-size:0.82rem; margin:4px 0;'>✗ API 접근</p>
-</div>""", unsafe_allow_html=True)
-
-    with col2:
-        st.markdown(f"""
-<div style='{_plan_css.format(bg="#0d2137", border="#1f6feb")}'>
-  <p style='color:#58a6ff; font-size:0.8rem; margin:0 0 4px 0; letter-spacing:1px;'>PRO ⭐ 추천</p>
-  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0;'>$79<span style='font-size:0.9rem; font-weight:400; color:#8b949e;'>/월</span></p>
-  <hr style='border-color:#1f6feb; margin:12px 0;'>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ Basic 전체 포함</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 변동성·VIX 상세 분석</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 이메일 알림 (급등/급락)</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 리스크 히스토리 차트</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ CSV 데이터 다운로드</p>
-  <p style='color:#484f58; font-size:0.82rem; margin:4px 0;'>✗ API 접근</p>
-</div>""", unsafe_allow_html=True)
-
-    with col3:
-        st.markdown(f"""
-<div style='{_plan_css.format(bg="#161b22", border="#30363d")}'>
-  <p style='color:#f0883e; font-size:0.8rem; margin:0 0 4px 0; letter-spacing:1px;'>ENTERPRISE</p>
-  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0;'>문의<span style='font-size:0.9rem; font-weight:400; color:#8b949e;'> /맞춤</span></p>
-  <hr style='border-color:#30363d; margin:12px 0;'>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ Pro 전체 포함</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ REST API 접근</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 맞춤형 모델 학습</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 전담 기술 지원</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ 다중 사용자 계정</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:4px 0;'>✓ SLA 보장</p>
+    _, col_center, _ = st.columns([1, 1.2, 1])
+    with col_center:
+        st.markdown("""
+<div style='border-radius:12px; padding:24px 24px; text-align:center;
+            border:1px solid #1f6feb; background:#0d2137;'>
+  <p style='color:#58a6ff; font-size:0.8rem; margin:0 0 4px 0; letter-spacing:1px;'>PRO</p>
+  <p style='color:#e6edf3; font-size:2.2rem; font-weight:700; margin:0;'>$79<span style='font-size:0.95rem; font-weight:400; color:#8b949e;'>/월</span></p>
+  <hr style='border-color:#1f6feb; margin:14px 0;'>
+  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 7일 WTI 가격 예측</p>
+  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 리스크 신호 (NORMAL ~ SURGE)</p>
+  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 뉴스 감성 분석</p>
+  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 변동성 · VIX 상세 분석</p>
+  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 이메일 알림 (급등/급락)</p>
+  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 리스크 히스토리 차트</p>
+  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ CSV 데이터 다운로드</p>
 </div>""", unsafe_allow_html=True)
 
     st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
