@@ -95,6 +95,8 @@ if not st.session_state.get("authentication_status"):
                 "Username": "아이디", "Password": "비밀번호", "Login": "로그인"},
     )
     _auth_status = st.session_state.get("authentication_status")
+    if _auth_status is True:
+        st.rerun()
     if _auth_status is False:
         st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
     st.stop()

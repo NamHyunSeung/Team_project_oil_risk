@@ -3650,57 +3650,94 @@ def plot_oil_forecast(feature_df: pd.DataFrame, fc_df: pd.DataFrame, signal: dic
     plt.close()
     log.info("    oil_forecast_plot.png 저장")
 
-    # ── 사용자용 단순 차트 (가격+예측+리스크 게이지만)
+    # ── 사용자용 단순 차트 (전체 히스토리 + 확대 예측 + 리스크 게이지)
     try:
-        fig_u = plt.figure(figsize=(16, 8), facecolor=BG)
-        gs_u  = gridspec.GridSpec(2, 1, figure=fig_u, hspace=0.35,
-                                  left=0.06, right=0.97, top=0.92, bottom=0.06)
+        fig_u = plt.figure(figsize=(16, 11), facecolor=BG)
+        gs_u  = gridspec.GridSpec(3, 1, figure=fig_u,
+                                  height_ratios=[2, 2.2, 1.1],
+                                  hspace=0.42,
+                                  left=0.06, right=0.97, top=0.93, bottom=0.04)
 
-        # Panel A: 가격 + 예측
+        # Panel A: 전체 히스토리 (overview)
         axA = fig_u.add_subplot(gs_u[0])
         axA.set_facecolor(PAN)
-        axA.tick_params(colors=TXT, labelsize=8)
+        axA.tick_params(colors=TXT, labelsize=7)
         for sp in axA.spines.values(): sp.set_color('#30363d')
-        axA.grid(color='#21262d', linewidth=0.5, alpha=0.7)
-        axA.set_title('WTI Crude Oil  —  Historical Price & 7-Day Forecast',
-                      color=TXT, fontsize=11, pad=6, fontweight='bold')
+        axA.grid(color='#21262d', linewidth=0.5, alpha=0.6)
+        axA.set_title('WTI Crude Oil — Historical Overview',
+                      color=TXT, fontsize=10, pad=5, fontweight='bold')
         hist = feature_df['WTI'].iloc[-N:]
-        axA.plot(hist.index, hist, color=GOLD, lw=1.5, label='WTI (historical)', zorder=3)
+        axA.plot(hist.index, hist, color=GOLD, lw=1.3, label='WTI')
         if 'ma_21d' in feature_df.columns:
             axA.plot(feature_df['ma_21d'].iloc[-N:].index,
                      feature_df['ma_21d'].iloc[-N:],
-                     color='#8b949e', lw=0.9, ls='--', alpha=0.7, label='MA-21')
-        axA.plot(fd, fc_df['forecast_price'], color=CYAN, lw=2, ls='--',
-                 label='Forecast', zorder=4)
-        axA.fill_between(fd, fc_df['lower_80ci'], fc_df['upper_80ci'],
-                         alpha=0.18, color=CYAN, label='80% 예측구간')
-        axA.axvspan(fd.iloc[0], fd.iloc[-1], alpha=0.07, color=rcol)
-        axA.annotate(f"{RISK_LEVELS[rlevel]['emoji']} {RISK_LEVELS[rlevel]['label']}",
-                     xy=(fd.iloc[3], fc_df['forecast_price'].median()),
-                     fontsize=10, color=rcol, fontweight='bold', ha='center')
-        axA.set_ylabel('USD / bbl', color=TXT, fontsize=9)
+                     color='#8b949e', lw=0.8, ls='--', alpha=0.6, label='MA-21')
+        axA.axvspan(fd.iloc[0], fd.iloc[-1], alpha=0.12, color=rcol)
+        axA.set_ylabel('USD / bbl', color=TXT, fontsize=8)
         axA.legend(loc='upper left', facecolor=PAN, labelcolor=TXT,
-                   framealpha=0.6, fontsize=8, ncol=4)
+                   framealpha=0.5, fontsize=7, ncol=2)
 
-        # Panel B: 리스크 게이지
+        # Panel B: 확대 — 최근 45일 + 7일 예측 (CI 밴드 명확히 표시)
         axB = fig_u.add_subplot(gs_u[1])
         axB.set_facecolor(PAN)
-        axB.axis('off')
-        axB.set_xlim(0, 1); axB.set_ylim(0, 1)
-        axB.set_title('Current Risk Signal', color=TXT, fontsize=10, pad=6, fontweight='bold')
+        axB.tick_params(colors=TXT, labelsize=8)
+        for sp in axB.spines.values(): sp.set_color('#30363d')
+        axB.grid(color='#21262d', linewidth=0.5, alpha=0.7)
+        axB.set_title('7-Day Forecast  +  80% Prediction Interval  (최근 45일 확대)',
+                      color=TXT, fontsize=10, pad=5, fontweight='bold')
+        _zoom_hist = feature_df['WTI'].iloc[-45:]
+        axB.plot(_zoom_hist.index, _zoom_hist, color=GOLD, lw=2.0,
+                 label='WTI (historical)', zorder=3)
+        if 'ma_21d' in feature_df.columns:
+            axB.plot(feature_df['ma_21d'].iloc[-45:].index,
+                     feature_df['ma_21d'].iloc[-45:],
+                     color='#8b949e', lw=1.0, ls='--', alpha=0.7, label='MA-21')
+        # CI 밴드 (먼저 그려야 선 위로 안 덮임)
+        axB.fill_between(fd, fc_df['lower_80ci'], fc_df['upper_80ci'],
+                         alpha=0.30, color=CYAN, label='80% 예측구간', zorder=2)
+        axB.plot(fd, fc_df['lower_80ci'], color=CYAN, lw=0.8, ls=':', alpha=0.6)
+        axB.plot(fd, fc_df['upper_80ci'], color=CYAN, lw=0.8, ls=':', alpha=0.6)
+        axB.plot(fd, fc_df['forecast_price'], color=CYAN, lw=2.2, ls='--',
+                 label='Forecast', zorder=4)
+        axB.axvspan(fd.iloc[0], fd.iloc[-1], alpha=0.06, color=rcol)
+        # 예측 D+1 값 레이블
+        axB.annotate(f"D+1: ${fc_df['forecast_price'].iloc[0]:.2f}",
+                     xy=(fd.iloc[0], fc_df['forecast_price'].iloc[0]),
+                     xytext=(10, 10), textcoords='offset points',
+                     color=CYAN, fontsize=8.5, fontweight='bold',
+                     arrowprops=dict(arrowstyle='->', color=CYAN, lw=1))
+        # CI 범위 레이블
+        _lo1, _hi1 = fc_df['lower_80ci'].iloc[0], fc_df['upper_80ci'].iloc[0]
+        axB.annotate(f"[${_lo1:.1f} ~ ${_hi1:.1f}]",
+                     xy=(fd.iloc[0], (_lo1 + _hi1) / 2),
+                     xytext=(12, -18), textcoords='offset points',
+                     color='#8b949e', fontsize=7.5)
+        axB.set_ylabel('USD / bbl', color=TXT, fontsize=9)
+        axB.legend(loc='upper left', facecolor=PAN, labelcolor=TXT,
+                   framealpha=0.6, fontsize=8, ncol=4)
+        axB.annotate(f"{RISK_LEVELS[rlevel]['emoji']} {RISK_LEVELS[rlevel]['label']}",
+                     xy=(fd.iloc[3], fc_df['forecast_price'].median()),
+                     fontsize=10, color=rcol, fontweight='bold', ha='center')
+
+        # Panel C: 리스크 게이지
+        axC = fig_u.add_subplot(gs_u[2])
+        axC.set_facecolor(PAN)
+        axC.axis('off')
+        axC.set_xlim(0, 1); axC.set_ylim(0, 1)
+        axC.set_title('Current Risk Signal', color=TXT, fontsize=10, pad=5, fontweight='bold')
         for rl, lbl, xp in zip(order, labels, xpos):
             is_cur = (rl == rlevel)
             rc_b   = RISK_LEVELS[rl]['color']
-            rect_b = FancyBboxPatch((xp, 0.28), 0.20, 0.44,
+            rect_b = FancyBboxPatch((xp, 0.22), 0.20, 0.50,
                                     boxstyle='round,pad=0.02',
                                     facecolor=rc_b, alpha=0.95 if is_cur else 0.22,
                                     edgecolor='white', linewidth=2.5 if is_cur else 0.5)
-            axB.add_patch(rect_b)
-            axB.text(xp + 0.10, 0.50, lbl, ha='center', va='center',
+            axC.add_patch(rect_b)
+            axC.text(xp + 0.10, 0.47, lbl, ha='center', va='center',
                      color='white', fontsize=9.5,
                      fontweight='bold' if is_cur else 'normal')
             if is_cur:
-                axB.text(xp + 0.10, 0.78, '▲ Current', ha='center',
+                axC.text(xp + 0.10, 0.80, '▲ Current', ha='center',
                          color=rc_b, fontsize=8.5, fontweight='bold')
 
         fig_u.suptitle(
