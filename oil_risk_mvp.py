@@ -118,6 +118,12 @@ try:
 except ImportError:
     _XGB = False
 
+try:
+    import lightgbm as lgb
+    _LGB = True
+except ImportError:
+    _LGB = False
+    log.warning("lightgbm 없음 → LGB 베이스 모델 미사용")
 
 try:
     from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -1256,6 +1262,8 @@ FEATURE_COLS = [
     'regime', 'regime_x_mom', 'regime_x_sent', 'regime_x_gpr',
     # COVID 특수 변수
     'covid_dummy',
+    # 계절성 (원유 수요 사이클)
+    'month_sin', 'month_cos', 'driving_season', 'heating_season',
 ]
 
 
@@ -1389,6 +1397,13 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['dow_thursday']   = (_dow == 3).astype(float)
     df['dow_monday']     = (_dow == 0).astype(float)
     df['eia_vol_signal'] = df['dow_wednesday'] * df['inv_chg_zscore'].abs()
+
+    # ── 계절성 피처 (원유 수요 사이클)
+    _month = pd.to_datetime(df.index).month
+    df['month_sin']       = np.sin(2 * np.pi * _month / 12)   # 연간 주기 순환 인코딩
+    df['month_cos']       = np.cos(2 * np.pi * _month / 12)
+    df['driving_season']  = _month.isin([5,6,7,8,9]).astype(float)   # 5~9월 드라이빙 시즌
+    df['heating_season']  = _month.isin([11,12,1,2,3]).astype(float)  # 11~3월 난방유 시즌
 
     # ── 이동평균 & 모멘텀
     for w in [5, 10, 21]:
@@ -1846,6 +1861,7 @@ def train_models(feature_df: pd.DataFrame):
     exog_cols = [c for c in [
         'dxy_change', 'demand_shock', 'supply_shock', 'vix_change',
         'brent_wti_spread', 'ovx_change', 'futures_spread',
+        'oil_event_score_smooth', 'news_sentiment_smooth7',
     ] if c in feature_df.columns]
     log.info("    [B] SARIMAX 학습 + 1-step ahead 평가 중...")
 
@@ -2100,6 +2116,44 @@ def train_models(feature_df: pd.DataFrame):
             log.warning(f"    XGBoost 수익률 예측 실패({exc})")
 
     # ─────────────────────────────────────────────────────────────────────
+    # Model D2: LightGBM 수익률 예측 (Stacking 다양성 증가용 베이스 모델)
+    # ─────────────────────────────────────────────────────────────────────
+    if _LGB and _SKL and scaler is not None and 'xgb_return' in results:
+        log.info("    [D2] LightGBM 수익률 예측 학습 중...")
+        try:
+            _lgb_p = dict(
+                n_estimators=500, max_depth=4, learning_rate=0.02,
+                num_leaves=31, subsample=0.75, colsample_bytree=0.6,
+                min_child_samples=20, reg_alpha=0.1, reg_lambda=1.0,
+                n_jobs=-1, random_state=42, verbose=-1,
+            )
+            _sc_lgb  = StandardScaler()
+            _Xtr_lgb = _sc_lgb.fit_transform(X_tr_all)
+            _Xte_lgb = _sc_lgb.transform(X_te_all)
+
+            _mD2 = lgb.LGBMRegressor(**_lgb_p)
+            _mD2.fit(_Xtr_lgb, y_ret_tr, sample_weight=w_ret)
+
+            _pr_lgb   = _mD2.predict(_Xte_lgb)
+            _px_lgb   = test_df['WTI'].values * np.exp(_pr_lgb)
+            _r2_lgb   = float(r2_score(y_px_te, _px_lgb))
+            _mae_lgb  = float(mean_absolute_error(y_px_te, _px_lgb))
+            _dir_lgb  = float((np.sign(_pr_lgb) == np.sign(y_ret_te.values)).mean())
+            _rmse_lgb = float(np.sqrt(mean_squared_error(y_px_te, _px_lgb)))
+            log.info(f"    [D2] LGB-Return → R²={_r2_lgb:.4f}  MAE={_mae_lgb:.4f}  dir={_dir_lgb*100:.1f}%")
+
+            results['lgb_return'] = {
+                'model': _mD2, 'scaler': _sc_lgb,
+                'features': available_feats, 'type': 'price',
+                'rmse': _rmse_lgb, 'mae': _mae_lgb, 'r2': _r2_lgb,
+                'dir_acc': _dir_lgb,
+                'name': f'LightGBM-Return (방향성={_dir_lgb*100:.1f}%)',
+                'pred_price_test': _px_lgb,
+            }
+        except Exception as exc:
+            log.warning(f"    LightGBM 수익률 예측 실패({exc})")
+
+    # ─────────────────────────────────────────────────────────────────────
     # Model E: Stacking 앙상블 (SARIMAX + XGBoost → Ridge 메타러너)
     # ─────────────────────────────────────────────────────────────────────
     if (_SKL and 'sarimax' in results and 'xgb_return' in results):
@@ -2119,33 +2173,86 @@ def train_models(feature_df: pd.DataFrame):
                 xr_pred = test_df['WTI'].values * np.exp(_pr_s)
 
             if sx_pred is not None and xr_pred is not None:
-                # 홀드아웃 테스트셋으로 메타러너 학습
-                # 스택 피처: [sarimax_pred, xgb_pred] → actual price
-                _stack_X = np.column_stack([sx_pred, xr_pred])
+                # 스택 피처 구성: SARIMAX + XGB, LGB 있으면 추가
+                _stack_parts = [sx_pred, xr_pred]
+                _stack_names = ['SARIMAX', 'XGB']
+
+                if 'lgb_return' in results:
+                    _lgbi  = results['lgb_return']
+                    _fs_l  = [f for f in _lgbi['features'] if f in test_df.columns]
+                    _Xte_l = _lgbi['scaler'].transform(test_df[_fs_l])
+                    lgb_pred_stack = test_df['WTI'].values * np.exp(_lgbi['model'].predict(_Xte_l))
+                    _stack_parts.append(lgb_pred_stack)
+                    _stack_names.append('LGB')
+
+                _stack_X = np.column_stack(_stack_parts)
                 _stack_y = y_px_te
 
-                _meta = Ridge(alpha=1.0)
-                _meta.fit(_stack_X, _stack_y)
-                _stack_pred = _meta.predict(_stack_X)
+                # Ridge 메타
+                _meta_r = Ridge(alpha=1.0)
+                _meta_r.fit(_stack_X, _stack_y)
+                _pred_r  = _meta_r.predict(_stack_X)
+                _mae_r   = float(mean_absolute_error(_stack_y, _pred_r))
+                _r2_r    = float(r2_score(_stack_y, _pred_r))
+
+                # XGBoost 메타 (소규모 데이터 → 강한 정규화)
+                _meta_xgb = None
+                _mae_x, _r2_x = _mae_r, _r2_r
+                if _XGB and len(_stack_y) >= 30:
+                    _meta_xgb = xgb.XGBRegressor(
+                        n_estimators=100, max_depth=2, learning_rate=0.05,
+                        subsample=0.8, colsample_bytree=1.0,
+                        min_child_weight=10, reg_lambda=5.0,
+                        n_jobs=-1, random_state=42, verbosity=0,
+                    )
+                    _meta_xgb.fit(_stack_X, _stack_y)
+                    _pred_x = _meta_xgb.predict(_stack_X)
+                    _mae_x  = float(mean_absolute_error(_stack_y, _pred_x))
+                    _r2_x   = float(r2_score(_stack_y, _pred_x))
+                    log.info(f"    [E] Ridge meta → R²={_r2_r:.4f} MAE={_mae_r:.4f}  "
+                             f"XGB meta → R²={_r2_x:.4f} MAE={_mae_x:.4f}")
+
+                # 더 나은 메타러너 선택 (MAE 기준)
+                if _meta_xgb is not None and _mae_x < _mae_r:
+                    _meta      = _meta_xgb
+                    _stack_pred = _meta_xgb.predict(_stack_X)
+                    _meta_type = 'XGB'
+                else:
+                    _meta      = _meta_r
+                    _stack_pred = _pred_r
+                    _meta_type = 'Ridge'
+                log.info(f"    [E] 메타러너 채택: {_meta_type}")
 
                 _r2_stack  = float(r2_score(_stack_y, _stack_pred))
                 _mae_stack = float(mean_absolute_error(_stack_y, _stack_pred))
                 _rmse_stack= float(np.sqrt(mean_squared_error(_stack_y, _stack_pred)))
 
-                log.info(f"    [E] Stacking → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
-                         f"coef=[SARIMAX={_meta.coef_[0]:.3f} XGB={_meta.coef_[1]:.3f}]")
+                if _meta_type == 'Ridge':
+                    _coef_str = ' '.join(f'{n}={c:.3f}' for n, c in zip(_stack_names, _meta.coef_))
+                    log.info(f"    [E] Stacking({_meta_type}) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
+                             f"coef=[{_coef_str}]")
+                else:
+                    log.info(f"    [E] Stacking({_meta_type}) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}")
 
                 # 기존 앙상블보다 나으면 채택
                 _r2_curr = max(sx_info['r2'], xr_info['r2'])
                 if _r2_stack > _r2_curr:
-                    results['stacking'] = {
+                    _base_name = '+'.join(_stack_names)
+                    _stk_info = {
                         'model': _meta, 'type': 'price',
                         'rmse': _rmse_stack, 'mae': _mae_stack, 'r2': _r2_stack,
-                        'name': f'Stacking (SARIMAX+XGB)',
-                        'sx_feats': sx_info.get('features', []),
-                        'xr_feats': xr_info['features'],
-                        'xr_scaler': xr_info['scaler'],
+                        'name': f'Stacking ({_base_name},{_meta_type}meta)',
+                        'sx_feats':    sx_info.get('features', []),
+                        'xr_feats':    xr_info['features'],
+                        'xr_scaler':   xr_info['scaler'],
+                        'stack_names': _stack_names,
+                        'meta_type':   _meta_type,
                     }
+                    if 'lgb_return' in results:
+                        _stk_info['lgb_feats']  = results['lgb_return']['features']
+                        _stk_info['lgb_scaler'] = results['lgb_return']['scaler']
+                        _stk_info['lgb_model']  = results['lgb_return']['model']
+                    results['stacking'] = _stk_info
                     log.info(f"    ✅ Stacking 채택: R²={_r2_stack:.4f}")
                 else:
                     log.info(f"    Stacking 미채택 (R²={_r2_stack:.4f} ≤ 현재 최고={_r2_curr:.4f})")
@@ -2437,13 +2544,31 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                  f"Prophet={forecasts['prophet'][0]:.2f} XGB={forecasts['xgb'][0]:.2f} "
                  f"→ 앙상블={ensemble[0]:.2f}")
     elif 'sarimax' in forecasts and 'xgb' in forecasts and 'stacking' in results:
-        # Stacking 채택된 경우: 메타러너가 최적 가중치 결정
-        _sx_fc = forecasts['sarimax']
-        _xb_fc = forecasts['xgb']
-        _stk   = results['stacking']['model']
-        ensemble = np.array([
-            float(_stk.predict([[_sx_fc[i], _xb_fc[i]]])[0]) for i in range(7)
-        ])
+        _sx_fc      = forecasts['sarimax']
+        _xb_fc      = forecasts['xgb']
+        _stk        = results['stacking']
+        _meta_m     = _stk['model']
+        _stk_names  = _stk.get('stack_names', ['SARIMAX', 'XGB'])
+
+        # LGB 예측 생성
+        _lgb_fc = None
+        if 'LGB' in _stk_names and 'lgb_model' in _stk:
+            try:
+                _feats_l = [f for f in _stk['lgb_feats'] if f in feature_df.columns]
+                _last_l  = feature_df[_feats_l].iloc[-1:].values.copy()
+                _pred_ret_lgb = float(_stk['lgb_model'].predict(
+                    _stk['lgb_scaler'].transform(_last_l))[0])
+                _decay = np.array([0.95 ** i for i in range(7)])
+                _lgb_fc = last_price * np.exp(np.cumsum(_pred_ret_lgb * _decay))
+            except Exception as _le:
+                log.warning(f"LGB 예측 실패: {_le}")
+
+        ensemble = np.zeros(7)
+        for i in range(7):
+            _pts = [_sx_fc[i], _xb_fc[i]]
+            if _lgb_fc is not None:
+                _pts.append(_lgb_fc[i])
+            ensemble[i] = float(_meta_m.predict([_pts])[0])
         log.info(f"    ✅ Stacking 앙상블 적용: D+1={ensemble[0]:.2f}")
     elif 'sarimax' in forecasts and 'xgb' in forecasts:
         ensemble = w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb']
