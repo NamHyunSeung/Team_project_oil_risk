@@ -2386,12 +2386,13 @@ def train_models(feature_df: pd.DataFrame):
                     _best_svm, _best_svm_dir, _best_svm_prob = None, 0.0, None
                     _sc_cot, _cot_cols = None, []
 
-                    # CEEMDAN을 SVM에만 직접 주입 (FEATURE_COLS 우회)
-                    _cem_cols = [c for c in ['ceemdan_trend_ret',
-                                             'ceemdan_noise_std5',
-                                             'ceemdan_trend_mom5']
-                                 if c in train_df.columns
-                                 and train_df[c].abs().sum() > 0]
+                    # CEEMDAN + 이벤트 카테고리 스코어를 SVM에만 직접 주입
+                    _cem_cols = [c for c in [
+                        'ceemdan_trend_ret', 'ceemdan_noise_std5', 'ceemdan_trend_mom5',
+                        'supply_event_score', 'supply_event_score_smooth',
+                        'demand_event_score', 'demand_event_score_smooth',
+                        'geo_event_score',    'geo_event_score_smooth',
+                    ] if c in train_df.columns and train_df[c].abs().sum() > 0]
                     if _cem_cols:
                         _sc_cem = StandardScaler()
                         _Xtr_c  = _sc_cem.fit_transform(
@@ -2408,7 +2409,7 @@ def train_models(feature_df: pd.DataFrame):
                     _sm.fit(_Xtr_svm, _y_cls_tr)
                     _best_svm_prob = _sm.predict_proba(_Xte_svm)[:, 1]
                     _best_svm_dir  = float(((_best_svm_prob > 0.5).astype(int) == _y_cls_te).mean())
-                    log.info(f"        [SVM+CEEMDAN] dir={_best_svm_dir*100:.1f}%")
+                    log.info(f"        [SVM+CEEMDAN+Event] dir={_best_svm_dir*100:.1f}% (주입피처={len(_cem_cols)}개)")
 
                     if _best_svm_dir > ((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean():
                         # ExtSVM 래퍼: forecast 시 CEEMDAN을 자동으로 붙여줌
