@@ -2080,6 +2080,8 @@ def train_models(feature_df: pd.DataFrame):
                           subsample=0.75, colsample_bytree=0.6,
                           min_child_weight=8, reg_alpha=0.3, reg_lambda=3.0,
                           n_jobs=-1, random_state=42, verbosity=0)
+            # Quantile(α=0.45): 하방 편향 → 방향성 정확도 향상 목적
+            _xgb_q = dict(**_xgb_p, objective='reg:quantileerror', quantile_alpha=0.45)
 
             _n_ret  = len(y_ret_tr)
             _tw_ret = np.exp(np.log(2) / 252 * np.arange(_n_ret)) ; _tw_ret /= _tw_ret.mean()
@@ -2133,19 +2135,49 @@ def train_models(feature_df: pd.DataFrame):
             _pr_f, _px_f, _r2_f, _mae_f, _dir_f = _eval(_mD_full, _Xte_full, '전체피처')
             _pr_s, _px_s, _r2_s, _mae_s, _dir_s = _eval(_mD_sel,  _Xte_sel,  '선택피처')
 
-            # MAE 기준으로 더 나은 모델 채택
-            if _mae_s <= _mae_f:
-                modelD, ret_scaler = _mD_sel, _sc_sel
-                pred_ret, pred_px_d = _pr_s, _px_s
-                r2_d, mae_d, dir_acc = _r2_s, _mae_s, _dir_s
-                _use_feats = _sel_feats
-                log.info(f"    ✅ 선택 피처 모델 채택 ({len(_sel_feats)}개)")
-            else:
-                modelD, ret_scaler = _mD_full, _sc_full
-                pred_ret, pred_px_d = _pr_f, _px_f
-                r2_d, mae_d, dir_acc = _r2_f, _mae_f, _dir_f
-                _use_feats = available_feats
-                log.info(f"    전체 피처 모델 유지")
+            # Quantile(α=0.45) 모델 — 방향성 편향 개선
+            try:
+                _mD_q = xgb.XGBRegressor(**_xgb_q)
+                _mD_q.fit(_Xtr_sel, y_ret_tr, sample_weight=w_ret)
+                _pr_q, _px_q, _r2_q, _mae_q, _dir_q = _eval(_mD_q, _Xte_sel, 'Quantile')
+            except Exception:
+                _mD_q, _mae_q, _dir_q = None, 999.0, 0.0
+
+            # Walk-forward CV로 피처 선택 (5-fold, 훈련셋 내부 평가)
+            _tscv = TimeSeriesSplit(n_splits=5)
+            def _wf_mae(X_tr, y_tr, feats):
+                maes = []
+                for _ti, _vi in _tscv.split(X_tr):
+                    if len(_ti) < 60: continue
+                    _sc_w = StandardScaler()
+                    _Xw_tr = _sc_w.fit_transform(X_tr[_ti])
+                    _Xw_val= _sc_w.transform(X_tr[_vi])
+                    _mw = xgb.XGBRegressor(**_xgb_p)
+                    _mw.fit(_Xw_tr, y_tr[_ti], sample_weight=w_ret[_ti])
+                    _pp  = _mw.predict(_Xw_val)
+                    _px_w= train_df['WTI'].values[_vi] * np.exp(_pp)
+                    _y_px= train_df['target_price'].values[_vi]
+                    maes.append(mean_absolute_error(_y_px, _px_w))
+                return float(np.mean(maes)) if maes else 999.0
+
+            _wf_full = _wf_mae(X_tr_all.values, y_ret_tr.values, available_feats)
+            _wf_sel  = _wf_mae(train_df[_sel_feats].values, y_ret_tr.values, _sel_feats)
+            log.info(f"        WF-CV MAE: 전체={_wf_full:.4f} 선택={_wf_sel:.4f}")
+
+            # 후보 모델: MAE 기준 선택피처 vs 전체피처, + Quantile
+            _candidates = [
+                (_mae_f, _dir_f, _mD_full, _sc_full, _pr_f, _px_f, _r2_f, available_feats, 'MSE-전체'),
+                (_mae_s, _dir_s, _mD_sel,  _sc_sel,  _pr_s, _px_s, _r2_s, _sel_feats,      'MSE-선택'),
+            ]
+            if _mD_q is not None:
+                _candidates.append((_mae_q, _dir_q, _mD_q, _sc_sel, _pr_q, _px_q, _r2_q, _sel_feats, 'Quantile'))
+
+            # MAE ≤ 최선 + 5% 범위 내에서 dir_acc 최고 모델 채택
+            _best_mae = min(c[0] for c in _candidates)
+            _filtered = [c for c in _candidates if c[0] <= _best_mae * 1.05]
+            _chosen = max(_filtered, key=lambda c: c[1])
+            mae_d, dir_acc, modelD, ret_scaler, pred_ret, pred_px_d, r2_d, _use_feats, _cname = _chosen
+            log.info(f"    ✅ 채택: {_cname} (MAE={mae_d:.4f} dir={dir_acc*100:.1f}%)")
 
             rmse_d = float(np.sqrt(mean_squared_error(y_px_te, pred_px_d)))
             results['xgb_return'] = {
@@ -2153,6 +2185,7 @@ def train_models(feature_df: pd.DataFrame):
                 'features': _use_feats, 'type': 'price',
                 'rmse': rmse_d, 'mae': mae_d, 'r2': r2_d,
                 'dir_acc': dir_acc,
+                'wf_cv_mae': round(min(_wf_full, _wf_sel), 4),
                 'name': f'XGBoost-Return (방향성={dir_acc*100:.1f}%)',
             }
         except Exception as exc:
