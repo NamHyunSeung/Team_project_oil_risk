@@ -505,8 +505,17 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
 
         df['inv_chg_zscore'] = _zscore(inv_chg_bday).reindex(df.index).ffill().bfill().fillna(0)
         df['inv_lvl_zscore'] = _zscore(inv_level_bday).reindex(df.index).ffill().bfill().fillna(0)
-        log.info(f"      원유 재고 연결 완료: {len(inv)}주치 "
-                 f"(변화 z-score μ={df['inv_chg_zscore'].mean():.3f})")
+
+        # 서프라이즈: 실제 변화량 vs 4주 이동평균 대비 이탈 (시장 기대 프록시)
+        inv_chg_ma4 = inv_chg.rolling(4).mean()
+        inv_surprise_raw = (inv_chg - inv_chg_ma4).resample('B').first().ffill()
+        df['inv_surprise'] = _zscore(inv_surprise_raw).reindex(df.index).ffill().bfill().fillna(0)
+
+        # 4주 연속 방향성 모멘텀 (증가/감소 추세)
+        inv_mom4 = inv_chg.rolling(4).sum().resample('B').first().ffill()
+        df['inv_mom4_z'] = _zscore(inv_mom4).reindex(df.index).ffill().bfill().fillna(0)
+
+        log.info(f"      원유 재고 연결 완료: {len(inv)}주치 + 서프라이즈·모멘텀 피처")
     except Exception as exc:
         log.warning(f"      원유 재고 수집 실패({exc}) → 0 사용")
         df['inv_chg_zscore'] = 0.0
@@ -1277,6 +1286,8 @@ FEATURE_COLS = [
     'month_sin', 'month_cos', 'driving_season', 'heating_season',
     # 천연가스·RBOB (에너지 동조화·크랙 스프레드)
     'ng_mom_5d', 'ng_mom_21d', 'rbob_mom_5d', 'crack_spread_z',
+    # EIA 재고 서프라이즈·모멘텀
+    'inv_surprise', 'inv_mom4_z',
 ]
 
 
