@@ -103,6 +103,26 @@ _name     = st.session_state.get("name", "")
 _username = st.session_state.get("username", "")
 _is_admin = (_username == "admin")
 
+# ── 구독 만료일 체크
+import datetime as _dt2
+try:
+    import yaml as _yaml2
+    with open(_Path(__file__).parent / 'auth_config.yaml', encoding='utf-8') as _f2:
+        _cfg2 = _yaml2.safe_load(_f2)
+    _expiry_str = (_cfg2.get('credentials', {}).get('usernames', {})
+                       .get(_username, {}).get('subscription_expiry', ''))
+    if _expiry_str:
+        _expiry    = _dt2.datetime.strptime(_expiry_str, '%Y-%m-%d').date()
+        _days_left = (_expiry - _dt2.date.today()).days
+        if _days_left < 0:
+            st.error(f'구독이 만료됐습니다 ({_expiry_str}). 관리자에게 문의하세요.')
+            _authenticator.logout('로그아웃', location='sidebar')
+            st.stop()
+        elif _days_left <= 30:
+            st.warning(f'구독 만료 {_days_left}일 전 ({_expiry_str}). 갱신이 필요합니다.')
+except Exception:
+    pass
+
 # ── 인증 성공: 사이드바에 사용자 정보 + 로그아웃 버튼
 with st.sidebar:
     st.markdown(f"**{_name}** 님 환영합니다")
@@ -131,6 +151,17 @@ st.markdown("""
     margin: 6px 0;
 }
 h1, h2, h3, p, label, .stMarkdown { color: #e6edf3 !important; }
+
+/* ── 모바일 반응형 ── */
+@media (max-width: 768px) {
+    .block-container { padding: 0.5rem 0.8rem !important; }
+    h1 { font-size: 1.3rem !important; }
+    h2 { font-size: 1.1rem !important; }
+    [data-testid="column"] { min-width: 100% !important; }
+    [data-testid="stTab"] { font-size: 0.75rem !important; padding: 4px 6px !important; }
+    [data-testid="stDataFrame"] { overflow-x: auto !important; }
+    [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -873,6 +904,22 @@ if _is_admin and tab_admin is not None:
                             st.success(f'{_new_id} 계정이 추가됐습니다. 페이지를 새로고침하세요.')
                     else:
                         st.warning('아이디와 비밀번호를 입력하세요.')
+
+            st.markdown('---')
+            st.markdown('#### 구독 만료일 설정')
+            import datetime as _dt3
+            _exp_target = st.selectbox('계정', list(_users.keys()), key='exp_sel')
+            _cur_exp = _users[_exp_target].get('subscription_expiry', '2026-12-31')
+            try:
+                _cur_exp_date = _dt3.datetime.strptime(_cur_exp, '%Y-%m-%d').date()
+            except Exception:
+                _cur_exp_date = _dt3.date.today()
+            _new_exp = st.date_input('만료일', value=_cur_exp_date, key='exp_date')
+            if st.button('만료일 저장'):
+                _users[_exp_target]['subscription_expiry'] = str(_new_exp)
+                with open(_cfg_path, 'w', encoding='utf-8') as _f:
+                    _yaml.dump(_cfg, _f, allow_unicode=True)
+                st.success(f'{_exp_target} 만료일 → {_new_exp}')
 
             st.markdown('---')
             st.markdown('#### 비밀번호 초기화')
