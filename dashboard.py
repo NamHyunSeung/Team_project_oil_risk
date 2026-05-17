@@ -99,7 +99,9 @@ if not st.session_state.get("authentication_status"):
         st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
     st.stop()
 
-_name = st.session_state.get("name", "")
+_name     = st.session_state.get("name", "")
+_username = st.session_state.get("username", "")
+_is_admin = (_username == "admin")
 
 # ── 인증 성공: 사이드바에 사용자 정보 + 로그아웃 버튼
 with st.sidebar:
@@ -247,9 +249,12 @@ if 'latest_risk_signal' in data:
 st.markdown("---")
 
 # ── 탭 ───────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📈 가격 예측", "🌡 리스크 상세", "☁ 키워드 분석", "📊 모델 성능", "📋 예측 오차 로그"]
-)
+_tab_labels = ["📈 가격 예측", "🌡 리스크 상세", "☁ 키워드 분석", "📊 모델 성능", "📋 예측 오차 로그"]
+if _is_admin:
+    _tab_labels.append("🔧 관리자")
+_tabs = st.tabs(_tab_labels)
+tab1, tab2, tab3, tab4, tab5 = _tabs[:5]
+tab_admin = _tabs[5] if _is_admin else None
 
 # ── Tab 1: 가격 예측 ──────────────────────────────────────────────────────────
 with tab1:
@@ -827,6 +832,152 @@ with tab5:
         csv_bytes = pl.to_csv(index=False).encode('utf-8')
         st.download_button("💾 전체 로그 CSV 다운로드", csv_bytes,
                            "prediction_log.csv", "text/csv")
+
+
+# ── Tab 관리자 ───────────────────────────────────────────────────────────────
+if _is_admin and tab_admin is not None:
+    with tab_admin:
+        st.subheader('🔧 관리자 패널')
+        adm1, adm2, adm3 = st.tabs(['👤 사용자 관리', '⚙️ 시스템 모니터링', '🚀 파이프라인 실행'])
+
+        # ── 사용자 관리 ──────────────────────────────────────────────────────
+        with adm1:
+            import yaml as _yaml
+            from pathlib import Path as _PL
+            _cfg_path = _PL(__file__).parent / 'auth_config.yaml'
+            with open(_cfg_path, encoding='utf-8') as _f:
+                _cfg = _yaml.safe_load(_f)
+            _users = _cfg['credentials']['usernames']
+
+            st.markdown('#### 계정 목록')
+            _user_rows = [{'아이디': k, '이름': v.get('name', ''), '이메일': v.get('email', '')}
+                          for k, v in _users.items()]
+            st.dataframe(_user_rows, use_container_width=True)
+
+            st.markdown('---')
+            st.markdown('#### 계정 추가')
+            with st.form('add_user_form', clear_on_submit=True):
+                _new_id = st.text_input('아이디')
+                _new_nm = st.text_input('이름')
+                _new_em = st.text_input('이메일')
+                _new_pw = st.text_input('비밀번호', type='password')
+                if st.form_submit_button('추가'):
+                    if _new_id and _new_pw:
+                        if _new_id in _users:
+                            st.error('이미 존재하는 아이디입니다.')
+                        else:
+                            _users[_new_id] = {'name': _new_nm, 'email': _new_em, 'password': _new_pw}
+                            with open(_cfg_path, 'w', encoding='utf-8') as _f:
+                                _yaml.dump(_cfg, _f, allow_unicode=True)
+                            st.success(f'{_new_id} 계정이 추가됐습니다. 페이지를 새로고침하세요.')
+                    else:
+                        st.warning('아이디와 비밀번호를 입력하세요.')
+
+            st.markdown('---')
+            st.markdown('#### 계정 삭제')
+            _deletable = [k for k in _users if k != 'admin']
+            if _deletable:
+                _del_target = st.selectbox('삭제할 계정', _deletable)
+                if st.button('삭제', type='secondary'):
+                    del _users[_del_target]
+                    with open(_cfg_path, 'w', encoding='utf-8') as _f:
+                        _yaml.dump(_cfg, _f, allow_unicode=True)
+                    st.success(f'{_del_target} 계정이 삭제됐습니다. 페이지를 새로고침하세요.')
+            else:
+                st.info('삭제 가능한 계정이 없습니다.')
+
+        # ── 시스템 모니터링 ──────────────────────────────────────────────────
+        with adm2:
+            import os as _os, datetime as _dt
+            _log_path = OUTPUT_DIR / 'pipeline_run.log'
+            _fc_path  = OUTPUT_DIR / 'forecast_7days.csv'
+
+            st.markdown('#### 시스템 상태')
+            m1, m2, m3 = st.columns(3)
+
+            if _log_path.exists():
+                _last_run = _dt.datetime.fromtimestamp(_os.path.getmtime(_log_path)).strftime('%Y-%m-%d %H:%M')
+                m1.metric('마지막 파이프라인 실행', _last_run)
+            else:
+                m1.metric('마지막 파이프라인 실행', '기록 없음')
+
+            if _fc_path.exists():
+                _fc_tmp = pd.read_csv(_fc_path)
+                m2.metric('예측 기준일 (D+1)', _fc_tmp['date'].iloc[0] if 'date' in _fc_tmp.columns else '—')
+
+            if 'model_performance' in data:
+                _mp = data['model_performance']
+                _stk = _mp[_mp['model'].str.contains('Stacking', na=False)]
+                if not _stk.empty:
+                    _r2 = float(_stk['r2'].iloc[0])
+                    m3.metric('Stacking R²', f'{_r2:.4f}',
+                              delta='정상' if _r2 >= 0.83 else '롤백 기준 미달',
+                              delta_color='normal' if _r2 >= 0.83 else 'inverse')
+
+            st.markdown('---')
+            st.markdown('#### 모델 성능 상세')
+            if 'model_performance' in data:
+                st.dataframe(data['model_performance'], use_container_width=True)
+                _mp = data['model_performance']
+                _har = _mp[_mp['model'].str.contains('HAR', na=False)]
+                _stk = _mp[_mp['model'].str.contains('Stacking', na=False)]
+                _xgb = _mp[_mp['model'].str.contains('XGBoost-Return', na=False)]
+                _warns = []
+                if not _har.empty and float(_har['r2'].iloc[0]) < 0.48:
+                    _warns.append(f"HAR R²={float(_har['r2'].iloc[0]):.3f} < 0.48")
+                if not _stk.empty and float(_stk['r2'].iloc[0]) < 0.83:
+                    _warns.append(f"Stacking R²={float(_stk['r2'].iloc[0]):.3f} < 0.83")
+                if not _xgb.empty and 'dir_acc' in _xgb.columns and float(_xgb['dir_acc'].iloc[0]) < 0.52:
+                    _warns.append(f"dir_acc={float(_xgb['dir_acc'].iloc[0])*100:.1f}% < 52%")
+                for w in _warns:
+                    st.warning(f'⚠️ {w} (롤백 기준)')
+                if not _warns:
+                    st.success('✅ 모든 모델 롤백 기준 충족')
+
+            st.markdown('---')
+            st.markdown('#### 파이프라인 로그')
+            if _log_path.exists():
+                with open(_log_path, encoding='utf-8', errors='replace') as _f:
+                    st.text_area('pipeline_run.log', _f.read()[-3000:], height=250)
+            else:
+                st.info('로그 파일 없음')
+
+        # ── 파이프라인 실행 ──────────────────────────────────────────────────
+        with adm3:
+            import subprocess as _sp, sys as _sys
+            from pathlib import Path as _PL2
+            st.markdown('#### 수동 파이프라인 실행')
+            st.caption('oil_risk_mvp.py 를 즉시 실행합니다. 완료까지 2~5분 소요됩니다.')
+
+            if 'pipeline_running' not in st.session_state:
+                st.session_state['pipeline_running'] = False
+            if 'pipeline_output' not in st.session_state:
+                st.session_state['pipeline_output'] = ''
+
+            if st.button('▶ 파이프라인 실행', disabled=st.session_state['pipeline_running']):
+                st.session_state['pipeline_running'] = True
+                st.session_state['pipeline_output'] = '실행 중...'
+                _pipe_path = _PL2(__file__).parent / 'oil_risk_mvp.py'
+                try:
+                    _result = _sp.run(
+                        [_sys.executable, str(_pipe_path)],
+                        cwd=str(_PL2(__file__).parent),
+                        capture_output=True, text=True,
+                        encoding='utf-8', errors='replace', timeout=600,
+                    )
+                    _out = (_result.stdout or '') + (_result.stderr or '')
+                    st.session_state['pipeline_output'] = _out[-4000:] if len(_out) > 4000 else _out
+                except _sp.TimeoutExpired:
+                    st.session_state['pipeline_output'] = '타임아웃 (10분 초과)'
+                except Exception as _e:
+                    st.session_state['pipeline_output'] = f'오류: {_e}'
+                finally:
+                    st.session_state['pipeline_running'] = False
+                st.rerun()
+
+            if st.session_state['pipeline_output']:
+                st.markdown(f"**{'실행 중...' if st.session_state['pipeline_running'] else '실행 완료'}**")
+                st.text_area('출력 로그', st.session_state['pipeline_output'], height=350)
 
 st.markdown("---")
 st.caption("국제 유가 리스크 예측 시스템 MVP  |  XGBoost-HAR + SARIMAX Ensemble  |  News Sentiment + Geopolitical Risk")
