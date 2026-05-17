@@ -1402,6 +1402,8 @@ FEATURE_COLS = [
     'ng_mom_5d', 'ng_mom_21d', 'rbob_mom_5d', 'crack_spread_z',
     # EIA 재고 서프라이즈·모멘텀
     'inv_surprise', 'inv_mom4_z',
+    # CEEMDAN 신호 분해 (논문: CEEMDAN+LSTM-Attn, 추세/노이즈 분리)
+    'ceemdan_trend_ret', 'ceemdan_noise_std5', 'ceemdan_trend_mom5',
 ]
 
 
@@ -1450,6 +1452,28 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df['parkinson_vol']     = 0.0
         df['parkinson_vol_5d']  = 0.0
         df['parkinson_vol_21d'] = 0.0
+
+    # ── CEEMDAN 신호 분해 (논문: CEEMDAN+LSTM-Attention 추세/노이즈 분리)
+    try:
+        from PyEMD import CEEMDAN as _CEEMDAN
+        _cem = _CEEMDAN(trials=50, epsilon=0.005)
+        _wti_arr = df['WTI'].ffill().values.astype(float)
+        _imfs = _cem(_wti_arr)           # shape: (n_imf, n_samples)
+        _n = len(_wti_arr)
+        # 저주파 성분 = 마지막 IMF(추세), 고주파 = 첫 IMF들(잡음)
+        _trend = _imfs[-1][:_n]          # 추세 성분
+        _noise = _imfs[0][:_n]           # 고주파 잡음
+        _wm    = max(df['WTI'].mean(), 1e-8)
+        _trend_s = pd.Series(_trend, index=df.index)
+        _noise_s = pd.Series(_noise, index=df.index)
+        df['ceemdan_trend_ret']  = _trend_s.diff().fillna(0) / _wm   # 추세 일변화율
+        df['ceemdan_noise_std5'] = _noise_s.rolling(5).std().fillna(0) / _wm  # 잡음 강도
+        df['ceemdan_trend_mom5'] = _trend_s.diff(5).fillna(0) / _wm  # 추세 5일 모멘텀
+        log.info("    CEEMDAN 분해 완료 (IMF 수: %d)", len(_imfs))
+    except Exception as _ce:
+        log.warning(f"    CEEMDAN 실패({_ce}) → 0")
+        for _cc in ['ceemdan_trend_ret', 'ceemdan_noise_std5', 'ceemdan_trend_mom5']:
+            df[_cc] = 0.0
 
     # ── C: EWMA 변동성 (RiskMetrics λ=0.94)
     df['ewma_vol_10']  = df['log_return'].ewm(span=10,  adjust=False).std().fillna(0)
