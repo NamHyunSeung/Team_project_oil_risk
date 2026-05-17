@@ -2330,6 +2330,21 @@ def train_models(feature_df: pd.DataFrame):
             log.info(f"    ✅ 채택: {_cname} (MAE={mae_d:.4f} dir={dir_acc*100:.1f}%)")
 
             rmse_d = float(np.sqrt(mean_squared_error(y_px_te, pred_px_d)))
+
+            # 신뢰구간용 Quantile 모델 (α=0.1, α=0.9) — 80% 예측 구간
+            _Xtr_chosen = ret_scaler.transform(train_df[_use_feats])
+            _mD_q10, _mD_q90 = None, None
+            try:
+                _q10p = dict(**_xgb_p, objective='reg:quantileerror', quantile_alpha=0.10)
+                _q90p = dict(**_xgb_p, objective='reg:quantileerror', quantile_alpha=0.90)
+                _mD_q10 = xgb.XGBRegressor(**_q10p)
+                _mD_q10.fit(_Xtr_chosen, y_ret_tr, sample_weight=w_ret)
+                _mD_q90 = xgb.XGBRegressor(**_q90p)
+                _mD_q90.fit(_Xtr_chosen, y_ret_tr, sample_weight=w_ret)
+                log.info("    ✅ 신뢰구간 Quantile 모델(Q10/Q90) 학습 완료")
+            except Exception as _qe:
+                log.warning(f"    Quantile 신뢰구간 모델 실패({_qe})")
+
             results['xgb_return'] = {
                 'model': modelD, 'scaler': ret_scaler,
                 'features': _use_feats, 'type': 'price',
@@ -2337,6 +2352,7 @@ def train_models(feature_df: pd.DataFrame):
                 'dir_acc': dir_acc,
                 'wf_cv_mae': round(min(_wf_full, _wf_sel), 4),
                 'name': f'XGBoost-Return (방향성={dir_acc*100:.1f}%)',
+                'model_q10': _mD_q10, 'model_q90': _mD_q90,
             }
         except Exception as exc:
             log.warning(f"    XGBoost 수익률 예측 실패({exc})")
@@ -2808,12 +2824,31 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             except Exception as _le:
                 log.warning(f"LGB 예측 실패: {_le}")
 
+        # VAR 예측 생성
+        _var_fc = None
+        if 'VAR' in _stk_names and 'var' in results:
+            try:
+                _vr   = results['var']
+                _vfit = _vr['model']
+                _vcols = _vr['cols']
+                _vlag  = _vr['lag']
+                _vhist = feature_df[_vcols].dropna().asfreq('B', method='ffill').dropna()
+                _vfc   = _vfit.forecast(_vhist.values[-_vlag:], steps=7)
+                _var_fc = _vfc[:, 0]   # WTI 열
+            except Exception as _ve:
+                log.warning(f"VAR 예측 실패: {_ve}")
+
         ensemble = np.zeros(7)
         for i in range(7):
             _pts = [_sx_fc[i], _xb_fc[i]]
             if _lgb_fc is not None:
                 _pts.append(_lgb_fc[i])
-            ensemble[i] = float(_meta_m.predict([_pts])[0])
+            if _var_fc is not None:
+                _pts.append(float(_var_fc[i]))
+            # stack_names 순서에 맞게 패딩 (None 베이스는 center로 대체)
+            while len(_pts) < len(_stk_names):
+                _pts.append(_sx_fc[i])
+            ensemble[i] = float(_meta_m.predict([_pts[:len(_stk_names)]])[0])
         log.info(f"    ✅ Stacking 앙상블 적용: D+1={ensemble[0]:.2f}")
     elif 'sarimax' in forecasts and 'xgb' in forecasts:
         ensemble = w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb']
@@ -2833,16 +2868,42 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     if bias != 0.0:
         ensemble = ensemble + bias
 
-    # ── 신뢰구간 (변동성 기반)
-    recent_vol = float(feature_df['vol_5d'].dropna().iloc[-1]) if 'vol_5d' in feature_df.columns else 0.015
+    # ── 신뢰구간: 분위 회귀(Q10/Q90) 우선, 없으면 변동성 기반 폴백
     t = np.arange(1, 8)
-    ci_half = ensemble * recent_vol * 1.96 * np.sqrt(t)
+    _xr = results.get('xgb_return', {})
+    _q10m, _q90m = _xr.get('model_q10'), _xr.get('model_q90')
+    _qsc  = _xr.get('scaler')
+    _qfts = _xr.get('features', [])
+
+    lower_80ci = upper_80ci = None
+    if _q10m is not None and _q90m is not None and _qsc is not None:
+        try:
+            _avf_q  = [f for f in _qfts if f in feature_df.columns]
+            _last_q = _qsc.transform(feature_df[_avf_q].iloc[-1:].values)
+            _ret_q10 = float(_q10m.predict(_last_q)[0])
+            _ret_q90 = float(_q90m.predict(_last_q)[0])
+            # D+1 절대 스프레드 계산 후 sqrt(t)로 다단계 확장
+            _spread_lo = last_price * np.exp(_ret_q10) - last_price   # 음수
+            _spread_hi = last_price * np.exp(_ret_q90) - last_price   # 양수
+            lower_80ci = ensemble + _spread_lo * np.sqrt(t)
+            upper_80ci = ensemble + _spread_hi * np.sqrt(t)
+            lower_80ci = np.clip(lower_80ci, last_price * 0.80, last_price * 1.20)
+            upper_80ci = np.clip(upper_80ci, last_price * 0.80, last_price * 1.20)
+            log.info(f"    신뢰구간 Q10/Q90 적용: D+1 [{lower_80ci[0]:.2f}, {upper_80ci[0]:.2f}]")
+        except Exception as _qce:
+            log.warning(f"    분위 신뢰구간 계산 실패({_qce}) → 변동성 폴백")
+
+    if lower_80ci is None:
+        recent_vol = float(feature_df['vol_5d'].dropna().iloc[-1]) if 'vol_5d' in feature_df.columns else 0.015
+        ci_half    = ensemble * recent_vol * 1.28 * np.sqrt(t)   # 80% z=1.28
+        lower_80ci = ensemble - ci_half
+        upper_80ci = ensemble + ci_half
 
     fc_df = pd.DataFrame({
-        'date':           fc_dates.strftime('%Y-%m-%d'),
-        'forecast_price': np.round(ensemble, 2),
-        'lower_95ci':     np.round(ensemble - ci_half, 2),
-        'upper_95ci':     np.round(ensemble + ci_half, 2),
+        'date':            fc_dates.strftime('%Y-%m-%d'),
+        'forecast_price':  np.round(ensemble,    2),
+        'lower_80ci':      np.round(lower_80ci,  2),
+        'upper_80ci':      np.round(upper_80ci,  2),
         'bias_correction': round(bias, 3),
     })
     if 'sarimax' in forecasts:
@@ -3477,8 +3538,8 @@ def plot_oil_forecast(feature_df: pd.DataFrame, fc_df: pd.DataFrame, signal: dic
     if 'xgb_forecast' in fc_df.columns:
         ax1.plot(fd, fc_df['xgb_forecast'], color='#ffa657', lw=1, ls=':', alpha=0.8, label='XGBoost')
 
-    ax1.fill_between(fd, fc_df['lower_95ci'], fc_df['upper_95ci'],
-                     alpha=0.13, color=CYAN, label='95% CI')
+    ax1.fill_between(fd, fc_df['lower_80ci'], fc_df['upper_80ci'],
+                     alpha=0.18, color=CYAN, label='80% 예측구간')
 
     rlevel = signal['risk_level']
     rcol   = RISK_LEVELS[rlevel]['color']
@@ -3611,8 +3672,8 @@ def plot_oil_forecast(feature_df: pd.DataFrame, fc_df: pd.DataFrame, signal: dic
                      color='#8b949e', lw=0.9, ls='--', alpha=0.7, label='MA-21')
         axA.plot(fd, fc_df['forecast_price'], color=CYAN, lw=2, ls='--',
                  label='Forecast', zorder=4)
-        axA.fill_between(fd, fc_df['lower_95ci'], fc_df['upper_95ci'],
-                         alpha=0.13, color=CYAN, label='95% CI')
+        axA.fill_between(fd, fc_df['lower_80ci'], fc_df['upper_80ci'],
+                         alpha=0.18, color=CYAN, label='80% 예측구간')
         axA.axvspan(fd.iloc[0], fd.iloc[-1], alpha=0.07, color=rcol)
         axA.annotate(f"{RISK_LEVELS[rlevel]['emoji']} {RISK_LEVELS[rlevel]['label']}",
                      xy=(fd.iloc[3], fc_df['forecast_price'].median()),

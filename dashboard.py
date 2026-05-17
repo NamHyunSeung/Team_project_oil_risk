@@ -318,16 +318,23 @@ with tab1:
                     return          '🔴 낮음'
                 fc['합의도'] = fc['model_std'].apply(_consensus)
 
+            # 80% 예측구간 컬럼 생성
+            if 'lower_80ci' in fc.columns and 'upper_80ci' in fc.columns:
+                fc['80% 구간'] = fc.apply(
+                    lambda r: f"${r['lower_80ci']:.1f} ~ ${r['upper_80ci']:.1f}", axis=1
+                )
+
             if _is_admin:
                 display_cols = {
                     '날짜': '날짜', 'forecast_price': '앙상블($)',
+                    '80% 구간': '80% 구간',
                     'sarimax_forecast': 'SARIMAX($)', 'xgb_forecast': 'XGB($)',
-                    'prophet_forecast': 'Prophet($)', '합의도': '합의도',
-                    'bias_correction': 'Bias($)',
+                    '합의도': '합의도', 'bias_correction': 'Bias($)',
                 }
             else:
                 display_cols = {
-                    '날짜': '날짜', 'forecast_price': '앙상블($)', '합의도': '합의도',
+                    '날짜': '날짜', 'forecast_price': '앙상블($)',
+                    '80% 구간': '80% 구간', '합의도': '합의도',
                 }
             show_fc = fc[[c for c in display_cols if c in fc.columns]].rename(columns=display_cols)
             st.dataframe(show_fc, hide_index=True, use_container_width=True)
