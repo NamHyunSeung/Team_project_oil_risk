@@ -2371,6 +2371,123 @@ def train_models(feature_df: pd.DataFrame):
                 except Exception as _f5e:
                     log.warning(f"    5일 융합 실패({_f5e})")
 
+                # ── 딥러닝 방향성 분류기 (GRU + Attention, 소규모 금융 데이터 특화)
+                _lstm_model_store = None
+                try:
+                    import torch as _torch
+                    import torch.nn as _nn
+                    import io as _io
+
+                    _DEVICE = _torch.device('cuda' if _torch.cuda.is_available() else 'cpu')
+                    _NFEAT  = _Xtr_sel.shape[1]
+
+                    class _AttnGRU(_nn.Module):
+                        """단일 GRU + 시간 어텐션: 소규모 데이터에 최적화"""
+                        def __init__(self, n_in, h=48, drop=0.4):
+                            super().__init__()
+                            self.gru  = _nn.GRU(n_in, h, batch_first=True)
+                            self.attn = _nn.Linear(h, 1)
+                            self.head = _nn.Sequential(
+                                _nn.Dropout(drop),
+                                _nn.Linear(h, 1), _nn.Sigmoid())
+                        def forward(self, x):
+                            out, _ = self.gru(x)            # (B, T, h)
+                            w = _torch.softmax(self.attn(out), dim=1)  # (B, T, 1)
+                            ctx = (w * out).sum(dim=1)      # (B, h)
+                            return self.head(ctx).squeeze(-1)
+
+                    class _CNN1D(_nn.Module):
+                        """1D CNN: 지역 패턴 포착, 소규모 데이터에 효율적"""
+                        def __init__(self, n_in, drop=0.4):
+                            super().__init__()
+                            self.net = _nn.Sequential(
+                                _nn.Conv1d(n_in, 32, kernel_size=3, padding=1), _nn.ReLU(),
+                                _nn.Conv1d(32, 64, kernel_size=3, padding=1),   _nn.ReLU(),
+                                _nn.AdaptiveAvgPool1d(1))
+                            self.head = _nn.Sequential(
+                                _nn.Dropout(drop), _nn.Linear(64, 1), _nn.Sigmoid())
+                        def forward(self, x):                      # x: (B, T, F)
+                            return self.head(self.net(x.permute(0,2,1)).squeeze(-1)).squeeze(-1)
+
+                    _best_dl_dir, _best_dl_prob, _best_dl_mdl = 0.0, None, None
+                    _cur_dir = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
+
+                    for _SEQ in [5, 10, 15]:
+                        for _Arch, _AName in [(_AttnGRU, 'GRU'), (_CNN1D, 'CNN')]:
+                          try:
+                            # 시퀀스 생성 (train만 사용, test는 앞에 train tail 붙임)
+                            _n_tr = len(_Xtr_sel)
+                            _Xtr_seq = np.array([_Xtr_sel[i-_SEQ:i]
+                                                 for i in range(_SEQ, _n_tr)], dtype=np.float32)
+                            _ytr_seq = _y_cls_tr[_SEQ:].astype(np.float32)
+                            _wtr_seq = w_ret[_SEQ:].astype(np.float32)
+                            # test 시퀀스: train/test 연결 후 슬라이딩 윈도우
+                            _full_lm = np.vstack([_Xtr_sel, _Xte_sel])
+                            _Xte_seq = np.array(
+                                [_full_lm[_n_tr+i-_SEQ:_n_tr+i]
+                                 for i in range(len(_Xte_sel))], dtype=np.float32)
+                            _yte_seq = _y_cls_te.astype(np.float32)
+
+                            # 검증셋: 훈련 시퀀스 마지막 15%
+                            _nv = max(int(len(_Xtr_seq) * 0.15), 20)
+                            _Xv, _yv = _Xtr_seq[-_nv:], _ytr_seq[-_nv:]
+                            _Xtr2, _ytr2, _wtr2 = _Xtr_seq[:-_nv], _ytr_seq[:-_nv], _wtr_seq[:-_nv]
+
+                            _mdl = _Arch(_NFEAT).to(_DEVICE)
+                            _opt = _torch.optim.Adam(_mdl.parameters(), lr=3e-3, weight_decay=1e-3)
+                            _bce = _nn.BCELoss(reduction='none')
+                            _Xt  = _torch.FloatTensor(_Xtr2).to(_DEVICE)
+                            _yt  = _torch.FloatTensor(_ytr2).to(_DEVICE)
+                            _wt  = _torch.FloatTensor(_wtr2).to(_DEVICE)
+                            _ds  = _torch.utils.data.TensorDataset(_Xt, _yt, _wt)
+                            _dl2 = _torch.utils.data.DataLoader(_ds, batch_size=64, shuffle=True)
+
+                            _buf, _best_vacc, _pat = _io.BytesIO(), 0.0, 0
+                            for _ep in range(80):
+                                _mdl.train()
+                                for _xb, _yb, _wb in _dl2:
+                                    _opt.zero_grad()
+                                    _loss = (_bce(_mdl(_xb), _yb) * _wb).mean()
+                                    _loss.backward(); _opt.step()
+                                # 검증 정확도 기반 조기 종료
+                                _mdl.eval()
+                                with _torch.no_grad():
+                                    _pv = _mdl(_torch.FloatTensor(_Xv).to(_DEVICE)).cpu().numpy()
+                                _vacc = float(((_pv > 0.5).astype(int) == _yv).mean())
+                                if _vacc > _best_vacc:
+                                    _best_vacc = _vacc; _pat = 0
+                                    _buf.seek(0); _torch.save(_mdl.state_dict(), _buf)
+                                else:
+                                    _pat += 1
+                                    if _pat >= 15: break
+
+                            _buf.seek(0)
+                            _mdl.load_state_dict(_torch.load(_buf, weights_only=True))
+                            _mdl.eval()
+                            with _torch.no_grad():
+                                _pte = _mdl(_torch.FloatTensor(_Xte_seq).to(_DEVICE)).cpu().numpy()
+                            _dir_dl = float(((_pte > 0.5).astype(int) == _yte_seq).mean())
+                            log.info(f"        [{_AName} seq={_SEQ}] dir={_dir_dl*100:.1f}%")
+                            if _dir_dl > _best_dl_dir:
+                                _best_dl_dir = _dir_dl
+                                _best_dl_prob = _pte
+                                _best_dl_mdl  = (_mdl, _SEQ)
+                          except Exception as _se2:
+                            log.warning(f"    {_AName} seq={_SEQ} 실패({_se2})")
+
+                    if _best_dl_prob is not None and _best_dl_dir > _cur_dir:
+                        _prob_up_te = _best_dl_prob
+                        _mdl_best, _seq_best = _best_dl_mdl
+                        _lstm_model_store = {
+                            'model': _mdl_best, 'seq': _seq_best,
+                            'scaler': _sc_sel, 'features': _sel_feats,
+                        }
+                        log.info(f"        → GRU-Attn 채택 (dir={_best_dl_dir*100:.1f}%)")
+                except ImportError:
+                    log.info("        PyTorch 없음 → DL 건너뜀")
+                except Exception as _le:
+                    log.warning(f"    DL 분류기 실패({_le})")
+
                 _best_th = 0.5
                 _dir_cls = float(((_prob_up_te > _best_th).astype(int) == _y_cls_te).mean())
                 # 분류기 방향 + 회귀 크기 결합 (Classifier-adj)
@@ -2383,8 +2500,7 @@ def train_models(feature_df: pd.DataFrame):
                 log.info(f"        [Classifier-adj] dir={_dir_cls*100:.1f}%  MAE={_mae_cls:.4f}  R²={_r2_cls:.4f}")
                 results['xgb_classifier'] = {
                     'model': _mD_cls_dir, 'scaler': _sc_sel, 'features': _sel_feats,
-                    'cot_scaler': _sc_cot if '_sc_cot' in dir() else None,
-                    'cot_feats':  _cot_cols if '_cot_cols' in dir() else [],
+                    'lstm': _lstm_model_store,   # LSTM 채택 시 저장
                     'dir_acc': _dir_cls, 'type': 'price',
                     'rmse': _rmse_cls, 'mae': _mae_cls, 'r2': _r2_cls,
                     'name': f'XGBoost-Classifier (방향성={_dir_cls*100:.1f}%)',
@@ -2865,7 +2981,35 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                     _cls_input = np.hstack([last_s, _cot_row])
                 else:
                     _cls_input = last_s
-                _prob_up_fc = float(model.predict_proba(_cls_input)[0, 1])
+                # LSTM이 채택된 경우: 최근 seq일 시퀀스로 방향 예측
+                _lstm_info = info.get('lstm')
+                if _lstm_info is not None:
+                    try:
+                        import torch as _torch
+                        _lm     = _lstm_info['model']
+                        _lseq   = _lstm_info['seq']
+                        _lsc    = _lstm_info['scaler']
+                        _lft    = _lstm_info['features']
+                        _lavf   = [f for f in _lft if f in feature_df.columns]
+                        _lX_raw = _lsc.transform(feature_df[_lavf].values)
+                        _lX_seq = _lX_raw[-_lseq:][np.newaxis].astype(np.float32)
+                        _lt     = _torch.FloatTensor(_lX_seq)
+                        _lm.eval()
+                        with _torch.no_grad():
+                            _prob_up_fc = float(_lm(_lt).item())
+                    except Exception as _lfe:
+                        log.warning(f"    LSTM forecast 실패({_lfe}) → SVM 폴백")
+                        _prob_up_fc = float(model.predict_proba(last_s)[0, 1])
+                else:
+                    _cot_sc  = info.get('cot_scaler')
+                    _cot_fts = info.get('cot_feats', [])
+                    if _cot_sc is not None and _cot_fts:
+                        _avf_cot = [f for f in _cot_fts if f in feature_df.columns]
+                        _cot_row = _cot_sc.transform(feature_df[_avf_cot].iloc[-1:].values)
+                        _cls_input = np.hstack([last_s, _cot_row])
+                    else:
+                        _cls_input = last_s
+                    _prob_up_fc = float(model.predict_proba(_cls_input)[0, 1])
                 _cls_th = info.get('threshold', 0.5)
                 pred_ret_d1 = abs(_mag_ret) * (1.0 if _prob_up_fc > _cls_th else -1.0)
             else:
