@@ -2386,12 +2386,13 @@ def train_models(feature_df: pd.DataFrame):
                     _best_svm, _best_svm_dir, _best_svm_prob = None, 0.0, None
                     _sc_cot, _cot_cols = None, []
 
-                    # CEEMDAN + 이벤트 카테고리 스코어를 SVM에만 직접 주입
+                    # CEEMDAN + 이벤트 스코어 + 불확실성 SVM 전용 주입
                     _cem_cols = [c for c in [
                         'ceemdan_trend_ret', 'ceemdan_noise_std5', 'ceemdan_trend_mom5',
                         'supply_event_score', 'supply_event_score_smooth',
                         'demand_event_score', 'demand_event_score_smooth',
                         'geo_event_score',    'geo_event_score_smooth',
+                        'news_uncertainty',
                     ] if c in train_df.columns and train_df[c].abs().sum() > 0]
                     if _cem_cols:
                         _sc_cem = StandardScaler()
