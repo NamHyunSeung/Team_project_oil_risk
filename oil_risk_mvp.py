@@ -2329,9 +2329,11 @@ def train_models(feature_df: pd.DataFrame):
                 _mD_cls_dir = xgb.XGBClassifier(**_xgb_cls_p)
                 _mD_cls_dir.fit(_Xtr_sel, _y_cls_tr, sample_weight=w_ret)
                 _prob_up_te = _mD_cls_dir.predict_proba(_Xte_sel)[:, 1]
-                _dir_cls    = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
+
+                _best_th = 0.5
+                _dir_cls = float(((_prob_up_te > _best_th).astype(int) == _y_cls_te).mean())
                 # 분류기 방향 + 회귀 크기 결합 (Classifier-adj)
-                _sign_cls   = np.where(_prob_up_te > 0.5, 1.0, -1.0)
+                _sign_cls = np.where(_prob_up_te > _best_th, 1.0, -1.0)
                 _pr_cls_adj = np.abs(_pr_s) * _sign_cls
                 _px_cls_adj = test_df['WTI'].values * np.exp(_pr_cls_adj)
                 _mae_cls    = float(mean_absolute_error(y_px_te, _px_cls_adj))
@@ -2344,6 +2346,7 @@ def train_models(feature_df: pd.DataFrame):
                     'rmse': _rmse_cls, 'mae': _mae_cls, 'r2': _r2_cls,
                     'name': f'XGBoost-Classifier (방향성={_dir_cls*100:.1f}%)',
                     'pred_price_test': _px_cls_adj,
+                    'threshold': _best_th,
                 }
             except Exception as _cls_e:
                 log.warning(f"    XGB 분류기 실패({_cls_e})")
@@ -2811,7 +2814,8 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                 _reg_m = info.get('_reg_model')
                 _mag_ret = float(_reg_m.predict(last_s)[0]) if _reg_m is not None else 0.001
                 _prob_up_fc = float(model.predict_proba(last_s)[0, 1])
-                pred_ret_d1 = abs(_mag_ret) * (1.0 if _prob_up_fc > 0.5 else -1.0)
+                _cls_th = info.get('threshold', 0.5)
+                pred_ret_d1 = abs(_mag_ret) * (1.0 if _prob_up_fc > _cls_th else -1.0)
             else:
                 pred_ret_d1 = float(model.predict(last_s)[0])   # D+1 log 수익률
             # D+1~7: 수익률 예측값에 불확실성 감쇠 적용 (멀수록 0에 수렴)
