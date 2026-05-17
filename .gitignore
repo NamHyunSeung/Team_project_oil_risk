@@ -39,6 +39,11 @@ Thumbs.db
 # Claude Code
 .claude/
 
+# PyInstaller 빌드 산출물
+dist/
+build/
+*.spec
+
 # Output — 생성 산출물은 추적 제외, 누적 데이터만 유지
 output/*.png
 output/*.json

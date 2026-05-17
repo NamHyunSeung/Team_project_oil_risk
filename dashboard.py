@@ -4,6 +4,9 @@
 """
 
 import streamlit as st
+import yaml
+import streamlit_authenticator as stauth
+from pathlib import Path as _Path
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -39,6 +42,40 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── 로그인 ────────────────────────────────────────────────────────────────────
+_AUTH_CFG = _Path(__file__).parent / "auth_config.yaml"
+
+def _load_authenticator():
+    with open(_AUTH_CFG, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    return stauth.Authenticate(
+        cfg["credentials"],
+        cfg["cookie"]["name"],
+        cfg["cookie"]["key"],
+        cfg["cookie"]["expiry_days"],
+        auto_hash=True,
+    ), cfg
+
+_authenticator, _auth_cfg = _load_authenticator()
+
+# 로그인 화면 (미인증 시 대시보드 전체 차단)
+_name, _auth_status, _username = _authenticator.login(
+    location="main",
+    fields={"Form name": "🛢  유가 리스크 시스템", "Username": "아이디", "Password": "비밀번호", "Login": "로그인"},
+)
+
+if _auth_status is False:
+    st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+    st.stop()
+elif _auth_status is None:
+    st.info("로그인 후 대시보드를 이용하실 수 있습니다.")
+    st.stop()
+
+# ── 인증 성공: 사이드바에 사용자 정보 + 로그아웃 버튼 표시
+with st.sidebar:
+    st.markdown(f"**{_name}** 님 환영합니다")
+    _authenticator.logout("로그아웃", location="sidebar")
 
 # ── 자동 새로고침 (10분 주기, st_autorefresh 없을 시 meta refresh 폴백) ────────
 try:
