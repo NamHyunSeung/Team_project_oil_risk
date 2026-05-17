@@ -2314,6 +2314,40 @@ def train_models(feature_df: pd.DataFrame):
             _wf_sel  = _wf_mae(train_df[_sel_feats].values, y_ret_tr.values, _sel_feats)
             log.info(f"        WF-CV MAE: 전체={_wf_full:.4f} 선택={_wf_sel:.4f}")
 
+            # ── XGBoost 이진 분류기 (방향성 특화 학습)
+            # 논문 근거: WTI 방향성 71~80% 보고 (binary:logistic + 회귀 크기 결합)
+            _mD_cls_dir, _mae_cls, _dir_cls, _pr_cls_adj, _px_cls_adj, _r2_cls = None, 999.0, 0.0, None, None, 0.0
+            try:
+                _y_cls_tr = (y_ret_tr.values > 0).astype(int)   # 1=상승, 0=하락
+                _y_cls_te = (y_ret_te.values > 0).astype(int)
+                _xgb_cls_p = dict(
+                    n_estimators=300, max_depth=3, learning_rate=0.02,
+                    subsample=0.75, colsample_bytree=0.6,
+                    min_child_weight=10, reg_alpha=0.5, reg_lambda=3.0,
+                    n_jobs=-1, random_state=42, verbosity=0
+                )
+                _mD_cls_dir = xgb.XGBClassifier(**_xgb_cls_p)
+                _mD_cls_dir.fit(_Xtr_sel, _y_cls_tr, sample_weight=w_ret)
+                _prob_up_te = _mD_cls_dir.predict_proba(_Xte_sel)[:, 1]
+                _dir_cls    = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
+                # 분류기 방향 + 회귀 크기 결합 (Classifier-adj)
+                _sign_cls   = np.where(_prob_up_te > 0.5, 1.0, -1.0)
+                _pr_cls_adj = np.abs(_pr_s) * _sign_cls
+                _px_cls_adj = test_df['WTI'].values * np.exp(_pr_cls_adj)
+                _mae_cls    = float(mean_absolute_error(y_px_te, _px_cls_adj))
+                _r2_cls     = float(r2_score(y_px_te, _px_cls_adj))
+                _rmse_cls   = float(np.sqrt(mean_squared_error(y_px_te, _px_cls_adj)))
+                log.info(f"        [Classifier-adj] dir={_dir_cls*100:.1f}%  MAE={_mae_cls:.4f}  R²={_r2_cls:.4f}")
+                results['xgb_classifier'] = {
+                    'model': _mD_cls_dir, 'scaler': _sc_sel, 'features': _sel_feats,
+                    'dir_acc': _dir_cls, 'type': 'price',
+                    'rmse': _rmse_cls, 'mae': _mae_cls, 'r2': _r2_cls,
+                    'name': f'XGBoost-Classifier (방향성={_dir_cls*100:.1f}%)',
+                    'pred_price_test': _px_cls_adj,
+                }
+            except Exception as _cls_e:
+                log.warning(f"    XGB 분류기 실패({_cls_e})")
+
             # 후보 모델: MAE 기준 선택피처 vs 전체피처, + Quantile
             _candidates = [
                 (_mae_f, _dir_f, _mD_full, _sc_full, _pr_f, _px_f, _r2_f, available_feats, 'MSE-전체'),
@@ -2321,6 +2355,8 @@ def train_models(feature_df: pd.DataFrame):
             ]
             if _mD_q is not None:
                 _candidates.append((_mae_q, _dir_q, _mD_q, _sc_sel, _pr_q, _px_q, _r2_q, _sel_feats, 'Quantile'))
+            if _mD_cls_dir is not None:
+                _candidates.append((_mae_cls, _dir_cls, _mD_cls_dir, _sc_sel, _pr_cls_adj, _px_cls_adj, _r2_cls, _sel_feats, 'Classifier-adj'))
 
             # MAE ≤ 최선 + 5% 범위 내에서 dir_acc 최고 모델 채택
             _best_mae = min(c[0] for c in _candidates)
@@ -2345,7 +2381,7 @@ def train_models(feature_df: pd.DataFrame):
             except Exception as _qe:
                 log.warning(f"    Quantile 신뢰구간 모델 실패({_qe})")
 
-            results['xgb_return'] = {
+            _xr_entry = {
                 'model': modelD, 'scaler': ret_scaler,
                 'features': _use_feats, 'type': 'price',
                 'rmse': rmse_d, 'mae': mae_d, 'r2': r2_d,
@@ -2353,6 +2389,12 @@ def train_models(feature_df: pd.DataFrame):
                 'wf_cv_mae': round(min(_wf_full, _wf_sel), 4),
                 'name': f'XGBoost-Return (방향성={dir_acc*100:.1f}%)',
                 'model_q10': _mD_q10, 'model_q90': _mD_q90,
+            }
+            # Classifier-adj 채택 시: 회귀 모델을 크기 예측 백업으로 보관
+            if _cname == 'Classifier-adj' and _mD_sel is not None:
+                _xr_entry['_reg_model']  = _mD_sel
+                _xr_entry['_reg_scaler'] = _sc_sel
+            results['xgb_return'] = {**_xr_entry,
             }
         except Exception as exc:
             log.warning(f"    XGBoost 수익률 예측 실패({exc})")
@@ -2406,13 +2448,15 @@ def train_models(feature_df: pd.DataFrame):
             sx_pred  = sx_info.get('pred_price_test')
             xr_pred  = None
 
-            # XGBoost-Return 테스트 예측값 재계산
+            # XGBoost-Return 테스트 예측값 재계산 (Classifier-adj 경우 회귀 백업 사용)
             if xr_info:
                 _sc_s  = xr_info['scaler']
-                _md_s  = xr_info['model']
+                _md_s  = xr_info.get('_reg_model') or xr_info['model']
                 _fs_s  = [f for f in xr_info['features'] if f in test_df.columns]
                 _Xte_s = _sc_s.transform(test_df[_fs_s])
                 _pr_s  = _md_s.predict(_Xte_s)
+                if hasattr(_md_s, 'predict_proba'):
+                    _pr_s = np.array([0.0] * len(_pr_s))  # fallback
                 xr_pred = test_df['WTI'].values * np.exp(_pr_s)
 
             if sx_pred is not None and xr_pred is not None:
@@ -2515,6 +2559,38 @@ def train_models(feature_df: pd.DataFrame):
                         _stk_info['lgb_model']  = results['lgb_return']['model']
                     results['stacking'] = _stk_info
                     log.info(f"    ✅ Stacking 채택: R²={_r2_stack:.4f}")
+
+                    # ── 적응형 오차 보정 (Adaptive Error Correction)
+                    # 스태킹 잔차(AR 구조 + 시장 상태)를 학습 → 다음 예측 편향 보정
+                    try:
+                        _res_arr = _stack_y - _stack_pred          # test 잔차 배열
+                        _n_ec    = len(_res_arr)
+                        _res_s   = pd.Series(_res_arr)
+                        # 잔차 자기상관 피처
+                        _ec_df = pd.DataFrame({
+                            'err_lag1': _res_s.shift(1).fillna(0),
+                            'err_lag2': _res_s.shift(2).fillna(0),
+                            'err_ma5':  _res_s.rolling(5, min_periods=1).mean().fillna(0),
+                        })
+                        # 시장 상태 피처 (test_df 뒤 _n_ec 행, 잔차와 alignment)
+                        _ec_mkt = ['vix_zscore', 'vol_5d', 'return_lag1', 'mom_5d', 'regime']
+                        _ec_mkt_ok = [f for f in _ec_mkt if f in test_df.columns]
+                        _mkt_vals  = test_df[_ec_mkt_ok].values[-_n_ec:]  # shape: (n_ec, ...)
+                        _ec_X = np.hstack([_ec_df.values, _mkt_vals]) if _ec_mkt_ok else _ec_df.values
+                        # 타깃: 다음 날 잔차 (한 칸 shift)
+                        _ec_X_tr = _ec_X[:-1]
+                        _ec_y_tr = _res_arr[1:]
+                        if len(_ec_X_tr) >= 10:
+                            _ecm = Ridge(alpha=10.0)
+                            _ecm.fit(_ec_X_tr, _ec_y_tr)
+                            _ec_last = _ec_X[-1:].reshape(1, -1)
+                            _ec_d1   = float(np.clip(_ecm.predict(_ec_last)[0], -3.0, 3.0))
+                            results['stacking']['ec_model']     = _ecm
+                            results['stacking']['ec_last_feat'] = _ec_last
+                            results['stacking']['ec_mkt_feats'] = _ec_mkt_ok
+                            log.info(f"    적응형 오차 보정 학습 완료 (D+1 예상 보정: {_ec_d1:+.3f}$)")
+                    except Exception as _ece:
+                        log.warning(f"    오차 보정 모델 실패({_ece})")
                 else:
                     log.info(f"    Stacking 미채택 (R²={_r2_stack:.4f} ≤ 현재 최고={_r2_curr:.4f})")
         except Exception as _se:
@@ -2730,7 +2806,14 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             last_row = feature_df[avail_f].iloc[-1:].values.copy()
             last_s   = sc.transform(last_row)
 
-            pred_ret_d1 = float(model.predict(last_s)[0])   # D+1 log 수익률
+            # Classifier-adj 선택 시: 회귀 크기 + 분류기 방향 결합
+            if hasattr(model, 'predict_proba'):
+                _reg_m = info.get('_reg_model')
+                _mag_ret = float(_reg_m.predict(last_s)[0]) if _reg_m is not None else 0.001
+                _prob_up_fc = float(model.predict_proba(last_s)[0, 1])
+                pred_ret_d1 = abs(_mag_ret) * (1.0 if _prob_up_fc > 0.5 else -1.0)
+            else:
+                pred_ret_d1 = float(model.predict(last_s)[0])   # D+1 log 수익률
             # D+1~7: 수익률 예측값에 불확실성 감쇠 적용 (멀수록 0에 수렴)
             decay = np.array([0.95 ** i for i in range(7)])
             ret_path = pred_ret_d1 * decay
@@ -2867,6 +2950,19 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     bias = compute_live_bias_correction()
     if bias != 0.0:
         ensemble = ensemble + bias
+
+    # ── A2: 적응형 오차 보정 (Adaptive Error Correction)
+    # 학습된 잔차 패턴으로 D+1 편향 예측 → 거리별 감쇠 적용
+    _stk_ec = results.get('stacking', {})
+    if 'ec_model' in _stk_ec and 'ec_last_feat' in _stk_ec:
+        try:
+            _ec_pred = float(np.clip(
+                _stk_ec['ec_model'].predict(_stk_ec['ec_last_feat'])[0], -3.0, 3.0))
+            _ec_decay = np.array([1.0, 0.7, 0.5, 0.35, 0.25, 0.15, 0.1])[:len(ensemble)]
+            ensemble = ensemble + _ec_pred * _ec_decay
+            log.info(f"    적응형 오차 보정 적용: D+1 {_ec_pred:+.3f}$")
+        except Exception as _ece_fc:
+            log.warning(f"    오차 보정 적용 실패({_ece_fc})")
 
     # ── 신뢰구간: 분위 회귀(Q10/Q90) 우선, 없으면 변동성 기반 폴백
     t = np.arange(1, 8)
