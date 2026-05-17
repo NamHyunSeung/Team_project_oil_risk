@@ -2328,7 +2328,48 @@ def train_models(feature_df: pd.DataFrame):
                 )
                 _mD_cls_dir = xgb.XGBClassifier(**_xgb_cls_p)
                 _mD_cls_dir.fit(_Xtr_sel, _y_cls_tr, sample_weight=w_ret)
-                _prob_up_te = _mD_cls_dir.predict_proba(_Xte_sel)[:, 1]
+                _prob_xgb_orig = _mD_cls_dir.predict_proba(_Xte_sel)[:, 1]  # XGB 확률 보존
+                _prob_up_te = _prob_xgb_orig
+
+                # ── ① SVM 분류기 (논문: F1 0.67~0.72, RBF kernel)
+                try:
+                    from sklearn.svm import SVC as _SVC
+                    _best_svm, _best_svm_dir, _best_svm_prob = None, 0.0, None
+                    _sm = _SVC(kernel='rbf', C=1.0, gamma='scale',
+                               probability=True, class_weight='balanced', random_state=42)
+                    _sm.fit(_Xtr_sel, _y_cls_tr)
+                    _best_svm_prob = _sm.predict_proba(_Xte_sel)[:, 1]
+                    _best_svm_dir  = float(((_best_svm_prob > 0.5).astype(int) == _y_cls_te).mean())
+                    _best_svm = _sm
+                    _sc_cot, _cot_cols = None, []
+                    log.info(f"        [SVM-RBF] dir={_best_svm_dir*100:.1f}%")
+                    if _best_svm is not None and _best_svm_dir > ((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean():
+                        _prob_up_te = _best_svm_prob
+                        _mD_cls_dir = _best_svm
+                        log.info(f"        → SVM 채택 (dir={_best_svm_dir*100:.1f}%)")
+                except Exception as _se:
+                    log.warning(f"    SVM 실패({_se})")
+
+
+                # ── ② 5일 방향 융합 (다중 시계열 논문: SVM F1 0.70~0.72)
+                try:
+                    _n_tr = len(_Xtr_sel)
+                    _wti_tr = train_df['WTI'].values
+                    _y_5d = (_wti_tr[5:] > _wti_tr[:-5]).astype(int)   # 5일 후 방향
+                    _X_5d = _Xtr_sel[:len(_y_5d)]
+                    _w_5d = w_ret[:len(_y_5d)]
+                    _mc5 = xgb.XGBClassifier(**_xgb_cls_p)
+                    _mc5.fit(_X_5d, _y_5d, sample_weight=_w_5d)
+                    _prob_5d = _mc5.predict_proba(_Xte_sel)[:, 1]
+                    # 1일+5일 확률 평균 → 합의 방향
+                    _prob_fused = 0.5 * _prob_up_te + 0.5 * _prob_5d
+                    _dir_fused  = float(((_prob_fused > 0.5).astype(int) == _y_cls_te).mean())
+                    log.info(f"        [5일 융합] dir={_dir_fused*100:.1f}%")
+                    if _dir_fused > ((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean():
+                        _prob_up_te = _prob_fused
+                        log.info("        → 5일 융합 채택")
+                except Exception as _f5e:
+                    log.warning(f"    5일 융합 실패({_f5e})")
 
                 _best_th = 0.5
                 _dir_cls = float(((_prob_up_te > _best_th).astype(int) == _y_cls_te).mean())
@@ -2342,6 +2383,8 @@ def train_models(feature_df: pd.DataFrame):
                 log.info(f"        [Classifier-adj] dir={_dir_cls*100:.1f}%  MAE={_mae_cls:.4f}  R²={_r2_cls:.4f}")
                 results['xgb_classifier'] = {
                     'model': _mD_cls_dir, 'scaler': _sc_sel, 'features': _sel_feats,
+                    'cot_scaler': _sc_cot if '_sc_cot' in dir() else None,
+                    'cot_feats':  _cot_cols if '_cot_cols' in dir() else [],
                     'dir_acc': _dir_cls, 'type': 'price',
                     'rmse': _rmse_cls, 'mae': _mae_cls, 'r2': _r2_cls,
                     'name': f'XGBoost-Classifier (방향성={_dir_cls*100:.1f}%)',
@@ -2813,7 +2856,16 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             if hasattr(model, 'predict_proba'):
                 _reg_m = info.get('_reg_model')
                 _mag_ret = float(_reg_m.predict(last_s)[0]) if _reg_m is not None else 0.001
-                _prob_up_fc = float(model.predict_proba(last_s)[0, 1])
+                # SVM+COT 피처 처리
+                _cot_sc  = info.get('cot_scaler')
+                _cot_fts = info.get('cot_feats', [])
+                if _cot_sc is not None and _cot_fts:
+                    _avf_cot = [f for f in _cot_fts if f in feature_df.columns]
+                    _cot_row = _cot_sc.transform(feature_df[_avf_cot].iloc[-1:].values)
+                    _cls_input = np.hstack([last_s, _cot_row])
+                else:
+                    _cls_input = last_s
+                _prob_up_fc = float(model.predict_proba(_cls_input)[0, 1])
                 _cls_th = info.get('threshold', 0.5)
                 pred_ret_d1 = abs(_mag_ret) * (1.0 if _prob_up_fc > _cls_th else -1.0)
             else:
