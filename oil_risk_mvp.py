@@ -3344,6 +3344,70 @@ def plot_oil_forecast(feature_df: pd.DataFrame, fc_df: pd.DataFrame, signal: dic
     plt.close()
     log.info("    oil_forecast_plot.png 저장")
 
+    # ── 사용자용 단순 차트 (가격+예측+리스크 게이지만)
+    try:
+        fig_u = plt.figure(figsize=(16, 8), facecolor=BG)
+        gs_u  = gridspec.GridSpec(2, 1, figure=fig_u, hspace=0.35,
+                                  left=0.06, right=0.97, top=0.92, bottom=0.06)
+
+        # Panel A: 가격 + 예측
+        axA = fig_u.add_subplot(gs_u[0])
+        axA.set_facecolor(PAN)
+        axA.tick_params(colors=TXT, labelsize=8)
+        for sp in axA.spines.values(): sp.set_color('#30363d')
+        axA.grid(color='#21262d', linewidth=0.5, alpha=0.7)
+        axA.set_title('WTI Crude Oil  —  Historical Price & 7-Day Forecast',
+                      color=TXT, fontsize=11, pad=6, fontweight='bold')
+        hist = feature_df['WTI'].iloc[-N:]
+        axA.plot(hist.index, hist, color=GOLD, lw=1.5, label='WTI (historical)', zorder=3)
+        if 'ma_21d' in feature_df.columns:
+            axA.plot(feature_df['ma_21d'].iloc[-N:].index,
+                     feature_df['ma_21d'].iloc[-N:],
+                     color='#8b949e', lw=0.9, ls='--', alpha=0.7, label='MA-21')
+        axA.plot(fd, fc_df['forecast_price'], color=CYAN, lw=2, ls='--',
+                 label='Forecast', zorder=4)
+        axA.fill_between(fd, fc_df['lower_95ci'], fc_df['upper_95ci'],
+                         alpha=0.13, color=CYAN, label='95% CI')
+        axA.axvspan(fd.iloc[0], fd.iloc[-1], alpha=0.07, color=rcol)
+        axA.annotate(f"{RISK_LEVELS[rlevel]['emoji']} {RISK_LEVELS[rlevel]['label']}",
+                     xy=(fd.iloc[3], fc_df['forecast_price'].median()),
+                     fontsize=10, color=rcol, fontweight='bold', ha='center')
+        axA.set_ylabel('USD / bbl', color=TXT, fontsize=9)
+        axA.legend(loc='upper left', facecolor=PAN, labelcolor=TXT,
+                   framealpha=0.6, fontsize=8, ncol=4)
+
+        # Panel B: 리스크 게이지
+        axB = fig_u.add_subplot(gs_u[1])
+        axB.set_facecolor(PAN)
+        axB.axis('off')
+        axB.set_xlim(0, 1); axB.set_ylim(0, 1)
+        axB.set_title('Current Risk Signal', color=TXT, fontsize=10, pad=6, fontweight='bold')
+        for rl, lbl, xp in zip(order, labels, xpos):
+            is_cur = (rl == rlevel)
+            rc_b   = RISK_LEVELS[rl]['color']
+            rect_b = FancyBboxPatch((xp, 0.28), 0.20, 0.44,
+                                    boxstyle='round,pad=0.02',
+                                    facecolor=rc_b, alpha=0.95 if is_cur else 0.22,
+                                    edgecolor='white', linewidth=2.5 if is_cur else 0.5)
+            axB.add_patch(rect_b)
+            axB.text(xp + 0.10, 0.50, lbl, ha='center', va='center',
+                     color='white', fontsize=9.5,
+                     fontweight='bold' if is_cur else 'normal')
+            if is_cur:
+                axB.text(xp + 0.10, 0.78, '▲ Current', ha='center',
+                         color=rc_b, fontsize=8.5, fontweight='bold')
+
+        fig_u.suptitle(
+            f'🛢  국제 유가 리스크 예측 시스템  │  {datetime.today().strftime("%Y-%m-%d %H:%M")}',
+            color='white', fontsize=13, fontweight='bold', y=0.975
+        )
+        plt.savefig(OUTPUT_DIR / 'user_forecast_plot.png', dpi=150,
+                    bbox_inches='tight', facecolor=BG)
+        plt.close()
+        log.info("    user_forecast_plot.png 저장")
+    except Exception as _e:
+        log.warning(f"    user_forecast_plot 생성 실패({_e})")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # run_pipeline()  —  전체 파이프라인 오케스트레이터

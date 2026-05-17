@@ -262,9 +262,11 @@ with tab1:
 
     with col_chart:
         st.subheader("유가 예측 차트")
-        img = OUTPUT_DIR / 'oil_forecast_plot.png'
-        if img.exists():
-            st.image(str(img), use_container_width=True)
+        _plot_file = OUTPUT_DIR / ('oil_forecast_plot.png' if _is_admin else 'user_forecast_plot.png')
+        if not _plot_file.exists():
+            _plot_file = OUTPUT_DIR / 'oil_forecast_plot.png'
+        if _plot_file.exists():
+            st.image(str(_plot_file), use_container_width=True)
         else:
             st.info("파이프라인 실행 후 차트가 표시됩니다.")
 
@@ -627,7 +629,19 @@ with tab5:
             col_s4.metric("실시간 MAPE", f"{live_confirmed['price_error_pct'].abs().mean():.2f}%")
 
         if not _is_admin:
-            st.stop()  # 일반 사용자는 요약까지만
+            # 실시간 예측 기록 테이블
+            if not live_confirmed.empty:
+                st.markdown("---")
+                st.markdown("**실시간 예측 기록**")
+                _lv_cols = [c for c in ['date', 'forecast_price', 'actual_price', 'price_error_pct']
+                            if c in live_confirmed.columns]
+                _lv_show = live_confirmed[_lv_cols].tail(30).copy()
+                _lv_show.columns = [{'date':'날짜','forecast_price':'예측가($)',
+                                     'actual_price':'실제가($)',
+                                     'price_error_pct':'오차(%)'}.get(c, c)
+                                    for c in _lv_show.columns]
+                st.dataframe(_lv_show, hide_index=True, use_container_width=True)
+            st.stop()  # 일반 사용자는 여기까지
 
         # ── 드리프트 경고 (live MAPE > backtest MAPE × 2)
         if (not bt.empty and bt['price_error_pct'].notna().any()
