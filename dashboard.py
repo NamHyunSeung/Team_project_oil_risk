@@ -875,6 +875,25 @@ if _is_admin and tab_admin is not None:
                         st.warning('아이디와 비밀번호를 입력하세요.')
 
             st.markdown('---')
+            st.markdown('#### 비밀번호 초기화')
+            _all_users = list(_users.keys())
+            if _all_users:
+                _pw_target = st.selectbox('계정 선택', _all_users, key='pw_sel')
+                with st.form('pw_reset_form', clear_on_submit=True):
+                    _new_pw_r = st.text_input('새 비밀번호', type='password')
+                    _confirm  = st.text_input('비밀번호 확인', type='password')
+                    if st.form_submit_button('변경'):
+                        if not _new_pw_r:
+                            st.warning('비밀번호를 입력하세요.')
+                        elif _new_pw_r != _confirm:
+                            st.error('비밀번호가 일치하지 않습니다.')
+                        else:
+                            _users[_pw_target]['password'] = _new_pw_r
+                            with open(_cfg_path, 'w', encoding='utf-8') as _f:
+                                _yaml.dump(_cfg, _f, allow_unicode=True)
+                            st.success(f'{_pw_target} 비밀번호가 변경됐습니다.')
+
+            st.markdown('---')
             st.markdown('#### 계정 삭제')
             _deletable = [k for k in _users if k != 'admin']
             if _deletable:
