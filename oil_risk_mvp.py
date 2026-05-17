@@ -578,14 +578,18 @@ def fetch_data(start_date=None, end_date=None):
             futures_spread = pd.Series(dtype=float, name="futures_spread")
             log.warning("    WTI 2번째 월물 수집 실패 → futures_spread=0")
 
-        # Parkinson 추정을 위한 WTI High/Low 수집
+        # Parkinson 추정을 위한 WTI High/Low + Open + Volume 수집
         try:
             wti_high = _dl("CL=F", col='High').rename("WTI_High")
             wti_low  = _dl("CL=F", col='Low').rename("WTI_Low")
-            log.info("    WTI High/Low 수집 완료 (Parkinson 추정용)")
+            wti_open = _dl("CL=F", col='Open').rename("WTI_Open")
+            wti_vol  = _dl("CL=F", col='Volume').rename("WTI_Volume")
+            log.info("    WTI High/Low/Open/Volume 수집 완료")
         except Exception:
             wti_high = pd.Series(dtype=float, name="WTI_High")
             wti_low  = pd.Series(dtype=float, name="WTI_Low")
+            wti_open = pd.Series(dtype=float, name="WTI_Open")
+            wti_vol  = pd.Series(dtype=float, name="WTI_Volume")
 
         # VIX 기간구조 + SKEW (파생상품 꼬리위험)
         try:
@@ -612,6 +616,7 @@ def fetch_data(start_date=None, end_date=None):
         df = pd.DataFrame({'WTI': wti, 'Brent': brent, 'DXY': dxy,
                            'VIX': vix, 'OVX': ovx, 'futures_spread': futures_spread,
                            'WTI_High': wti_high, 'WTI_Low': wti_low,
+                           'WTI_Open': wti_open, 'WTI_Volume': wti_vol,
                            'VIX3M': vix3m, 'SKEW': skew,
                            'NatGas': ng, 'RBOB': rbob})
         df = df.ffill().bfill()
@@ -1423,6 +1428,86 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df['parkinson_vol']     = 0.0
         df['parkinson_vol_5d']  = 0.0
         df['parkinson_vol_21d'] = 0.0
+
+    # ── 캔들스틱 패턴 피처 (논문: OHLC 기반 방향 신호, 70-80% 달성 보고)
+    if 'WTI_Open' in df.columns and 'WTI_High' in df.columns and 'WTI_Low' in df.columns:
+        _op  = df['WTI_Open'].replace(0, np.nan).ffill().clip(lower=1.0)
+        _hi  = df['WTI_High'].replace(0, np.nan).ffill().clip(lower=1.0)
+        _lo  = df['WTI_Low'].replace(0, np.nan).ffill().clip(lower=0.01)
+        _cl  = df['WTI']
+        _body     = _cl - _op
+        _rng      = (_hi - _lo).clip(lower=0.01)
+        _abs_body = _body.abs()
+        df['cs_body_pct']   = (_body / _op).fillna(0)                              # 몸통 크기 (%)
+        df['cs_upper_wick'] = ((_hi - np.maximum(_op, _cl)) / _cl.clip(1)).fillna(0)  # 윗 꼬리
+        df['cs_lower_wick'] = ((np.minimum(_op, _cl) - _lo) / _cl.clip(1)).fillna(0)  # 아랫 꼬리
+        df['cs_body_range'] = (_abs_body / _rng).fillna(0.5)                       # 몸통/범위 비율
+        df['cs_wick_ratio'] = (df['cs_lower_wick'] / (df['cs_upper_wick'] + 1e-8)).fillna(1)  # 해머 신호
+        df['cs_gap']        = ((_op - _cl.shift(1)) / _cl.shift(1).clip(1)).fillna(0)  # 갭
+        # 패턴 신호 (이진)
+        _uw_n = (_hi - np.maximum(_op, _cl)) / _cl.clip(1)
+        _lw_n = (np.minimum(_op, _cl) - _lo) / _cl.clip(1)
+        _bpct = _abs_body / _cl.clip(1)
+        df['cs_hammer']     = ((_lw_n > 2*_bpct) & (_uw_n < _bpct + 0.001)).astype(float)
+        df['cs_star']       = ((_uw_n > 2*_bpct) & (_lw_n < _bpct + 0.001)).astype(float)
+        df['cs_bull_eng']   = ((_body > 0) & (_body.shift(1) < 0) &
+                                (_body > _body.shift(1).abs())).astype(float)
+        df['cs_bear_eng']   = ((_body < 0) & (_body.shift(1) > 0) &
+                                (_abs_body > _body.shift(1))).astype(float)
+        df['cs_doji']       = (_bpct < 0.002).astype(float)                        # 도지 (방향 불확실)
+        log.info("    캔들스틱 패턴 피처 생성 (10개)")
+    else:
+        for _csc in ['cs_body_pct','cs_upper_wick','cs_lower_wick','cs_body_range',
+                     'cs_wick_ratio','cs_gap','cs_hammer','cs_star','cs_bull_eng',
+                     'cs_bear_eng','cs_doji']:
+            df[_csc] = 0.0
+
+    # ── 거래량 기반 방향 신호 (가격 방향 × 거래량 압력)
+    if 'WTI_Volume' in df.columns and df['WTI_Volume'].notna().sum() > 100:
+        _vol = df['WTI_Volume'].replace(0, np.nan).ffill().clip(lower=1)
+        _vol_ma20  = _vol.rolling(20).mean()
+        _vol_z     = ((_vol - _vol_ma20) / (_vol.rolling(20).std() + 1e-8)).fillna(0)
+        _ret_sign  = np.sign(df['return_1d'])
+        df['vol_pressure']   = (_vol_z * _ret_sign).fillna(0)      # 거래량 압력 (방향 가중)
+        df['vol_up_surge']   = ((_vol_z > 1) & (_ret_sign > 0)).astype(float)   # 강한 거래량+상승
+        df['vol_down_surge'] = ((_vol_z > 1) & (_ret_sign < 0)).astype(float)   # 강한 거래량+하락
+        df['vol_ma_ratio']   = (_vol / _vol_ma20).fillna(1).clip(0, 5)
+        # 연속 방향 누적 거래량 (OBV 방향 모멘텀)
+        _obv = (_vol * _ret_sign).fillna(0)
+        df['obv_mom5']       = _obv.rolling(5).sum()
+        _obv_std = df['obv_mom5'].rolling(63).std().replace(0, 1)
+        df['obv_mom5_z']     = (df['obv_mom5'] / _obv_std).fillna(0)
+        log.info("    거래량 방향 신호 피처 생성 (6개)")
+    else:
+        for _vc in ['vol_pressure','vol_up_surge','vol_down_surge',
+                    'vol_ma_ratio','obv_mom5','obv_mom5_z']:
+            df[_vc] = 0.0
+
+    # ── 웨이블릿 분해 피처 (논문: 다중 주파수 방향 신호 포착)
+    try:
+        import pywt as _pywt
+        _wti_arr = df['WTI'].fillna(method='ffill').values
+        _cA, _cD3, _cD2, _cD1 = _pywt.wavedec(_wti_arr, 'db4', level=3)
+        # 각 레벨 재구성 후 원 길이로 정렬
+        def _wav_recon(coeffs, level_idx, n):
+            _c = [np.zeros_like(coeffs[i]) if i != level_idx else coeffs[i]
+                  for i in range(len(coeffs))]
+            _r = _pywt.waverec(_c, 'db4')
+            return _r[:n] if len(_r) >= n else np.pad(_r, (0, n-len(_r)))
+        _n = len(_wti_arr)
+        _trend  = _wav_recon([_cA, _cD3, _cD2, _cD1], 0, _n)  # 저주파 추세
+        _mid    = _wav_recon([_cA, _cD3, _cD2, _cD1], 1, _n)  # 중간 주파수
+        _hi_f   = _wav_recon([_cA, _cD3, _cD2, _cD1], 3, _n)  # 고주파 노이즈
+        _wm     = df['WTI'].mean()
+        df['wav_trend_chg']  = pd.Series(_trend, index=df.index).diff().fillna(0) / _wm
+        df['wav_mid_chg']    = pd.Series(_mid,   index=df.index).diff().fillna(0) / _wm
+        df['wav_hi_std5']    = pd.Series(_hi_f,  index=df.index).rolling(5).std().fillna(0) / _wm
+        df['wav_trend_mom5'] = pd.Series(_trend, index=df.index).diff(5).fillna(0) / _wm
+        log.info("    웨이블릿 분해 피처 생성 (4개)")
+    except Exception as _we:
+        log.warning(f"    웨이블릿 실패({_we}) → wav=0")
+        for _wc in ['wav_trend_chg','wav_mid_chg','wav_hi_std5','wav_trend_mom5']:
+            df[_wc] = 0.0
 
     # ── C: EWMA 변동성 (RiskMetrics λ=0.94)
     df['ewma_vol_10']  = df['log_return'].ewm(span=10,  adjust=False).std().fillna(0)
@@ -2335,15 +2420,27 @@ def train_models(feature_df: pd.DataFrame):
                 try:
                     from sklearn.svm import SVC as _SVC
                     _best_svm, _best_svm_dir, _best_svm_prob = None, 0.0, None
+                    _sc_cot, _cot_cols = None, []
+                    # 기본 SVM (회귀 선택 피처)
                     _sm = _SVC(kernel='rbf', C=1.0, gamma='scale',
                                probability=True, class_weight='balanced', random_state=42)
                     _sm.fit(_Xtr_sel, _y_cls_tr)
                     _best_svm_prob = _sm.predict_proba(_Xte_sel)[:, 1]
                     _best_svm_dir  = float(((_best_svm_prob > 0.5).astype(int) == _y_cls_te).mean())
                     _best_svm = _sm
-                    _sc_cot, _cot_cols = None, []
                     log.info(f"        [SVM-RBF] dir={_best_svm_dir*100:.1f}%")
-                    if _best_svm is not None and _best_svm_dir > ((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean():
+
+                    # SVM + 캔들스틱·웨이블릿 피처 (방향성 특화, 회귀선택 영향 없음)
+                    _dir_cols = [c for c in
+                                 ['cs_body_pct','cs_upper_wick','cs_lower_wick','cs_body_range',
+                                  'cs_wick_ratio','cs_gap','cs_hammer','cs_star',
+                                  'cs_bull_eng','cs_bear_eng','cs_doji',
+                                  'wav_trend_chg','wav_mid_chg','wav_hi_std5','wav_trend_mom5',
+                                  'vol_pressure','vol_up_surge','vol_down_surge',
+                                  'vol_ma_ratio','obv_mom5_z']
+                                 if c in train_df.columns and train_df[c].abs().sum() > 0]
+
+                    if _best_svm_dir > ((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean():
                         _prob_up_te = _best_svm_prob
                         _mD_cls_dir = _best_svm
                         log.info(f"        → SVM 채택 (dir={_best_svm_dir*100:.1f}%)")
