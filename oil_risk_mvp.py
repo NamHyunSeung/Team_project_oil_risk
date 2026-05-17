@@ -1402,8 +1402,6 @@ FEATURE_COLS = [
     'ng_mom_5d', 'ng_mom_21d', 'rbob_mom_5d', 'crack_spread_z',
     # EIA 재고 서프라이즈·모멘텀
     'inv_surprise', 'inv_mom4_z',
-    # CEEMDAN 신호 분해 (논문: CEEMDAN+LSTM-Attn, 추세/노이즈 분리)
-    'ceemdan_trend_ret', 'ceemdan_noise_std5', 'ceemdan_trend_mom5',
 ]
 
 
@@ -2382,24 +2380,54 @@ def train_models(feature_df: pd.DataFrame):
                 _prob_xgb_orig = _mD_cls_dir.predict_proba(_Xte_sel)[:, 1]  # XGB 확률 보존
                 _prob_up_te = _prob_xgb_orig
 
-                # ── ① SVM 분류기 (논문: F1 0.67~0.72, RBF kernel)
+                # ── ① SVM 분류기 + CEEMDAN 전용 주입 (회귀 feature selection 미영향)
                 try:
                     from sklearn.svm import SVC as _SVC
                     _best_svm, _best_svm_dir, _best_svm_prob = None, 0.0, None
                     _sc_cot, _cot_cols = None, []
-                    # 기본 SVM (회귀 선택 피처)
+
+                    # CEEMDAN을 SVM에만 직접 주입 (FEATURE_COLS 우회)
+                    _cem_cols = [c for c in ['ceemdan_trend_ret',
+                                             'ceemdan_noise_std5',
+                                             'ceemdan_trend_mom5']
+                                 if c in train_df.columns
+                                 and train_df[c].abs().sum() > 0]
+                    if _cem_cols:
+                        _sc_cem = StandardScaler()
+                        _Xtr_c  = _sc_cem.fit_transform(
+                            train_df[_cem_cols].fillna(0).values)
+                        _Xte_c  = _sc_cem.transform(
+                            test_df[_cem_cols].fillna(0).values)
+                        _Xtr_svm = np.hstack([_Xtr_sel, _Xtr_c])
+                        _Xte_svm = np.hstack([_Xte_sel, _Xte_c])
+                    else:
+                        _Xtr_svm, _Xte_svm, _sc_cem = _Xtr_sel, _Xte_sel, None
+
                     _sm = _SVC(kernel='rbf', C=1.0, gamma='scale',
                                probability=True, class_weight='balanced', random_state=42)
-                    _sm.fit(_Xtr_sel, _y_cls_tr)
-                    _best_svm_prob = _sm.predict_proba(_Xte_sel)[:, 1]
+                    _sm.fit(_Xtr_svm, _y_cls_tr)
+                    _best_svm_prob = _sm.predict_proba(_Xte_svm)[:, 1]
                     _best_svm_dir  = float(((_best_svm_prob > 0.5).astype(int) == _y_cls_te).mean())
-                    _best_svm = _sm
-                    log.info(f"        [SVM-RBF] dir={_best_svm_dir*100:.1f}%")
+                    log.info(f"        [SVM+CEEMDAN] dir={_best_svm_dir*100:.1f}%")
 
                     if _best_svm_dir > ((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean():
+                        # ExtSVM 래퍼: forecast 시 CEEMDAN을 자동으로 붙여줌
+                        if _cem_cols and _sc_cem is not None:
+                            _cem_last = _sc_cem.transform(
+                                test_df[_cem_cols].iloc[[-1]].fillna(0).values)
+                            class _ExtSVM:
+                                def __init__(self, s, el):
+                                    self._s, self._el = s, el
+                                def predict_proba(self, X):
+                                    _X2 = np.hstack(
+                                        [X, np.tile(self._el, (len(X), 1))])
+                                    return self._s.predict_proba(_X2)
+                            _best_svm = _ExtSVM(_sm, _cem_last)
+                        else:
+                            _best_svm = _sm
                         _prob_up_te = _best_svm_prob
                         _mD_cls_dir = _best_svm
-                        log.info(f"        → SVM 채택 (dir={_best_svm_dir*100:.1f}%)")
+                        log.info(f"        → SVM+CEEMDAN 채택 (dir={_best_svm_dir*100:.1f}%)")
                 except Exception as _se:
                     log.warning(f"    SVM 실패({_se})")
 
