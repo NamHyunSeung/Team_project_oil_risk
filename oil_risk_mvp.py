@@ -2440,10 +2440,47 @@ def train_models(feature_df: pd.DataFrame):
                 _mae_cls    = float(mean_absolute_error(y_px_te, _px_cls_adj))
                 _r2_cls     = float(r2_score(y_px_te, _px_cls_adj))
                 _rmse_cls   = float(np.sqrt(mean_squared_error(y_px_te, _px_cls_adj)))
-                log.info(f"        [Classifier-adj] dir={_dir_cls*100:.1f}%  MAE={_mae_cls:.4f}  R²={_r2_cls:.4f}")
+
+                # ── Walk-forward 5폴드 방향성 평가 (신뢰 지표, 모델 선택 영향 없음)
+                _wf_dir_acc = 0.0
+                try:
+                    from sklearn.svm import SVC as _SVC_wf
+                    _wf_cem = [c for c in ['ceemdan_trend_ret',
+                                           'ceemdan_noise_std5',
+                                           'ceemdan_trend_mom5']
+                               if c in train_df.columns
+                               and train_df[c].abs().sum() > 0]
+                    _wf_dirs = []
+                    for _wti, _wvi in TimeSeriesSplit(n_splits=5).split(_Xtr_sel):
+                        if len(_wti) < 100 or len(_wvi) < 15:
+                            continue
+                        if _wf_cem:
+                            _wsc = StandardScaler()
+                            _wXtr = np.hstack([_Xtr_sel[_wti],
+                                               _wsc.fit_transform(
+                                                   train_df[_wf_cem].fillna(0).values[_wti])])
+                            _wXva = np.hstack([_Xtr_sel[_wvi],
+                                               _wsc.transform(
+                                                   train_df[_wf_cem].fillna(0).values[_wvi])])
+                        else:
+                            _wXtr, _wXva = _Xtr_sel[_wti], _Xtr_sel[_wvi]
+                        _wsm = _SVC_wf(kernel='rbf', C=1.0, gamma='scale',
+                                       probability=True, class_weight='balanced',
+                                       random_state=42)
+                        _wsm.fit(_wXtr, _y_cls_tr[_wti])
+                        _wpv = _wsm.predict_proba(_wXva)[:, 1]
+                        _wf_dirs.append(
+                            float(((_wpv > 0.5).astype(int) == _y_cls_tr[_wvi]).mean()))
+                    _wf_dir_acc = float(np.mean(_wf_dirs)) if _wf_dirs else 0.0
+                except Exception as _wfe:
+                    log.warning(f"    WF 평가 실패({_wfe})")
+
+                log.info(f"        [단일윈도우] dir={_dir_cls*100:.1f}%  "
+                         f"[WF-5폴드 평균] dir={_wf_dir_acc*100:.1f}%  "
+                         f"MAE={_mae_cls:.4f}")
                 results['xgb_classifier'] = {
                     'model': _mD_cls_dir, 'scaler': _sc_sel, 'features': _sel_feats,
-                    'dir_acc': _dir_cls, 'type': 'price',
+                    'dir_acc': _dir_cls, 'wf_dir_acc': _wf_dir_acc, 'type': 'price',
                     'rmse': _rmse_cls, 'mae': _mae_cls, 'r2': _r2_cls,
                     'name': f'XGBoost-Classifier (방향성={_dir_cls*100:.1f}%)',
                     'pred_price_test': _px_cls_adj,
@@ -2706,6 +2743,7 @@ def train_models(feature_df: pd.DataFrame):
         row = {'model': v['name'], 'target': v['type'],
                'rmse': round(v['rmse'], 5), 'mae': round(v['mae'], 5), 'r2': round(v['r2'], 4)}
         if 'dir_acc'     in v: row['dir_acc']     = round(v['dir_acc'], 4)
+        if 'wf_dir_acc'  in v: row['wf_dir_acc']  = round(v['wf_dir_acc'], 4)
         if 'train_r2'    in v: row['train_r2']    = round(v['train_r2'], 4)
         if 'overfit_gap' in v: row['overfit_gap'] = round(v['overfit_gap'], 4)
         perf_rows.append(row)
