@@ -285,15 +285,17 @@ with tab1:
                     return          '🔴 낮음'
                 fc['합의도'] = fc['model_std'].apply(_consensus)
 
-            display_cols = {
-                '날짜': '날짜',
-                'forecast_price': '앙상블($)',
-                'sarimax_forecast': 'SARIMAX($)',
-                'xgb_forecast': 'XGB($)',
-                'prophet_forecast': 'Prophet($)',
-                '합의도': '합의도',
-                'bias_correction': 'Bias($)',
-            }
+            if _is_admin:
+                display_cols = {
+                    '날짜': '날짜', 'forecast_price': '앙상블($)',
+                    'sarimax_forecast': 'SARIMAX($)', 'xgb_forecast': 'XGB($)',
+                    'prophet_forecast': 'Prophet($)', '합의도': '합의도',
+                    'bias_correction': 'Bias($)',
+                }
+            else:
+                display_cols = {
+                    '날짜': '날짜', 'forecast_price': '앙상블($)', '합의도': '합의도',
+                }
             show_fc = fc[[c for c in display_cols if c in fc.columns]].rename(columns=display_cols)
             st.dataframe(show_fc, hide_index=True, use_container_width=True)
 
@@ -301,12 +303,13 @@ with tab1:
             if 'model_std' in fc.columns and float(fc['model_std'].iloc[0]) >= 5:
                 st.warning(f"⚠️ 모델 간 예측 편차 ${fc['model_std'].iloc[0]:.1f} — 불확실성 높음")
 
-            csv_bytes = fc.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "💾 CSV 다운로드", csv_bytes,
-                "forecast_7days.csv", "text/csv",
-                use_container_width=True,
-            )
+            if _is_admin:
+                csv_bytes = fc.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    "💾 CSV 다운로드", csv_bytes,
+                    "forecast_7days.csv", "text/csv",
+                    use_container_width=True,
+                )
 
 # ── Tab 2: 리스크 상세 ────────────────────────────────────────────────────────
 with tab2:
@@ -352,26 +355,30 @@ with tab2:
             plt.close()
 
         with col_b:
-            st.markdown("**상세 수치**")
-            st.json({
-                "날짜":        str(sig['date']),
-                "리스크 레벨": sig['risk_level'],
-                "리스크 점수": float(sig['risk_score']),
-                "WTI 가격":    f"${sig['wti_price']}",
-                "변동성(5일)": f"{sig['volatility_5d']*100:.2f}%",
-                "모멘텀(5일)": f"{sig['momentum_5d']*100:+.2f}%",
-                "뉴스 감성":   float(sig['news_sentiment']),
-                "뉴스 기사 수": int(sig['news_count']),
-                "지정학 경보":  bool(sig['geopolitical_alert']),
-                "방향성 편향":  float(sig['directional_bias']),
-            })
+            st.markdown("**주요 지표**")
+            st.metric("WTI 현재가", f"${sig['wti_price']}")
+            st.metric("5일 변동성", f"{sig['volatility_5d']*100:.2f}%")
+            st.metric("뉴스 감성", f"{float(sig['news_sentiment']):.3f}")
+            if _is_admin:
+                st.markdown("---")
+                st.markdown("**상세 수치 (관리자)**")
+                st.json({
+                    "날짜":        str(sig['date']),
+                    "리스크 레벨": sig['risk_level'],
+                    "리스크 점수": float(sig['risk_score']),
+                    "모멘텀(5일)": f"{sig['momentum_5d']*100:+.2f}%",
+                    "뉴스 기사 수": int(sig['news_count']),
+                    "지정학 경보":  bool(sig['geopolitical_alert']),
+                    "방향성 편향":  float(sig['directional_bias']),
+                })
 
-    st.markdown("---")
-    sig_csv = (OUTPUT_DIR / 'latest_risk_signal.csv')
-    if sig_csv.exists():
-        st.download_button("💾 리스크 신호 CSV 다운로드",
-                           sig_csv.read_bytes(),
-                           "latest_risk_signal.csv", "text/csv")
+    if _is_admin:
+        st.markdown("---")
+        sig_csv = (OUTPUT_DIR / 'latest_risk_signal.csv')
+        if sig_csv.exists():
+            st.download_button("💾 리스크 신호 CSV 다운로드",
+                               sig_csv.read_bytes(),
+                               "latest_risk_signal.csv", "text/csv")
 
     # ── 리스크 히스토리 타임라인
     st.markdown("---")
@@ -479,21 +486,38 @@ with tab3:
             kw['키워드'] = kw['keyword'].apply(
                 lambda w: _KW_KO.get(w.lower(), w)
             )
+            _kw_cols = ['분류', '키워드', 'count', 'weight'] if _is_admin else ['분류', '키워드', 'count']
+            _kw_rename = {'count': '빈도', 'weight': '가중치'}
             st.dataframe(
-                kw[['분류', '키워드', 'count', 'weight']].rename(columns={
-                    'count': '빈도', 'weight': '가중치'
-                }),
+                kw[[c for c in _kw_cols if c in kw.columns]].rename(columns=_kw_rename),
                 hide_index=True, use_container_width=True
             )
-            kw_csv = kw.to_csv(index=False).encode('utf-8')
-            st.download_button("💾 키워드 CSV 다운로드", kw_csv,
-                               "crisis_keywords.csv", "text/csv")
+            if _is_admin:
+                kw_csv = kw.to_csv(index=False).encode('utf-8')
+                st.download_button("💾 키워드 CSV 다운로드", kw_csv,
+                                   "crisis_keywords.csv", "text/csv")
 
 # ── Tab 4: 모델 성능 ──────────────────────────────────────────────────────────
 with tab4:
-    st.subheader("📊 모델 성능 비교 (테스트셋 기준)")
+    st.subheader("📊 모델 성능")
 
-    if 'model_performance' in data:
+    if 'model_performance' not in data:
+        st.info("파이프라인 실행 후 성능 데이터가 표시됩니다.")
+    elif not _is_admin:
+        # 일반 사용자: 간단 요약만
+        pf = data['model_performance']
+        _stk = pf[pf['model'].str.contains('Stacking', na=False)]
+        _xgb = pf[pf['model'].str.contains('XGBoost-Return', na=False)]
+        c1, c2, c3 = st.columns(3)
+        if not _stk.empty:
+            _r2 = float(_stk['r2'].iloc[0])
+            _grade = '높음 🟢' if _r2 >= 0.85 else ('보통 🟡' if _r2 >= 0.75 else '낮음 🔴')
+            c1.metric('���측 정확도', _grade)
+            c2.metric('예측 오차 (MAE)', f"${float(_stk['mae'].iloc[0]):.2f}")
+        if not _xgb.empty and 'dir_acc' in _xgb.columns:
+            _dir = float(_xgb['dir_acc'].iloc[0]) * 100
+            c3.metric('방향성 정확도', f"{_dir:.0f}%")
+    else:
         pf = data['model_performance']
         col_t, col_g = st.columns([1, 1.2])
 
@@ -501,7 +525,6 @@ with tab4:
             st.dataframe(pf, hide_index=True, use_container_width=True)
             st.caption("RMSE·MAE: 낮을수록 좋음  |  R²: 높을수록 좋음 (최대 1.0)")
 
-            # 과적합 상태 표시
             if 'overfit_gap' in pf.columns and 'train_r2' in pf.columns:
                 _of = pf.dropna(subset=['overfit_gap'])
                 for _, _row in _of.iterrows():
@@ -606,29 +629,26 @@ with tab4:
 
 # ── Tab 5: 예측 오차 로그 ─────────────────────────────────────────────────────
 with tab5:
-    st.subheader("📋 예측 vs 실제 오차 로그")
+    st.subheader("📋 예측 정확도")
 
     if 'prediction_log' not in data:
-        st.info("파이프라인 실행 후 오차 로그가 표시됩니다.")
+        st.info("파이프라인 실행 후 데이터가 표시됩니다.")
     else:
         pl = data['prediction_log'].copy()
-
-        # 요약 지표
         bt = pl[pl['type'] == 'backtest'].copy()
         lv = pl[pl['type'] == 'live'].copy()
+        live_confirmed = lv[lv['actual_price'].notna()]
 
         col_s1, col_s2, col_s3, col_s4 = st.columns(4)
         if not bt.empty and bt['price_error'].notna().any():
-            col_s1.metric("백테스트 MAE (가격)",
-                          f"${bt['price_error'].abs().mean():.2f}")
-            col_s2.metric("백테스트 MAPE",
-                          f"{bt['price_error_pct'].abs().mean():.2f}%")
-        live_confirmed = lv[lv['actual_price'].notna()]
+            col_s1.metric("백테스트 MAE", f"${bt['price_error'].abs().mean():.2f}")
+            col_s2.metric("백테스트 MAPE", f"{bt['price_error_pct'].abs().mean():.2f}%")
         if not live_confirmed.empty:
-            col_s3.metric("실시간 MAE (가격)",
-                          f"${live_confirmed['price_error'].abs().mean():.2f}")
-            col_s4.metric("실시간 MAPE",
-                          f"{live_confirmed['price_error_pct'].abs().mean():.2f}%")
+            col_s3.metric("실시간 MAE", f"${live_confirmed['price_error'].abs().mean():.2f}")
+            col_s4.metric("실시간 MAPE", f"{live_confirmed['price_error_pct'].abs().mean():.2f}%")
+
+        if not _is_admin:
+            st.stop()  # 일반 사용자는 요약까지만
 
         # ── 드리프트 경고 (live MAPE > backtest MAPE × 2)
         if (not bt.empty and bt['price_error_pct'].notna().any()

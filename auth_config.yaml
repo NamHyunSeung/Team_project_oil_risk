@@ -4,6 +4,10 @@ credentials:
       email: admin@oil-risk.local
       name: 관리자
       password: admin123
+    user1:
+      email: user1@oil-risk.local
+      name: 사용자
+      password: user1234
 cookie:
   expiry_days: 0
   key: oil_risk_secret_key_x9f2k
