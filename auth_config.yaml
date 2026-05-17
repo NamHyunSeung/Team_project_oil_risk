@@ -7,4 +7,4 @@ credentials:
 cookie:
   expiry_days: 0
   key: oil_risk_secret_key_x9f2k
-  name: oil_risk_auth
+  name: oil_risk_auth_v2

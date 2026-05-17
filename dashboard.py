@@ -55,26 +55,23 @@ def _load_authenticator():
         cfg["cookie"]["key"],
         cfg["cookie"]["expiry_days"],
         auto_hash=True,
-    ), cfg
+    )
 
-_authenticator, _auth_cfg = _load_authenticator()
+_authenticator = _load_authenticator()
 
-# 로그인 화면 (미인증 시 대시보드 전체 차단)
-# 0.4.x: login(location='main') returns None → session_state에서 읽어야 함
-_authenticator.login(
-    location="main",
-    fields={"Form name": "🛢  유가 리스크 시스템", "Username": "아이디", "Password": "비밀번호", "Login": "로그인"},
-)
-
-_auth_status = st.session_state.get("authentication_status")
-_name        = st.session_state.get("name", "")
-
-if _auth_status is False:
-    st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+# 미인증 상태일 때만 로그인 폼 렌더링
+if not st.session_state.get("authentication_status"):
+    _authenticator.login(
+        location="main",
+        fields={"Form name": "🛢  유가 리스크 시스템",
+                "Username": "아이디", "Password": "비밀번호", "Login": "로그인"},
+    )
+    _auth_status = st.session_state.get("authentication_status")
+    if _auth_status is False:
+        st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
     st.stop()
-elif not _auth_status:
-    st.info("로그인 후 대시보드를 이용하실 수 있습니다.")
-    st.stop()
+
+_name = st.session_state.get("name", "")
 
 # ── 인증 성공: 사이드바에 사용자 정보 + 로그아웃 버튼
 with st.sidebar:
