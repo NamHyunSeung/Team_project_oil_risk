@@ -148,7 +148,7 @@ except ImportError:
 try:
     from sklearn.ensemble import GradientBoostingRegressor
     from sklearn.linear_model import Ridge
-    from sklearn.preprocessing import StandardScaler
+    from sklearn.preprocessing import StandardScaler, RobustScaler
     from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
     from sklearn.model_selection import TimeSeriesSplit
     _SKL = True
@@ -1088,37 +1088,124 @@ OIL_EVENT_LIBRARY = {
     "ceasefire agreement peace deal risk premium falls":                  -0.50,
 }
 
+# 이벤트 카테고리 태그 (공급/수요/지정학)
+OIL_EVENT_CATEGORY = {
+    # 공급
+    "OPEC production cut two million barrels per day deep":               "supply",
+    "OPEC production cut agreement extended deeper barrels per day":      "supply",
+    "OPEC surprise voluntary output cut announced":                       "supply",
+    "Saudi Arabia announces unilateral production cut one million":       "supply",
+    "Saudi Arabia voluntary cut extended deeper barrel reduction":        "supply",
+    "OPEC+ ministerial meeting agrees production cut quota":              "supply",
+    "Russia restricts oil export volumes crude shipments":                "supply",
+    "Iran nuclear deal collapsed sanctions tightened maximum pressure":   "supply",
+    "US Iran sanctions intensify oil supply restricted":                  "supply",
+    "Venezuela sanctions tightened oil exports blocked":                  "supply",
+    "pipeline attack disruption shutdown oil supply":                     "supply",
+    "refinery fire explosion shutdown production offline":                "supply",
+    "Libya oil field shutdown civil conflict armed":                      "supply",
+    "Nigeria oil production disrupted militant attack":                   "supply",
+    "Iraq oil exports suspended Kurdistan dispute":                       "supply",
+    "Kazakhstan oil output disrupted Tengiz field":                       "supply",
+    "Ecuador oil production halted indigenous protest":                   "supply",
+    "hurricane threatens Gulf Mexico oil platform production":            "supply",
+    "Houthi attack Red Sea oil tanker shipping disruption":               "supply",
+    "Strait Hormuz tension blockade tanker seizure":                      "supply",
+    "OPEC+ compliance exceeds quota output below target":                 "supply",
+    "crude oil inventory draw stockpile fell unexpected large":           "supply",
+    "EIA inventory draw crude stockpile decline million barrels":         "supply",
+    "US crude stockpile falls sharply drawdown":                          "supply",
+    "gasoline distillate inventory draw product shortage":                "supply",
+    "OPEC agrees increase output production quota barrels":               "supply",
+    "OPEC+ eases cuts production increase members":                       "supply",
+    "Iran nuclear deal reached sanctions lifted export":                  "supply",
+    "US Strategic Petroleum Reserve SPR release million barrels":         "supply",
+    "Libya oil production resumes resumed restart field":                 "supply",
+    "US shale oil production record high output rig":                     "supply",
+    "Saudi Arabia increases output production boost barrels":             "supply",
+    "Russia Ukraine ceasefire deal energy supply restored":               "supply",
+    "Venezuela US sanctions eased oil exports resume":                    "supply",
+    "EIA crude inventory build stockpile rose unexpected million":        "supply",
+    "crude oil inventory surplus build stockpile increase":               "supply",
+    "US crude stockpile rises large build glut":                          "supply",
+    "global oil supply surplus inventory overhang":                       "supply",
+    # 수요
+    "China economic slowdown GDP misses oil demand falls":                "demand",
+    "China manufacturing PMI contracts economy slows":                    "demand",
+    "global recession fears oil demand outlook weakens":                  "demand",
+    "US recession economic contraction demand destruction":               "demand",
+    "Fed rate hike interest rates rise dollar strengthens":               "demand",
+    "weak oil demand forecast IEA OPEC lowers outlook":                   "demand",
+    "India oil imports decline slowing economy growth":                   "demand",
+    "manufacturing PMI falls contraction economic weakness":              "demand",
+    "electric vehicle adoption accelerates oil demand peak":              "demand",
+    "airline flights cancelled reduced fuel demand":                      "demand",
+    "Covid lockdown China economy shutdown demand":                       "demand",
+    "China economic recovery strong demand surge oil imports":            "demand",
+    "China reopening post-covid demand recovery oil":                     "demand",
+    "global oil demand growth forecast raised IEA OPEC":                  "demand",
+    "emerging market demand recovery economic growth strong":             "demand",
+    "summer driving season peak demand travel gasoline":                  "demand",
+    "winter heating demand natural gas oil surge":                        "demand",
+    "jet fuel aviation demand recovery airline travel":                   "demand",
+    "Fed rate cut interest rates fall dollar weakens oil":                "demand",
+    "dollar index weakens risk assets rally oil":                         "demand",
+    "dollar strengthens DXY risk off oil pressure":                       "demand",
+    "Fed hawkish tightening dollar rally oil falls":                      "demand",
+    # 지정학
+    "Middle East war escalation risk premium oil":                        "geo",
+    "Israel Gaza conflict escalates regional war risk":                   "geo",
+    "Russia Ukraine war energy security risk":                            "geo",
+    "geopolitical tension risk premium crude oil":                        "geo",
+    "ceasefire agreement peace deal risk premium falls":                  "geo",
+}
+
 _OIL_EVENT_EMBS: 'np.ndarray | None' = None   # (N_events, 384)
 _OIL_EVENT_SCORES: 'list | None'     = None   # [float, ...]
+_OIL_EVENT_CATS: 'list | None'       = None   # [category str, ...]
 
 
 def _get_oil_event_embeddings():
     """캐노니컬 이벤트 임베딩 (이벤트 수 변경 시 자동 재계산)"""
-    global _OIL_EVENT_EMBS, _OIL_EVENT_SCORES
+    global _OIL_EVENT_EMBS, _OIL_EVENT_SCORES, _OIL_EVENT_CATS
     if _OIL_EVENT_EMBS is not None and len(_OIL_EVENT_EMBS) == len(OIL_EVENT_LIBRARY):
         return _OIL_EVENT_EMBS, _OIL_EVENT_SCORES
     texts  = list(OIL_EVENT_LIBRARY.keys())
     scores = list(OIL_EVENT_LIBRARY.values())
     embs   = _embed_texts(texts)              # (N, 384)
-    _OIL_EVENT_EMBS  = embs
+    _OIL_EVENT_EMBS   = embs
     _OIL_EVENT_SCORES = scores
+    _OIL_EVENT_CATS   = [OIL_EVENT_CATEGORY.get(t, 'supply') for t in texts]
     return _OIL_EVENT_EMBS, _OIL_EVENT_SCORES
 
 
 def _oil_event_score(article_emb: 'np.ndarray') -> float:
-    """
-    기사 임베딩과 캐노니컬 이벤트의 코사인 유사도 가중합
-    → WTI 가격 방향 점수 (-1 ~ +1)
-    """
+    """기사 임베딩과 캐노니컬 이벤트의 코사인 유사도 가중합 → WTI 방향 점수"""
     ev_embs, ev_scores = _get_oil_event_embeddings()
     if ev_embs is None:
         return 0.0
-    # 코사인 유사도 (이미 L2 정규화된 벡터끼리 내적)
-    sims   = ev_embs @ article_emb            # (N_events,)
-    # softmax 가중합 (유사한 이벤트에 집중)
-    sims_s = np.exp(sims * 5)                 # temperature=5 로 sharp하게
+    sims   = ev_embs @ article_emb
+    sims_s = np.exp(sims * 5)
     sims_s /= sims_s.sum() + 1e-8
     return float(np.dot(sims_s, ev_scores))
+
+
+def _oil_event_score_cat(article_emb: 'np.ndarray') -> dict:
+    """카테고리별(공급/수요/지정학) 이벤트 점수 반환"""
+    ev_embs, ev_scores = _get_oil_event_embeddings()
+    if ev_embs is None or _OIL_EVENT_CATS is None:
+        return {'supply': 0.0, 'demand': 0.0, 'geo': 0.0}
+    sims   = ev_embs @ article_emb
+    sims_s = np.exp(sims * 5)
+    sims_s /= sims_s.sum() + 1e-8
+    cats = _OIL_EVENT_CATS
+    result = {}
+    for cat in ('supply', 'demand', 'geo'):
+        mask = np.array([c == cat for c in cats], dtype=float)
+        w    = sims_s * mask
+        denom = w.sum() + 1e-8
+        result[cat] = float(np.dot(w / denom, ev_scores))
+    return result
 
 _EMBED_MDL  = None
 _EMBED_TOK  = None
@@ -1519,15 +1606,33 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
             # ── Oil Event 라이브러리 스코어: 기사별 유가 방향 점수
             _get_oil_event_embeddings()   # 캐노니컬 이벤트 임베딩 초기화
             _ne['_oil_score'] = [_oil_event_score(e) for e in _ne['_emb']]
+            # ⑤ 카테고리별 이벤트 점수
+            _cat_scores = [_oil_event_score_cat(e) for e in _ne['_emb']]
+            _ne['_supply_score'] = [s['supply'] for s in _cat_scores]
+            _ne['_demand_score'] = [s['demand'] for s in _cat_scores]
+            _ne['_geo_score']    = [s['geo']    for s in _cat_scores]
             # 일별 impact_w 가중평균
+            def _wavg_col(g, col):
+                w = g.get('impact_w', pd.Series(np.ones(len(g)))).values
+                return (g[col].values * w).sum() / (w.sum() + 1e-8)
             _oil_daily = _ne.groupby(pd.to_datetime(_ne['date']).dt.date).apply(
-                lambda g: (g['_oil_score'] * g.get('impact_w', pd.Series(np.ones(len(g)))).values).sum()
-                          / g.get('impact_w', pd.Series(np.ones(len(g)))).values.sum()
+                lambda g: pd.Series({
+                    '_oil':    _wavg_col(g, '_oil_score'),
+                    '_supply': _wavg_col(g, '_supply_score'),
+                    '_demand': _wavg_col(g, '_demand_score'),
+                    '_geo':    _wavg_col(g, '_geo_score'),
+                })
             )
             _oil_daily.index = pd.to_datetime(_oil_daily.index)
-            _oil_s = _oil_daily.reindex(df.index).ffill().fillna(0)
+            _oil_s = _oil_daily['_oil'].reindex(df.index).ffill().fillna(0)
             df['oil_event_score']        = _oil_s.values
             df['oil_event_score_smooth'] = _oil_s.ewm(span=3, min_periods=1).mean().values
+            for _cat, _col in [('_supply','supply_event_score'),
+                                ('_demand','demand_event_score'),
+                                ('_geo',   'geo_event_score')]:
+                _s = _oil_daily[_cat].reindex(df.index).ffill().fillna(0)
+                df[_col]             = _s.values
+                df[_col + '_smooth'] = _s.ewm(span=3, min_periods=1).mean().values
             log.info(f"    Oil Event 스코어: μ={df['oil_event_score'].mean():.4f} "
                      f"σ={df['oil_event_score'].std():.4f}")
             # 뉴스가 있는 날짜별 impact_w 가중 평균 임베딩 계산
@@ -1666,9 +1771,9 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['regime_x_gpr'] = df['regime'] * df['gpr_zscore']     # 국면 × 지정학
 
     # ── 훈련 타깃 (다음 날 5일 실현변동성 & 가격 & 수익률)
-    df['target_rv']     = df['RV_5d'].shift(-1)
-    df['target_rv_log'] = np.log(df['target_rv'].clip(lower=1e-8))
-    df['target_price']  = df['WTI'].shift(-1)
+    df['target_rv']        = df['RV_5d'].shift(-1)
+    df['target_rv_log']    = np.log(df['target_rv'].clip(lower=1e-8))
+    df['target_price']     = df['WTI'].shift(-1)
     df['target_return'] = np.log(df['WTI'].shift(-1) / df['WTI'])   # 내일 log 수익률
 
     # 피처 행만 dropna (타깃 NaN 포함 시 훈련용으로만 제거)
@@ -2070,6 +2175,51 @@ def train_models(feature_df: pd.DataFrame):
     # → 학습 생략, 2모델 앙상블(SARIMAX+XGBoost) 유지
 
     # ─────────────────────────────────────────────────────────────────────
+    # Model B2: VAR (WTI + Brent + DXY + VIX 4변수 벡터 자기회귀)
+    # ─────────────────────────────────────────────────────────────────────
+    try:
+        from statsmodels.tsa.vector_ar.var_model import VAR as _VAR
+        _var_cols = [c for c in ['WTI', 'Brent', 'DXY', 'VIX'] if c in feature_df.columns]
+        if len(_var_cols) >= 2 and _SARIMAX:
+            log.info("    [B2] VAR 다변량 모델 학습 중...")
+            cutoff_v = feature_df.index[-1] - pd.DateOffset(years=SARIMAX_YEARS)
+            _vdf     = feature_df[feature_df.index >= cutoff_v][_var_cols].dropna()
+            _vdf     = _vdf.asfreq('B', method='ffill').dropna()
+            _n_te_v  = min(60, int(len(_vdf) * 0.15))
+            _v_tr    = _vdf.iloc[:-_n_te_v]
+            _v_te    = _vdf.iloc[-_n_te_v:]
+            # AIC 기준 최적 lag 선택 (최대 10)
+            _var_fit = _VAR(_v_tr).fit(maxlags=10, ic='aic', trend='c')
+            _lag_ord = _var_fit.k_ar
+            log.info(f"    VAR 최적 lag={_lag_ord}")
+            # 1-step ahead rolling forecast
+            _var_preds = []
+            _var_hist  = _v_tr.values.copy()
+            for _i in range(len(_v_te)):
+                _fc = _var_fit.forecast(_var_hist[-_lag_ord:], steps=1)
+                _var_preds.append(float(_fc[0, 0]))   # WTI column
+                _var_hist = np.vstack([_var_hist, _v_te.values[_i]])
+            _var_pred_arr = np.array(_var_preds)
+            _y_var_te     = _v_te['WTI'].values
+            _rmse_var = float(np.sqrt(mean_squared_error(_y_var_te, _var_pred_arr)))
+            _mae_var  = float(mean_absolute_error(_y_var_te, _var_pred_arr))
+            _r2_var   = float(r2_score(_y_var_te, _var_pred_arr))
+            log.info(f"    [B2] VAR → RMSE={_rmse_var:.4f}  MAE={_mae_var:.4f}  R²={_r2_var:.4f}")
+            # SARIMAX보다 나으면 스택에 추가
+            _sx_mae = results.get('sarimax', {}).get('mae', 999)
+            results['var'] = {
+                'pred_price_test': _var_pred_arr,
+                'actual_price_test': _y_var_te,
+                'rmse': _rmse_var, 'mae': _mae_var, 'r2': _r2_var,
+                'model': _var_fit, 'cols': _var_cols, 'lag': _lag_ord,
+                'n_test': _n_te_v, 'type': 'price',
+                'name': f'VAR({_lag_ord}) WTI+Brent+DXY+VIX',
+            }
+            log.info(f"    VAR MAE=${_mae_var:.4f}  vs  SARIMAX MAE=${_sx_mae:.4f}")
+    except Exception as _ve:
+        log.warning(f"    VAR 실패({_ve})")
+
+    # ─────────────────────────────────────────────────────────────────────
     # Model D: XGBoost 수익률 예측 (log_return 타깃)
     # vol 시뮬레이션 대체 — 방향성+크기 직접 학습
     # ─────────────────────────────────────────────────────────────────────
@@ -2249,7 +2399,7 @@ def train_models(feature_df: pd.DataFrame):
                 xr_pred = test_df['WTI'].values * np.exp(_pr_s)
 
             if sx_pred is not None and xr_pred is not None:
-                # 스택 피처 구성: SARIMAX + XGB, LGB 있으면 추가
+                # 스택 피처 구성: SARIMAX + XGB, LGB/VAR 있으면 추가
                 _stack_parts = [sx_pred, xr_pred]
                 _stack_names = ['SARIMAX', 'XGB']
 
@@ -2261,15 +2411,34 @@ def train_models(feature_df: pd.DataFrame):
                     _stack_parts.append(lgb_pred_stack)
                     _stack_names.append('LGB')
 
+                # ③ VAR 예측이 있으면 스택에 추가 (테스트 길이 맞춰 정렬)
+                if 'var' in results:
+                    _var_pred_raw = results['var']['pred_price_test']
+                    _n_align = min(len(sx_pred), len(_var_pred_raw))
+                    if _n_align == len(sx_pred):
+                        _stack_parts.append(_var_pred_raw[-len(sx_pred):])
+                        _stack_names.append('VAR')
+
+
                 _stack_X = np.column_stack(_stack_parts)
                 _stack_y = y_px_te
 
-                # Ridge 메타
+                # Ridge 메타 (균등 가중)
                 _meta_r = Ridge(alpha=1.0)
                 _meta_r.fit(_stack_X, _stack_y)
                 _pred_r  = _meta_r.predict(_stack_X)
                 _mae_r   = float(mean_absolute_error(_stack_y, _pred_r))
                 _r2_r    = float(r2_score(_stack_y, _pred_r))
+
+                # ② Ridge 메타 (시간 감쇠 가중치: 최근 데이터에 더 높은 가중치)
+                _n_s = len(_stack_y)
+                _tw  = np.exp(0.03 * np.arange(_n_s))
+                _tw  = _tw / _tw.mean()
+                _meta_tw = Ridge(alpha=1.0)
+                _meta_tw.fit(_stack_X, _stack_y, sample_weight=_tw)
+                _pred_tw = _meta_tw.predict(_stack_X)
+                _mae_tw  = float(mean_absolute_error(_stack_y, _pred_tw))
+                _r2_tw   = float(r2_score(_stack_y, _pred_tw))
 
                 # XGBoost 메타 (소규모 데이터 → 강한 정규화)
                 _meta_xgb = None
@@ -2285,25 +2454,25 @@ def train_models(feature_df: pd.DataFrame):
                     _pred_x = _meta_xgb.predict(_stack_X)
                     _mae_x  = float(mean_absolute_error(_stack_y, _pred_x))
                     _r2_x   = float(r2_score(_stack_y, _pred_x))
-                    log.info(f"    [E] Ridge meta → R²={_r2_r:.4f} MAE={_mae_r:.4f}  "
-                             f"XGB meta → R²={_r2_x:.4f} MAE={_mae_x:.4f}")
+                    log.info(f"    [E] Ridge={_mae_r:.4f}  Ridge-TW={_mae_tw:.4f}  "
+                             f"XGB={_mae_x:.4f} (MAE)")
 
                 # 더 나은 메타러너 선택 (MAE 기준)
-                if _meta_xgb is not None and _mae_x < _mae_r:
-                    _meta      = _meta_xgb
-                    _stack_pred = _meta_xgb.predict(_stack_X)
-                    _meta_type = 'XGB'
-                else:
-                    _meta      = _meta_r
-                    _stack_pred = _pred_r
-                    _meta_type = 'Ridge'
-                log.info(f"    [E] 메타러너 채택: {_meta_type}")
+                _candidates_meta = [
+                    (_mae_r,  _meta_r,   _pred_r,  'Ridge'),
+                    (_mae_tw, _meta_tw,  _pred_tw, 'Ridge-TW'),
+                ]
+                if _meta_xgb is not None:
+                    _candidates_meta.append((_mae_x, _meta_xgb, _pred_x, 'XGB'))
+                _best_meta = min(_candidates_meta, key=lambda c: c[0])
+                _mae_best_m, _meta, _stack_pred, _meta_type = _best_meta
+                log.info(f"    [E] 메타러너 채택: {_meta_type} (MAE={_mae_best_m:.4f})")
 
                 _r2_stack  = float(r2_score(_stack_y, _stack_pred))
                 _mae_stack = float(mean_absolute_error(_stack_y, _stack_pred))
                 _rmse_stack= float(np.sqrt(mean_squared_error(_stack_y, _stack_pred)))
 
-                if _meta_type == 'Ridge':
+                if _meta_type in ('Ridge', 'Ridge-TW'):
                     _coef_str = ' '.join(f'{n}={c:.3f}' for n, c in zip(_stack_names, _meta.coef_))
                     log.info(f"    [E] Stacking({_meta_type}) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
                              f"coef=[{_coef_str}]")
