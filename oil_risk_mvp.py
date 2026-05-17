@@ -590,10 +590,21 @@ def fetch_data(start_date=None, end_date=None):
         except Exception:
             skew = pd.Series(dtype=float, name="^SKEW")
 
+        # ── 천연가스 / RBOB 가솔린 (크랙 스프레드·에너지 동조화)
+        try:
+            ng   = _dl("NG=F").rename("NatGas")
+            rbob = _dl("RB=F").rename("RBOB")
+            log.info("    천연가스(NG) · RBOB 가솔린 수집 완료")
+        except Exception:
+            ng   = pd.Series(dtype=float, name="NatGas")
+            rbob = pd.Series(dtype=float, name="RBOB")
+            log.warning("    NG/RBOB 수집 실패 → 피처 제외")
+
         df = pd.DataFrame({'WTI': wti, 'Brent': brent, 'DXY': dxy,
                            'VIX': vix, 'OVX': ovx, 'futures_spread': futures_spread,
                            'WTI_High': wti_high, 'WTI_Low': wti_low,
-                           'VIX3M': vix3m, 'SKEW': skew})
+                           'VIX3M': vix3m, 'SKEW': skew,
+                           'NatGas': ng, 'RBOB': rbob})
         df = df.ffill().bfill()
         df.dropna(subset=['WTI'], inplace=True)
 
@@ -1264,6 +1275,8 @@ FEATURE_COLS = [
     'covid_dummy',
     # 계절성 (원유 수요 사이클)
     'month_sin', 'month_cos', 'driving_season', 'heating_season',
+    # 천연가스·RBOB (에너지 동조화·크랙 스프레드)
+    'ng_mom_5d', 'ng_mom_21d', 'rbob_mom_5d', 'crack_spread_z',
 ]
 
 
@@ -1601,6 +1614,25 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df['futures_spread']     = 0.0
         df['futures_spread_chg'] = 0.0
         df['contango_dummy']     = 0.0
+
+    # ── 천연가스 / RBOB 모멘텀 + 크랙 스프레드 ──────────────────────────────
+    if 'NatGas' in df.columns and df['NatGas'].notna().sum() > 30:
+        df['NatGas'] = df['NatGas'].ffill().bfill()
+        df['ng_mom_5d']  = df['NatGas'].pct_change(5).fillna(0)
+        df['ng_mom_21d'] = df['NatGas'].pct_change(21).fillna(0)
+        log.info("    천연가스 모멘텀 피처 생성")
+    else:
+        df['ng_mom_5d'] = df['ng_mom_21d'] = 0.0
+
+    if 'RBOB' in df.columns and df['RBOB'].notna().sum() > 30:
+        df['RBOB'] = df['RBOB'].ffill().bfill()
+        df['rbob_mom_5d']    = df['RBOB'].pct_change(5).fillna(0)
+        df['crack_spread']   = (df['RBOB'] * 42 - df['WTI']).fillna(0)  # $/bbl 환산
+        df['crack_spread_z'] = ((df['crack_spread'] - df['crack_spread'].rolling(63).mean())
+                                / (df['crack_spread'].rolling(63).std() + 1e-8)).fillna(0)
+        log.info("    RBOB 크랙 스프레드 피처 생성")
+    else:
+        df['rbob_mom_5d'] = df['crack_spread'] = df['crack_spread_z'] = 0.0
 
     # ── VIX × 뉴스 감성 복합변수 (뉴스 집계 이후에 계산)
     neg_sent = (-df['news_sentiment_smooth']).clip(lower=0)   # 부정 감성만 추출
