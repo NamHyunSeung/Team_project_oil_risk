@@ -382,57 +382,6 @@ with tab2:
                                sig_csv.read_bytes(),
                                "latest_risk_signal.csv", "text/csv")
 
-    # ── 리스크 히스토리 타임라인
-    st.markdown("---")
-    st.markdown("**📅 리스크 레벨 히스토리**")
-    _rh_path = OUTPUT_DIR / 'risk_history.csv'
-    if _rh_path.exists():
-        rh = pd.read_csv(_rh_path)
-        rh['date'] = pd.to_datetime(rh['date'])
-        rh = rh.sort_values('date')
-
-        _LEVEL_CLR = {'NORMAL': '#2ecc71', 'CAUTION': '#f39c12',
-                      'SURGE_RISK': '#e74c3c', 'DROP_RISK': '#3498db', 'CRITICAL': '#8e44ad'}
-
-        fig_rh, axes_rh = plt.subplots(2, 1, figsize=(10, 4.5),
-                                        facecolor='#161b22', sharex=True)
-        fig_rh.subplots_adjust(hspace=0.08)
-
-        ax_p = axes_rh[0]
-        ax_p.set_facecolor('#1c2433')
-        ax_p.plot(rh['date'], rh['wti_price'], color='#58a6ff', lw=1.5)
-        ax_p.set_ylabel('WTI ($)', color='#ccc', fontsize=8)
-        ax_p.tick_params(colors='#ccc', labelsize=7)
-        for sp in ax_p.spines.values(): sp.set_color('#30363d')
-        ax_p.grid(color='#21262d', lw=0.5)
-        for _, row in rh.iterrows():
-            ax_p.axvline(row['date'], color=_LEVEL_CLR.get(row['risk_level'], '#888'),
-                         alpha=0.15, lw=3)
-
-        ax_r = axes_rh[1]
-        ax_r.set_facecolor('#1c2433')
-        ax_r.fill_between(rh['date'], 0, rh['risk_score'], color='#f0c040', alpha=0.4)
-        ax_r.plot(rh['date'], rh['risk_score'], color='#f0c040', lw=1.2)
-        for val, clr in [(0.3, '#f39c12'), (0.6, '#e74c3c')]:
-            ax_r.axhline(val, color=clr, lw=0.8, ls='--', alpha=0.7)
-        ax_r.set_ylabel('리스크 점수', color='#ccc', fontsize=8)
-        ax_r.tick_params(colors='#ccc', labelsize=7)
-        for sp in ax_r.spines.values(): sp.set_color('#30363d')
-        ax_r.grid(color='#21262d', lw=0.5)
-
-        from matplotlib.patches import Patch
-        handles = [Patch(color=c, label=l) for l, c in _LEVEL_CLR.items()]
-        ax_p.legend(handles=handles, fontsize=7, facecolor='#1c2433',
-                    labelcolor='white', loc='upper left', ncol=5)
-        plt.tight_layout()
-        st.pyplot(fig_rh)
-        plt.close()
-
-        if len(rh) < 2:
-            st.info("파이프라인을 2회 이상 실행하면 히스토리가 표시됩니다.")
-    else:
-        st.info("파이프라인 실행 후 리스크 히스토리가 표시됩니다.")
-
 # ── Tab 3: 키워드 분석 ───────────────────────────────────────────────────────
 with tab3:
     st.subheader("☁ 뉴스 위기 키워드")
