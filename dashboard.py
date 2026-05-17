@@ -935,6 +935,47 @@ if _is_admin and tab_admin is not None:
                 if not _warns:
                     st.success('✅ 모든 모델 롤백 기준 충족')
 
+
+            st.markdown('---')
+            st.markdown('#### 자동 실행 스케줄러')
+            import subprocess as _ssp
+            _sch_name = 'OilRiskPipeline'
+
+            def _sch_status():
+                r = _ssp.run(['schtasks', '/Query', '/TN', _sch_name, '/FO', 'LIST'],
+                             capture_output=True, encoding='cp949', errors='replace')
+                return r.returncode == 0, r.stdout
+
+            _sch_ok, _sch_info = _sch_status()
+            if _sch_ok:
+                st.success('✅ 스케줄 등록됨')
+                for line in _sch_info.splitlines():
+                    if any(k in line for k in ('다음 실행', '상태', 'Next Run', 'Status', '작업 이름', 'TaskName')):
+                        st.caption(line.strip())
+            else:
+                st.warning('⚠️ 스케줄 미등록')
+
+            col_h, col_m, col_btn = st.columns([1, 1, 2])
+            _h = col_h.number_input('시', 0, 23, 7, key='sch_h')
+            _m = col_m.number_input('분', 0, 59, 0, key='sch_m')
+            with col_btn:
+                st.markdown('<br>', unsafe_allow_html=True)
+                if st.button('등록/갱신'):
+                    from pathlib import Path as _PL5
+                    import sys as _sys3
+                    _sched_py = _PL5(__file__).parent / 'setup_scheduler.py'
+                    _r = _ssp.run([_sys3.executable, str(_sched_py), 'install', str(_h), str(_m)],
+                                  capture_output=True, text=True, encoding='utf-8', errors='replace')
+                    st.success(_r.stdout.strip() or '등록 완료') if _r.returncode == 0 else st.error(_r.stderr)
+
+            if st.button('스케줄 해제', type='secondary'):
+                from pathlib import Path as _PL6
+                import sys as _sys4
+                _sched_py = _PL6(__file__).parent / 'setup_scheduler.py'
+                _r = _ssp.run([_sys4.executable, str(_sched_py), 'remove'],
+                              capture_output=True, text=True, encoding='utf-8', errors='replace')
+                st.info(_r.stdout.strip() or '해제 완료')
+
             st.markdown('---')
             st.markdown('#### 파이프라인 로그')
             if _log_path.exists():
