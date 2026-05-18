@@ -559,8 +559,8 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
         log.info(f"      원유 재고 연결 완료: {len(inv)}주치 + 서프라이즈·모멘텀 피처")
     except Exception as exc:
         log.warning(f"      원유 재고 수집 실패({exc}) → 0 사용")
-        df['inv_chg_zscore'] = 0.0
-        df['inv_lvl_zscore'] = 0.0
+        for _c in ('inv_chg_zscore', 'inv_lvl_zscore', 'inv_surprise', 'inv_mom4_z'):
+            df[_c] = 0.0
 
     # ── 지정학 더미: GPR Index (Caldara & Iacoviello) ─────────────────────
     df = _attach_gpr(df)
