@@ -2656,12 +2656,16 @@ def train_models(feature_df: pd.DataFrame):
                 _stack_names = ['SARIMAX', 'XGB']
 
                 if 'lgb_return' in results:
-                    _lgbi  = results['lgb_return']
-                    _fs_l  = [f for f in _lgbi['features'] if f in test_df.columns]
-                    _Xte_l = _lgbi['scaler'].transform(test_df[_fs_l])
-                    lgb_pred_stack = test_df['WTI'].values * np.exp(_lgbi['model'].predict(_Xte_l))
-                    _stack_parts.append(lgb_pred_stack)
-                    _stack_names.append('LGB')
+                    _lgbi = results['lgb_return']
+                    _xgb_mae_ref = xr_info.get('mae', float('inf'))
+                    if _lgbi.get('mae', float('inf')) <= _xgb_mae_ref * 1.10:
+                        _fs_l  = [f for f in _lgbi['features'] if f in test_df.columns]
+                        _Xte_l = _lgbi['scaler'].transform(test_df[_fs_l])
+                        lgb_pred_stack = test_df['WTI'].values * np.exp(_lgbi['model'].predict(_Xte_l))
+                        _stack_parts.append(lgb_pred_stack)
+                        _stack_names.append('LGB')
+                    else:
+                        log.info(f"    LGB MAE({_lgbi.get('mae',0):.4f}) > XGB×1.10({_xgb_mae_ref*1.10:.4f}) → Stacking 제외")
 
                 # ③ VAR 예측이 있으면 스택에 추가 (테스트 길이 맞춰 정렬)
                 if 'var' in results:
@@ -2730,9 +2734,10 @@ def train_models(feature_df: pd.DataFrame):
                 else:
                     log.info(f"    [E] Stacking({_meta_type}) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}")
 
-                # 기존 앙상블보다 나으면 채택
-                _r2_curr = max(sx_info['r2'], xr_info['r2'])
-                if _r2_stack > _r2_curr:
+                # 기존 최고 단일 모델보다 R²·MAE 모두 나을 때만 채택
+                _r2_curr  = max(sx_info['r2'], xr_info['r2'])
+                _mae_curr = min(sx_info.get('mae', float('inf')), xr_info.get('mae', float('inf')))
+                if _r2_stack > _r2_curr and _mae_stack <= _mae_curr:
                     _base_name = '+'.join(_stack_names)
                     _stk_info = {
                         'model': _meta, 'type': 'price',
