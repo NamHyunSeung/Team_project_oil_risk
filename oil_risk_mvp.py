@@ -469,12 +469,9 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
     n = len(df)
 
     if not _FRED or not FRED_API_KEY:
-        log.info("    FRED 미설정 → 더미 충격변수 사용")
-        np.random.seed(42)
-        df['demand_shock']   = np.random.normal(0, 2.0, n)
-        df['supply_shock']   = np.random.normal(0, 1.5, n)
-        df['inv_chg_zscore'] = np.random.normal(0, 1.0, n)
-        df['inv_lvl_zscore'] = np.random.normal(0, 1.0, n)
+        log.info("    FRED 미설정 → 충격변수 0으로 대체")
+        for _c in ('demand_shock', 'supply_shock', 'inv_chg_zscore', 'inv_lvl_zscore'):
+            df[_c] = 0.0
         df = _attach_gpr(df)
         return df
 
@@ -497,9 +494,8 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
         log.info(f"      수요충격(스프레드Δ): μ={df['demand_shock'].mean():.3f}, "
                  f"σ={df['demand_shock'].std():.3f}")
     except Exception as exc:
-        log.warning(f"      수요충격 FRED 실패({exc}) → 더미 사용")
-        np.random.seed(1)
-        df['demand_shock'] = np.random.normal(0, 2.0, n)
+        log.warning(f"      수요충격 FRED 실패({exc}) → 0 사용")
+        df['demand_shock'] = 0.0
 
     # ── 공급충격: Henry Hub 천연가스 일변화율 ─────────────────────────────
     # 가스 가격 급등 = 에너지 공급 타이트 = 유가 상방 압력
@@ -514,9 +510,8 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
         log.info(f"      공급충격(HenryHubΔ%): μ={df['supply_shock'].mean():.3f}, "
                  f"σ={df['supply_shock'].std():.3f}")
     except Exception as exc:
-        log.warning(f"      공급충격 FRED 실패({exc}) → 더미 사용")
-        np.random.seed(2)
-        df['supply_shock'] = np.random.normal(0, 1.5, n)
+        log.warning(f"      공급충격 FRED 실패({exc}) → 0 사용")
+        df['supply_shock'] = 0.0
 
     # ── 미국 원유 재고 (EIA API v2: WCESTUS1, SPR 제외 상업 재고) ───────────
     try:
@@ -1733,10 +1728,12 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
                     _prev = _emb_matrix[_i].copy()
                 else:
                     _emb_matrix[_i] = _prev
-            # 수익률(return_1d 다음날)과의 상관관계로 top-K 차원 선택
+            # 수익률과의 상관관계로 top-K 차원 선택 (미래 누출 방지: 첫 80%만 사용)
             if 'return_1d' in df.columns and len(df) > 200:
-                _ret_next = df['return_1d'].shift(-1).values
-                _valid    = ~np.isnan(_ret_next) & (_emb_matrix.sum(1) != 0)
+                _ret_next   = df['return_1d'].shift(-1).values
+                _n_corr_tr  = int(len(df) * 0.8)   # 상관관계 계산은 첫 80%만
+                _valid      = ~np.isnan(_ret_next) & (_emb_matrix.sum(1) != 0)
+                _valid[_n_corr_tr:] = False          # 테스트 구간 제외
                 _corrs = np.array([
                     float(np.corrcoef(_emb_matrix[_valid, _d], _ret_next[_valid])[0, 1])
                     if _emb_matrix[_valid, _d].std() > 1e-8 else 0.0
