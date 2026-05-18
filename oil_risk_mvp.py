@@ -1454,7 +1454,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     # ── CEEMDAN 신호 분해 (논문: CEEMDAN+LSTM-Attention 추세/노이즈 분리)
     try:
         from PyEMD import CEEMDAN as _CEEMDAN
-        _cem = _CEEMDAN(trials=50, epsilon=0.005)
+        _cem = _CEEMDAN(trials=20, epsilon=0.005)
         _wti_arr = df['WTI'].ffill().values.astype(float)
         _imfs = _cem(_wti_arr)           # shape: (n_imf, n_samples)
         _n = len(_wti_arr)
@@ -1499,7 +1499,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
 
     # ── 장중 고빈도 실현분산 (1h 데이터, 최근 730일 — 더 정확한 RV 추정)
     try:
-        _raw_1h = yf.download("CL=F", period="730d", interval="1h",
+        _raw_1h = yf.download("CL=F", period="365d", interval="1h",
                               progress=False, auto_adjust=True)
         if not _raw_1h.empty and len(_raw_1h) > 100:
             _c1h = _raw_1h['Close']
@@ -1661,14 +1661,22 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     if not news_df.empty:
         try:
             _ne = _apply_embeddings(news_df)  # '_emb' 컬럼 추가
-            # ── Oil Event 라이브러리 스코어: 기사별 유가 방향 점수
-            _get_oil_event_embeddings()   # 캐노니컬 이벤트 임베딩 초기화
-            _ne['_oil_score'] = [_oil_event_score(e) for e in _ne['_emb']]
-            # ⑤ 카테고리별 이벤트 점수
-            _cat_scores = [_oil_event_score_cat(e) for e in _ne['_emb']]
-            _ne['_supply_score'] = [s['supply'] for s in _cat_scores]
-            _ne['_demand_score'] = [s['demand'] for s in _cat_scores]
-            _ne['_geo_score']    = [s['geo']    for s in _cat_scores]
+            # ── Oil Event 라이브러리 스코어: 벡터화 행렬 연산
+            _ev_embs_v, _ev_scores_v = _get_oil_event_embeddings()
+            if _ev_embs_v is not None and not _ne.empty:
+                _art_mat   = np.vstack(_ne['_emb'].values)           # (N, 384)
+                _sims_v    = _art_mat @ _ev_embs_v.T                 # (N, n_events)
+                _sims_sw   = np.exp(_sims_v * 5)
+                _sims_sw  /= _sims_sw.sum(axis=1, keepdims=True) + 1e-8
+                _ev_sc_arr = np.array(_ev_scores_v)
+                _ne['_oil_score'] = _sims_sw @ _ev_sc_arr
+                for _cat, _col in [('supply','_supply_score'),('demand','_demand_score'),('geo','_geo_score')]:
+                    _cmask   = np.array([c == _cat for c in _OIL_EVENT_CATS], dtype=float)
+                    _w       = _sims_sw * _cmask
+                    _ne[_col] = (_w / (_w.sum(axis=1, keepdims=True) + 1e-8)) @ _ev_sc_arr
+            else:
+                for _col in ['_oil_score','_supply_score','_demand_score','_geo_score']:
+                    _ne[_col] = 0.0
             # 일별 impact_w 가중평균
             def _wavg_col(g, col):
                 w = g.get('impact_w', pd.Series(np.ones(len(g)))).values
