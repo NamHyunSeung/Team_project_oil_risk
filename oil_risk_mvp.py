@@ -609,20 +609,7 @@ def fetch_data(start_date=None, end_date=None):
         wti_open = _from_clf('Open').rename("WTI_Open")
         wti_vol  = _from_clf('Volume').rename("WTI_Volume")
 
-        brent = _dl("BZ=F")
-        dxy   = _dl("DX-Y.NYB")
-        try:
-            vix = _dl("^VIX")
-            log.info("    VIX(공포지수) 수집 완료")
-        except Exception:
-            vix = pd.Series(dtype=float, name="^VIX")
-
-        try:
-            ovx = _dl("^OVX")
-            log.info("    OVX(원유 변동성 지수) 수집 완료")
-        except Exception:
-            ovx = pd.Series(dtype=float, name="^OVX")
-
+        # CL2=F 먼저 순차 실행 (yfinance 세션 정규화 사이드 이펙트 보존)
         try:
             cl2 = _dl("CL2=F")
             futures_spread = (cl2 - wti).rename("futures_spread")
@@ -631,27 +618,29 @@ def fetch_data(start_date=None, end_date=None):
             futures_spread = pd.Series(dtype=float, name="futures_spread")
             log.warning("    WTI 2번째 월물 수집 실패 → futures_spread=0")
 
-        # VIX 기간구조 + SKEW (파생상품 꼬리위험)
-        try:
-            vix3m = _dl("^VIX3M")
-            log.info("    VIX3M(3개월 변동성) 수집 완료")
-        except Exception:
-            vix3m = pd.Series(dtype=float, name="^VIX3M")
-        try:
-            skew = _dl("^SKEW")
-            log.info("    SKEW(꼬리위험) 수집 완료")
-        except Exception:
-            skew = pd.Series(dtype=float, name="^SKEW")
+        # 나머지 8개 티커 병렬 다운로드
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        def _safe_dl(ticker, rename=None):
+            try:
+                s = _dl(ticker)
+                return s.rename(rename) if rename else s
+            except Exception:
+                return pd.Series(dtype=float, name=(rename or ticker))
 
-        # ── 천연가스 / RBOB 가솔린 (크랙 스프레드·에너지 동조화)
-        try:
-            ng   = _dl("NG=F").rename("NatGas")
-            rbob = _dl("RB=F").rename("RBOB")
-            log.info("    천연가스(NG) · RBOB 가솔린 수집 완료")
-        except Exception:
-            ng   = pd.Series(dtype=float, name="NatGas")
-            rbob = pd.Series(dtype=float, name="RBOB")
-            log.warning("    NG/RBOB 수집 실패 → 피처 제외")
+        with _TPE(max_workers=6) as _pe:
+            _fb    = _pe.submit(_safe_dl, 'BZ=F')
+            _fd    = _pe.submit(_safe_dl, 'DX-Y.NYB')
+            _fv    = _pe.submit(_safe_dl, '^VIX')
+            _fo    = _pe.submit(_safe_dl, '^OVX')
+            _fv3   = _pe.submit(_safe_dl, '^VIX3M')
+            _fsk   = _pe.submit(_safe_dl, '^SKEW')
+            _fng   = _pe.submit(_safe_dl, 'NG=F',  'NatGas')
+            _frb   = _pe.submit(_safe_dl, 'RB=F',  'RBOB')
+        brent = _fb.result();  dxy   = _fd.result()
+        vix   = _fv.result();  ovx   = _fo.result()
+        vix3m = _fv3.result(); skew  = _fsk.result()
+        ng    = _fng.result(); rbob  = _frb.result()
+        log.info("    병렬 다운로드 완료 (BZ=F/DXY/VIX/OVX/VIX3M/SKEW/NG/RBOB)")
 
         df = pd.DataFrame({'WTI': wti, 'Brent': brent, 'DXY': dxy,
                            'VIX': vix, 'OVX': ovx, 'futures_spread': futures_spread,
@@ -1454,9 +1443,20 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     # ── CEEMDAN 신호 분해 (논문: CEEMDAN+LSTM-Attention 추세/노이즈 분리)
     try:
         from PyEMD import CEEMDAN as _CEEMDAN
-        _cem = _CEEMDAN(trials=20, epsilon=0.005)
+        import hashlib as _hl
         _wti_arr = df['WTI'].ffill().values.astype(float)
-        _imfs = _cem(_wti_arr)           # shape: (n_imf, n_samples)
+        _cem_hash = _hl.md5(_wti_arr.tobytes()).hexdigest()[:16]
+        _cem_cache = OUTPUT_DIR / f'ceemdan_{_cem_hash}.npy'
+        if _cem_cache.exists():
+            _imfs = np.load(str(_cem_cache), allow_pickle=True)
+            log.info("    CEEMDAN 캐시 로드")
+        else:
+            _cem = _CEEMDAN(trials=20, epsilon=0.005)
+            _imfs = _cem(_wti_arr)
+            np.save(str(_cem_cache), _imfs)
+            for _old_c in OUTPUT_DIR.glob('ceemdan_*.npy'):
+                if _old_c != _cem_cache:
+                    _old_c.unlink(missing_ok=True)
         _n = len(_wti_arr)
         # 저주파 성분 = 마지막 IMF(추세), 고주파 = 첫 IMF들(잡음)
         _trend = _imfs[-1][:_n]          # 추세 성분
@@ -2103,10 +2103,23 @@ def train_models(feature_df: pd.DataFrame):
             wti_train  = _to_bday(sx_train['WTI'])
             exog_train = _to_bday(sx_train[exog_cols]) if exog_cols else None
 
-            # 1번: auto_arima로 최적 파라미터 탐색
+            # 1번: auto_arima로 최적 파라미터 탐색 (결과 캐싱)
             sarimax_order    = (2, 1, 1)
             sarimax_seasonal = (1, 0, 1, 5)
-            if _PMDARIMA:
+            _sx_cache_file = OUTPUT_DIR / 'sarimax_order_cache.json'
+            _sx_cache_key  = str(len(wti_train))
+            _sx_cached = {}
+            if _sx_cache_file.exists():
+                try:
+                    import json as _json
+                    _sx_cached = _json.loads(_sx_cache_file.read_text())
+                except Exception:
+                    pass
+            if _sx_cached.get('key') == _sx_cache_key:
+                sarimax_order    = tuple(_sx_cached['order'])
+                sarimax_seasonal = tuple(_sx_cached['seasonal'])
+                log.info(f"    auto_arima 캐시 사용: {sarimax_order} × {sarimax_seasonal}")
+            elif _PMDARIMA:
                 try:
                     log.info("    [B0] auto_arima 파라미터 탐색 중 (stepwise)...")
                     aa = _auto_arima(
@@ -2121,6 +2134,12 @@ def train_models(feature_df: pd.DataFrame):
                     sarimax_order    = aa.order
                     sarimax_seasonal = aa.seasonal_order
                     log.info(f"    auto_arima 최적: {sarimax_order} × {sarimax_seasonal}")
+                    import json as _json
+                    _sx_cache_file.write_text(_json.dumps({
+                        'key': _sx_cache_key,
+                        'order': list(sarimax_order),
+                        'seasonal': list(sarimax_seasonal),
+                    }))
                 except Exception as e:
                     log.warning(f"    auto_arima 실패({e}) → 기본 파라미터 사용")
 
@@ -2133,7 +2152,7 @@ def train_models(feature_df: pd.DataFrame):
                 enforce_stationarity=False,
                 enforce_invertibility=False,
             )
-            fit = mdl_tr.fit(disp=False, maxiter=300)
+            fit = mdl_tr.fit(disp=False, maxiter=100)
 
             # ── 1-step ahead 평가: 추정된 파라미터 고정 + 전체 시리즈 적용
             mdl_full = SARIMAX(
@@ -2161,7 +2180,7 @@ def train_models(feature_df: pd.DataFrame):
                 order=sarimax_order, seasonal_order=sarimax_seasonal,
                 enforce_stationarity=False, enforce_invertibility=False,
             )
-            fit_live = mdl_live.fit(disp=False, maxiter=300)
+            fit_live = mdl_live.fit(disp=False, maxiter=100)
 
             results['sarimax'] = {
                 'model': fit_live, 'features': exog_cols, 'type': 'price',
@@ -2476,7 +2495,7 @@ def train_models(feature_df: pd.DataFrame):
                                if c in train_df.columns
                                and train_df[c].abs().sum() > 0]
                     _wf_dirs = []
-                    for _wti, _wvi in TimeSeriesSplit(n_splits=5).split(_Xtr_sel):
+                    for _wti, _wvi in TimeSeriesSplit(n_splits=3).split(_Xtr_sel):
                         if len(_wti) < 100 or len(_wvi) < 15:
                             continue
                         if _wf_cem:
