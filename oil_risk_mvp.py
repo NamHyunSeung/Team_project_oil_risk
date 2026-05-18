@@ -2416,7 +2416,8 @@ def train_models(feature_df: pd.DataFrame):
 
                     _sm = _SVC(kernel='rbf', C=1.0, gamma='scale',
                                probability=True, class_weight='balanced', random_state=42)
-                    _sm.fit(_Xtr_svm, _y_cls_tr)
+                    _sw_svm = np.exp(0.002 * np.arange(len(_y_cls_tr)))
+                    _sm.fit(_Xtr_svm, _y_cls_tr, sample_weight=_sw_svm)
                     _best_svm_prob = _sm.predict_proba(_Xte_svm)[:, 1]
                     _best_svm_dir  = float(((_best_svm_prob > 0.5).astype(int) == _y_cls_te).mean())
                     log.info(f"        [SVM+CEEMDAN+Event] dir={_best_svm_dir*100:.1f}% (주입피처={len(_cem_cols)}개)")
@@ -2478,7 +2479,8 @@ def train_models(feature_df: pd.DataFrame):
                         _wsm = _SVC_wf(kernel='rbf', C=1.0, gamma='scale',
                                        probability=True, class_weight='balanced',
                                        random_state=42)
-                        _wsm.fit(_wXtr, _y_cls_tr[_wti])
+                        _wf_sw = np.exp(0.002 * np.arange(len(_wti)))
+                        _wsm.fit(_wXtr, _y_cls_tr[_wti], sample_weight=_wf_sw)
                         _wpv = _wsm.predict_proba(_wXva)[:, 1]
                         _wf_dirs.append(
                             float(((_wpv > 0.5).astype(int) == _y_cls_tr[_wvi]).mean()))
