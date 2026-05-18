@@ -2402,7 +2402,7 @@ def train_models(feature_df: pd.DataFrame):
                         'supply_event_score', 'supply_event_score_smooth',
                         'demand_event_score', 'demand_event_score_smooth',
                         'geo_event_score',    'geo_event_score_smooth',
-                        'news_uncertainty',
+                        'news_uncertainty',   'ovx_rv_spread',
                     ] if c in train_df.columns and train_df[c].abs().sum() > 0]
                     if _cem_cols:
                         _sc_cem = StandardScaler()
