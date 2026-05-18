@@ -405,8 +405,23 @@ def _attach_gpr(df: pd.DataFrame) -> pd.DataFrame:
     GPR Index (Caldara & Iacoviello 2022) 로딩 후 df에 결합.
     - geo_dummy : GPRD z-score > 1.0 (상위 ~16%) 이면 1, 아니면 0
     - gpr_zscore: 연속형 표준화 GPR (피처로 추가 활용)
+    파일이 7일 이상 오래됐으면 공식 URL에서 자동 갱신 시도.
     """
+    _GPR_URL = "https://www.matteoiacoviello.com/gpr_files/data_gpr_daily_recent.xls"
     gpr_path = Path(GPR_FILE)
+
+    # 파일 갱신 (없거나 7일 이상 오래된 경우)
+    _needs_update = (not gpr_path.exists()) or (
+        (datetime.now() - datetime.fromtimestamp(gpr_path.stat().st_mtime)).days >= 7
+    )
+    if _needs_update:
+        try:
+            import urllib.request as _ur
+            _ur.urlretrieve(_GPR_URL, str(gpr_path))
+            log.info("    GPR 파일 자동 갱신 완료")
+        except Exception as _ge:
+            log.warning(f"    GPR 자동 갱신 실패({_ge}) → 기존 파일 사용")
+
     if not gpr_path.exists():
         log.warning(f"    GPR 파일 없음({GPR_FILE}) → geo_dummy=0 사용")
         df['geo_dummy']  = 0.0
