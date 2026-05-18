@@ -2546,8 +2546,10 @@ def train_models(feature_df: pd.DataFrame):
             ]
             if _mD_q is not None:
                 _candidates.append((_mae_q, _dir_q, _mD_q, _sc_sel, _pr_q, _px_q, _r2_q, _sel_feats, 'Quantile'))
-            if _mD_cls_dir is not None:
-                _candidates.append((_mae_cls, _dir_cls, _mD_cls_dir, _sc_sel, _pr_cls_adj, _px_cls_adj, _r2_cls, _sel_feats, 'Classifier-adj'))
+            if _mD_cls_dir is not None and _wf_dir_acc >= 0.51:
+                # 모델 선택 기준은 신뢰도 높은 wf_dir_acc 사용 (test-set 단일 평가 과대평가 방지)
+                _sel_dir_cls = _wf_dir_acc if _wf_dir_acc > 0 else _dir_cls
+                _candidates.append((_mae_cls, _sel_dir_cls, _mD_cls_dir, _sc_sel, _pr_cls_adj, _px_cls_adj, _r2_cls, _sel_feats, 'Classifier-adj'))
 
             # MAE ≤ 최선 + 5% 범위 내에서 dir_acc 최고 모델 채택
             _best_mae = min(c[0] for c in _candidates)
