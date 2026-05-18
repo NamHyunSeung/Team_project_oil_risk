@@ -1857,7 +1857,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
 
     # 피처 행만 dropna (타깃 NaN 포함 시 훈련용으로만 제거)
     feat_na_cols = [c for c in FEATURE_COLS if c in df.columns]
-    df_full = df.copy()               # 마지막 행 보존용 (예측에 사용)
+    df_full = df.ffill().bfill()      # 마지막 행 보존용 (예측에 사용, NaN ffill 보증)
     df.dropna(subset=feat_na_cols + ['target_rv', 'target_rv_log', 'target_price', 'target_return'], inplace=True)
 
     log.info(f"    피처 완성: {df.shape[0]:,} rows × {df.shape[1]} cols")
@@ -2125,7 +2125,8 @@ def train_models(feature_df: pd.DataFrame):
             sarimax_order    = (2, 1, 1)
             sarimax_seasonal = (1, 0, 1, 5)
             _sx_cache_file = OUTPUT_DIR / 'sarimax_order_cache.json'
-            _sx_cache_key  = str(len(wti_train))
+            import hashlib as _hl
+            _sx_cache_key  = _hl.md5(wti_train.values.tobytes()).hexdigest()[:16]
             _sx_cached = {}
             if _sx_cache_file.exists():
                 try:
@@ -2475,16 +2476,18 @@ def train_models(feature_df: pd.DataFrame):
                     if _best_svm_dir > ((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean():
                         # ExtSVM 래퍼: forecast 시 CEEMDAN을 자동으로 붙여줌
                         if _cem_cols and _sc_cem is not None:
-                            _cem_last = _sc_cem.transform(
-                                test_df[_cem_cols].iloc[[-1]].fillna(0).values)
+                            _cem_te_all = _sc_cem.transform(
+                                test_df[_cem_cols].fillna(0).values)   # 전체 테스트 행
+                            _cem_last   = _cem_te_all[[-1]]            # live 예측용 마지막 행
                             class _ExtSVM:
-                                def __init__(self, s, el):
-                                    self._s, self._el = s, el
+                                def __init__(self, s, sc, te_all, last):
+                                    self._s, self._sc = s, sc
+                                    self._te_all, self._last = te_all, last
                                 def predict_proba(self, X):
-                                    _X2 = np.hstack(
-                                        [X, np.tile(self._el, (len(X), 1))])
-                                    return self._s.predict_proba(_X2)
-                            _best_svm = _ExtSVM(_sm, _cem_last)
+                                    _ext = self._te_all if len(X) == len(self._te_all) else \
+                                           np.tile(self._last, (len(X), 1))
+                                    return self._s.predict_proba(np.hstack([X, _ext]))
+                            _best_svm = _ExtSVM(_sm, _sc_cem, _cem_te_all, _cem_last)
                         else:
                             _best_svm = _sm
                         _prob_up_te = _best_svm_prob
