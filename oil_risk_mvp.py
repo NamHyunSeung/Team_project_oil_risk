@@ -4051,7 +4051,7 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     import json as _json
     _run_meta = {
         'last_run':    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'data_through': feature_df.index[-1].strftime('%Y-%m-%d'),
+        'data_through': full_df.index[-1].strftime('%Y-%m-%d'),
         'n_live':      int((pd.read_csv(PRED_LOG_FILE)['type'] == 'live').sum()) if PRED_LOG_FILE.exists() else 0,
         'api_status':  api_status,
     }
