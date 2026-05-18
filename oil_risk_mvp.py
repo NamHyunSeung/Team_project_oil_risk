@@ -1928,11 +1928,14 @@ def train_models(feature_df: pd.DataFrame):
         wf_preds  = np.zeros(len(X_tr))
         wf_actual = y_rv_tr.values.copy()
 
-        full_X = scaler.fit_transform(X_tr)
+        _X_tr_raw = X_tr.values  # fold별 인덱싱용
 
-        for fold, (idx_tr, idx_va) in enumerate(tscv.split(full_X)):
-            X_f, X_v = full_X[idx_tr], full_X[idx_va]
-            y_f      = y_rv_tr.iloc[idx_tr]
+        for fold, (idx_tr, idx_va) in enumerate(tscv.split(_X_tr_raw)):
+            # fold별 독립 스케일러 (전체 훈련셋 통계 누출 방지)
+            _sc_fold = StandardScaler()
+            X_f = _sc_fold.fit_transform(_X_tr_raw[idx_tr])
+            X_v = _sc_fold.transform(_X_tr_raw[idx_va])
+            y_f = y_rv_tr.iloc[idx_tr]
 
             covid_w = (np.where(train_df['covid_dummy'].values[idx_tr] == 1, 0.35, 1.0)
                        if 'covid_dummy' in train_df.columns else None)
@@ -1947,6 +1950,9 @@ def train_models(feature_df: pd.DataFrame):
                                            random_state=42))
             m.fit(X_f, y_f, sample_weight=covid_w)
             wf_preds[idx_va] = m.predict(X_v)
+
+        # 최종 모델용 스케일러: 전체 훈련셋으로 fit (평가 완료 후이므로 누출 없음)
+        full_X = scaler.fit_transform(X_tr)
 
         rmse_cv = float(np.sqrt(mean_squared_error(wf_actual, wf_preds)))
         mae_cv  = float(mean_absolute_error(wf_actual, wf_preds))
@@ -2695,61 +2701,25 @@ def train_models(feature_df: pd.DataFrame):
                 _stack_X = np.column_stack(_stack_parts)
                 _stack_y = y_px_te
 
-                # Ridge 메타 (균등 가중)
-                _meta_r = Ridge(alpha=1.0)
-                _meta_r.fit(_stack_X, _stack_y)
-                _pred_r  = _meta_r.predict(_stack_X)
-                _mae_r   = float(mean_absolute_error(_stack_y, _pred_r))
-                _r2_r    = float(r2_score(_stack_y, _pred_r))
+                # 역MAE 가중평균 (메타러너 test set 학습 누출 제거)
+                _mae_lookup = {
+                    'SARIMAX': sx_info.get('mae', 999.0),
+                    'XGB':     xr_info.get('mae', 999.0),
+                    'LGB':     results.get('lgb_return', {}).get('mae', 999.0),
+                    'VAR':     results.get('var', {}).get('mae', 999.0),
+                }
+                _inv_mae = np.array([1.0 / max(_mae_lookup.get(n, 999.0), 1e-6)
+                                     for n in _stack_names])
+                _stack_weights = _inv_mae / _inv_mae.sum()
+                _stack_pred    = _stack_X @ _stack_weights
+                _meta_type     = 'InvMAE-WA'
 
-                # ② Ridge 메타 (시간 감쇠 가중치: 최근 데이터에 더 높은 가중치)
-                _n_s = len(_stack_y)
-                _tw  = np.exp(0.03 * np.arange(_n_s))
-                _tw  = _tw / _tw.mean()
-                _meta_tw = Ridge(alpha=1.0)
-                _meta_tw.fit(_stack_X, _stack_y, sample_weight=_tw)
-                _pred_tw = _meta_tw.predict(_stack_X)
-                _mae_tw  = float(mean_absolute_error(_stack_y, _pred_tw))
-                _r2_tw   = float(r2_score(_stack_y, _pred_tw))
-
-                # XGBoost 메타 (소규모 데이터 → 강한 정규화)
-                _meta_xgb = None
-                _mae_x, _r2_x = _mae_r, _r2_r
-                if _XGB and len(_stack_y) >= 30:
-                    _meta_xgb = xgb.XGBRegressor(
-                        n_estimators=100, max_depth=2, learning_rate=0.05,
-                        subsample=0.8, colsample_bytree=1.0,
-                        min_child_weight=10, reg_lambda=5.0,
-                        n_jobs=-1, random_state=42, verbosity=0,
-                    )
-                    _meta_xgb.fit(_stack_X, _stack_y)
-                    _pred_x = _meta_xgb.predict(_stack_X)
-                    _mae_x  = float(mean_absolute_error(_stack_y, _pred_x))
-                    _r2_x   = float(r2_score(_stack_y, _pred_x))
-                    log.info(f"    [E] Ridge={_mae_r:.4f}  Ridge-TW={_mae_tw:.4f}  "
-                             f"XGB={_mae_x:.4f} (MAE)")
-
-                # 더 나은 메타러너 선택 (MAE 기준)
-                _candidates_meta = [
-                    (_mae_r,  _meta_r,   _pred_r,  'Ridge'),
-                    (_mae_tw, _meta_tw,  _pred_tw, 'Ridge-TW'),
-                ]
-                if _meta_xgb is not None:
-                    _candidates_meta.append((_mae_x, _meta_xgb, _pred_x, 'XGB'))
-                _best_meta = min(_candidates_meta, key=lambda c: c[0])
-                _mae_best_m, _meta, _stack_pred, _meta_type = _best_meta
-                log.info(f"    [E] 메타러너 채택: {_meta_type} (MAE={_mae_best_m:.4f})")
-
-                _r2_stack  = float(r2_score(_stack_y, _stack_pred))
-                _mae_stack = float(mean_absolute_error(_stack_y, _stack_pred))
-                _rmse_stack= float(np.sqrt(mean_squared_error(_stack_y, _stack_pred)))
-
-                if _meta_type in ('Ridge', 'Ridge-TW'):
-                    _coef_str = ' '.join(f'{n}={c:.3f}' for n, c in zip(_stack_names, _meta.coef_))
-                    log.info(f"    [E] Stacking({_meta_type}) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
-                             f"coef=[{_coef_str}]")
-                else:
-                    log.info(f"    [E] Stacking({_meta_type}) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}")
+                _mae_stack  = float(mean_absolute_error(_stack_y, _stack_pred))
+                _r2_stack   = float(r2_score(_stack_y, _stack_pred))
+                _rmse_stack = float(np.sqrt(mean_squared_error(_stack_y, _stack_pred)))
+                _coef_str   = ' '.join(f'{n}={w:.3f}' for n, w in zip(_stack_names, _stack_weights))
+                log.info(f"    [E] Stacking(InvMAE-WA) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
+                         f"weights=[{_coef_str}]")
 
                 # 기존 최고 단일 모델보다 R²·MAE 모두 나을 때만 채택
                 _r2_curr  = max(sx_info['r2'], xr_info['r2'])
@@ -2757,9 +2727,9 @@ def train_models(feature_df: pd.DataFrame):
                 if _r2_stack > _r2_curr and _mae_stack <= _mae_curr:
                     _base_name = '+'.join(_stack_names)
                     _stk_info = {
-                        'model': _meta, 'type': 'price',
+                        'stack_weights': _stack_weights, 'type': 'price',
                         'rmse': _rmse_stack, 'mae': _mae_stack, 'r2': _r2_stack,
-                        'name': f'Stacking ({_base_name},{_meta_type}meta)',
+                        'name': f'Stacking ({_base_name},InvMAE-WA)',
                         'sx_feats':    sx_info.get('features', []),
                         'xr_feats':    xr_info['features'],
                         'xr_scaler':   xr_info['scaler'],
@@ -3052,7 +3022,7 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         _sx_fc      = forecasts['sarimax']
         _xb_fc      = forecasts['xgb']
         _stk        = results['stacking']
-        _meta_m     = _stk['model']
+        _stk_wts    = _stk['stack_weights']
         _stk_names  = _stk.get('stack_names', ['SARIMAX', 'XGB'])
 
         # LGB 예측 생성
@@ -3092,7 +3062,7 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             # stack_names 순서에 맞게 패딩 (None 베이스는 center로 대체)
             while len(_pts) < len(_stk_names):
                 _pts.append(_sx_fc[i])
-            ensemble[i] = float(_meta_m.predict([_pts[:len(_stk_names)]])[0])
+            ensemble[i] = float(np.dot(_pts[:len(_stk_names)], _stk_wts))
         log.info(f"    ✅ Stacking 앙상블 적용: D+1={ensemble[0]:.2f}")
     elif 'sarimax' in forecasts and 'xgb' in forecasts:
         ensemble = w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb']
