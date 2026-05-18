@@ -2378,6 +2378,7 @@ def train_models(feature_df: pd.DataFrame):
             try:
                 _y_cls_tr = (y_ret_tr.values > 0).astype(int)   # 1=상승, 0=하락
                 _y_cls_te = (y_ret_te.values > 0).astype(int)
+                _dz_mask_tr = np.abs(y_ret_tr.values) > 0.003  # dead-zone 제외 마스크
                 _xgb_cls_p = dict(
                     n_estimators=300, max_depth=3, learning_rate=0.02,
                     subsample=0.75, colsample_bytree=0.6,
@@ -2417,7 +2418,11 @@ def train_models(feature_df: pd.DataFrame):
                     _sm = _SVC(kernel='rbf', C=1.0, gamma='scale',
                                probability=True, class_weight='balanced', random_state=42)
                     _sw_svm = np.exp(0.002 * np.arange(len(_y_cls_tr)))
-                    _sm.fit(_Xtr_svm, _y_cls_tr, sample_weight=_sw_svm)
+                    if _dz_mask_tr.sum() >= 100:
+                        _sm.fit(_Xtr_svm[_dz_mask_tr], _y_cls_tr[_dz_mask_tr],
+                                sample_weight=_sw_svm[_dz_mask_tr])
+                    else:
+                        _sm.fit(_Xtr_svm, _y_cls_tr, sample_weight=_sw_svm)
                     _best_svm_prob = _sm.predict_proba(_Xte_svm)[:, 1]
                     _best_svm_dir  = float(((_best_svm_prob > 0.5).astype(int) == _y_cls_te).mean())
                     log.info(f"        [SVM+CEEMDAN+Event] dir={_best_svm_dir*100:.1f}% (주입피처={len(_cem_cols)}개)")
@@ -2480,7 +2485,12 @@ def train_models(feature_df: pd.DataFrame):
                                        probability=True, class_weight='balanced',
                                        random_state=42)
                         _wf_sw = np.exp(0.002 * np.arange(len(_wti)))
-                        _wsm.fit(_wXtr, _y_cls_tr[_wti], sample_weight=_wf_sw)
+                        _dz_m = _dz_mask_tr[_wti]
+                        if _dz_m.sum() >= 30:
+                            _wsm.fit(_wXtr[_dz_m], _y_cls_tr[_wti][_dz_m],
+                                     sample_weight=_wf_sw[_dz_m])
+                        else:
+                            _wsm.fit(_wXtr, _y_cls_tr[_wti], sample_weight=_wf_sw)
                         _wpv = _wsm.predict_proba(_wXva)[:, 1]
                         _wf_dirs.append(
                             float(((_wpv > 0.5).astype(int) == _y_cls_tr[_wvi]).mean()))
