@@ -236,77 +236,82 @@ NEGATION_WORDS = {
 }
 
 SENTIMENT_MAP = {
-    # 강한 부정 (-2)
-    'war':-2,'attack':-2,'explosion':-2,'collapse':-2,'crash':-2,
-    'crisis':-2,'shortage':-2,'embargo':-2,'sanction':-2,'shutdown':-2,
-    'disruption':-2,'conflict':-2,'seizure':-2,'blockade':-2,
-    # 중간 부정 (-1.5)
-    'spike':-1.5,'plunge':-1.5,'slump':-1.5,'plummet':-1.5,
-    'halt':-1.5,'freeze':-1.5,'restrict':-1.5,'glut':-1.5,
-    # 약한 부정 (-1)
-    'surge':-1,'cut':-1,'fall':-1,'decline':-1,'risk':-1,
-    'concern':-1,'fear':-1,'threat':-1,'tension':-1,'dispute':-1,
-    'recession':-1,'downgrade':-1,'weak':-1,'bearish':-1,
-    'tumble':-1,'slip':-1,'drop':-1,'loss':-1,'warning':-1,
-    'contango':-1,'oversupply':-1,'hawkish':-0.5,'tightening':-0.5,
-    'withdrawal':-1,'evacuation':-0.5,'slowdown':-1,'shrink':-1,
-    # 유가 도메인 추가 부정 (Loughran-McDonald + 유가 특화)
-    'depletion':-1.5,'outage':-1.5,'sabotage':-2,'confiscate':-1.5,
-    'nationalize':-1.5,'nationalization':-2,'expropriation':-2,
-    'quota':-0.5,'oversold':-0.5,'drawdown':-1,'curtail':-1.5,
-    'worsening':-1,'deteriorate':-1.5,'deterioration':-1.5,
-    'default':-2,'bankrupt':-2,'insolvency':-1.5,'delinquent':-1,
-    'overproduction':-1,'gluts':-1.5,'stranded':-1,'impairment':-1,
-    'deplete':-1,'dwindle':-1,'dwindling':-1.5,'capacityloss':-1.5,
-    'bearmarket':-1.5,'rout':-1.5,'selloff':-1.5,'meltdown':-2,
-    # 약한 긍정 (+1)
-    'recovery':1,'growth':1,'increase':1,'rise':1,'deal':1,
-    'agreement':1,'stable':1,'ease':1,'lift':1,'resume':1,
-    'open':1,'rally':1,'rebound':1,'strong':1,'bullish':1,
-    'draw':1,'deficit':1,'backwardation':1,'dovish':0.5,
-    'ceasefire':1.5,'truce':1.5,'compliance':1,
-    # 유가 도메인 추가 긍정 (Loughran-McDonald + 유가 특화)
-    'restoring':1,'reopening':1.5,'normalization':1,'normalize':1,
-    'stabilize':1,'stabilizing':1,'stabilization':1.5,
-    'drawdown':1,'undersupply':1.5,'tightening':1,  # 공급 문맥에서 긍정
-    'backwardation':1.5,'contraction':0.5,
-    'upgrade':1,'outperform':1,'exceeds':1,'beat':1,'robust':1,
-    'breakthrough':1.5,'accord':1.5,'pact':1,'ratify':1.5,
-    'ramp':1,'ramping':1,'expand':1,'expanding':1.5,
-    # 강한 긍정 (+2)
-    'boom':2,'peace':2,'resolution':2,'surplus':2,'record':1.5,
+    # ── WTI 상승 요인: 공급 차질 / 지정학 리스크 (양수)
+    'war':2,'attack':1.5,'explosion':1.0,'sabotage':2.0,
+    'sanction':1.5,'embargo':1.5,'blockade':1.5,'seizure':1.0,
+    'shortage':1.5,'disruption':1.5,'shutdown':1.0,'conflict':1.5,
+    'outage':1.5,'curtail':1.0,'nationalize':0.5,'nationalization':1.0,
+    'expropriation':1.0,'confiscate':0.5,'depletion':0.5,
+    'tension':1.0,'threat':0.5,'spike':1.5,'surge':1.0,
+    'halt':0.5,'freeze':0.5,'restrict':0.5,
+    # ── WTI 하락 요인: 공급 증가 / 수요 감소 / 리스크 완화 (음수)
+    'collapse':-2,'crash':-2,'plunge':-1.5,'slump':-1.5,'plummet':-1.5,
+    'glut':-1.5,'oversupply':-1,'overproduction':-1,'gluts':-1.5,
+    'recession':-1,'slowdown':-1,'shrink':-1,'weak':-1,
+    'fall':-1,'decline':-1,'drop':-1,'tumble':-1,'slip':-1,
+    'surplus':-2,'peace':-1.5,'resolution':-1.0,'ceasefire':-1.0,'truce':-1.0,
+    'normalization':-0.5,'normalize':-0.5,'stabilize':-0.3,'stabilizing':-0.3,
+    'stabilization':-0.5,
+    'contango':-1,'bearish':-1,'bearmarket':-1.5,'selloff':-1.5,
+    'rout':-1.5,'meltdown':-2,'default':-2,'bankrupt':-2,
+    'insolvency':-1.5,'downgrade':-1,'loss':-1,'impairment':-1,
+    'stranded':-1,'dwindle':-1,'dwindling':-1.5,
+    # ── 수요 증가 (양수)
+    'recovery':1,'growth':1,'rise':1,'rally':1,'rebound':1,
+    'deal':1,'agreement':1,'bullish':1,'strong':1,'robust':1,
+    'draw':1,'deficit':1,'backwardation':1.5,'tightening':1,
+    'undersupply':1.5,'expand':1,'expanding':1.5,
+    'upgrade':1,'outperform':1,'exceeds':1,'beat':1,
+    'breakthrough':1.5,'accord':1,'pact':1,'ratify':1,
+    'ramp':1,'ramping':1,'boom':1.5,'reopening':1.5,
+    # ── 약한 / 중립 신호
+    'risk':-0.5,'concern':-0.5,'fear':-0.5,'warning':-0.5,
+    'dispute':-0.5,'hawkish':-0.5,'contraction':0.5,
+    'drawdown':1,'compliance':1,'quota':-0.3,
+    'increase':1,'stable':0.5,'open':0.5,'record':1.5,
+    'lift':1,'resume':0.5,'ease':0.5,'dovish':0.5,
+    'worsening':-1,'deteriorate':-1,'deterioration':-1,
+    'withdrawal':-0.5,'evacuation':-0.3,'oversold':-0.3,
+    'deplete':-0.5,'capacityloss':-1,'delinquent':-0.5,
+    'restoring':1,'compliance':1,
 }
 
-# 구문 패턴 (바이그램) — 단어 단독보다 맥락이 중요한 표현
+# 구문 패턴 (바이그램) — WTI 가격 방향 기준 재매핑
 PHRASE_SENTIMENT = {
-    'production cut':-2,'output cut':-2,'supply cut':-2,'capacity cut':-1.5,
-    'deeper cut':-2,'extend cut':-1.5,'voluntary cut':-1.5,
-    'supply disruption':-2,'supply shortage':-2,'supply crunch':-2,
-    'demand destruction':-1.5,'demand weakness':-1.5,'demand slowdown':-1,
-    'refinery shutdown':-1.5,'pipeline attack':-2,'pipeline shutdown':-1.5,
-    'inventory draw':1.5,'stock draw':1.5,'crude draw':1.5,
-    'inventory build':-1,'stock build':-1,'crude build':-1,
-    'production increase':1.5,'output increase':1.5,'supply increase':1,
-    'production boost':1.5,'output boost':1.5,
-    'price cap':-1,'price ceiling':-1,'strategic release':-1,
-    'nuclear deal':1,'sanctions lifted':2,'sanctions eased':1.5,
-    'ceasefire deal':1.5,'peace deal':2,
-    'demand recovery':1.5,'demand growth':1.5,'demand surge':1.5,
-    # 유가 도메인 추가 바이그램 (Loughran-McDonald 기반)
-    'force majeure':-2,'declared emergency':-1.5,
-    'strategic reserve':-1,'spr release':-1.5,
-    'rig count':0.5,'rig counts':0.5,
-    'spare capacity':1,'excess capacity':-1,
-    'tight market':1.5,'tight supply':1.5,
-    'loose market':-1,'loose supply':-1,
-    'supply tightens':1.5,'supply loosens':-1,
-    'price floor':1,'price support':1,
-    'import ban':-1.5,'export ban':-1.5,
-    'transit disruption':-1.5,'shipping disruption':-1.5,
-    'output freeze':-1.5,'production freeze':-1.5,
-    'demand rebound':1.5,'demand pickup':1,'demand uptick':1,
-    'field restart':1.5,'production restart':1.5,
-    'pipeline resumes':1,'refinery resumes':1,
+    # ── 공급 감소 → WTI 상승 (양수)
+    'production cut':+1.5,'output cut':+1.5,'supply cut':+1.5,'capacity cut':+1.0,
+    'deeper cut':+2.0,'extend cut':+1.5,'voluntary cut':+1.0,
+    'supply disruption':+2.0,'supply shortage':+1.5,'supply crunch':+2.0,
+    'refinery shutdown':+1.0,'pipeline attack':+2.0,'pipeline shutdown':+1.5,
+    'force majeure':+1.5,'declared emergency':+1.0,
+    'transit disruption':+1.5,'shipping disruption':+1.5,
+    'output freeze':+1.0,'production freeze':+1.0,
+    'export ban':+1.0,
+    # ── 공급 증가 → WTI 하락 (음수)
+    'production increase':-1.5,'output increase':-1.5,'supply increase':-1.0,
+    'production boost':-1.5,'output boost':-1.5,
+    'field restart':-1.0,'production restart':-1.0,
+    'pipeline resumes':-0.5,'refinery resumes':-0.5,
+    # ── 지정학 리스크 완화 / 제재 해제 → WTI 하락 (음수)
+    'nuclear deal':-1.5,'sanctions lifted':-2.0,'sanctions eased':-1.5,
+    'ceasefire deal':-1.0,'peace deal':-1.5,
+    # ── 수요 신호 (기존 유지)
+    'demand destruction':-1.5,'demand weakness':-1.5,'demand slowdown':-1.0,
+    'demand recovery':+1.5,'demand growth':+1.5,'demand surge':+1.5,
+    'demand rebound':+1.5,'demand pickup':+1.0,'demand uptick':+1.0,
+    # ── 재고 신호 (기존 유지)
+    'inventory draw':+1.5,'stock draw':+1.5,'crude draw':+1.5,
+    'inventory build':-1.0,'stock build':-1.0,'crude build':-1.0,
+    # ── 시장 구조 (기존 유지)
+    'price cap':-1.0,'price ceiling':-1.0,'strategic release':-1.0,
+    'strategic reserve':-1.0,'spr release':-1.5,
+    'tight market':+1.5,'tight supply':+1.5,
+    'loose market':-1.0,'loose supply':-1.0,
+    'supply tightens':+1.5,'supply loosens':-1.0,
+    'price floor':+1.0,'price support':+1.0,
+    'excess capacity':-1.0,'spare capacity':+0.5,
+    'import ban':-1.0,
+    'rig count':-0.3,'rig counts':-0.3,
 }
 
 # 강화어 (인접 단어의 감성 1.4× 증폭)
@@ -870,9 +875,14 @@ def fetch_news(days_back: int = None):
                     except Exception:
                         pub = datetime.today()
                     title = entry.get('title', '')
-                    if pub >= cutoff and any(kw in title.lower() for kw in OIL_FILTER):
+                    # summary/description 필드로 본문 보강
+                    _body = (getattr(entry, 'summary', '') or
+                             getattr(entry, 'description', '') or '')
+                    _body = str(_body)[:300].strip()
+                    full_text = title + (' ' + _body if _body and _body != title else '')
+                    if pub >= cutoff and any(kw in full_text.lower() for kw in OIL_FILTER):
                         new_articles.append({'date': pub.strftime('%Y-%m-%d'),
-                                             'title': title, 'source': src_name})
+                                             'title': full_text, 'source': src_name})
             except Exception:
                 pass
 
@@ -1657,8 +1667,8 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df['news_count_pos']   = df['news_count_pos'].fillna(0)
         df['news_count_neg']   = df['news_count_neg'].fillna(0)
         df['news_uncertainty'] = df['news_uncertainty'].ffill().fillna(0)
-        # 뉴스 없는 날: 0(중립) 대신 전날 감성 유지 → 지속적 이벤트 반영
-        df['news_sentiment'] = df['news_sentiment'].ffill().fillna(0)
+        df['news_sentiment']   = df['news_sentiment'].ffill().fillna(0)
+
     else:
         df['news_count']     = 0
         df['news_count_pos']   = 0
@@ -2460,7 +2470,28 @@ def train_models(feature_df: pd.DataFrame):
                     else:
                         _Xtr_svm, _Xte_svm, _sc_cem = _Xtr_sel, _Xte_sel, None
 
-                    _sm = _SVC(kernel='rbf', C=1.0, gamma='scale',
+                    # C 그리드 서치 (시간 기반 단일 검증 분할, 마지막 25%)
+                    _c_grid = [0.5, 1.0, 2.0, 5.0]
+                    _n_cval = max(30, len(_Xtr_svm) // 4)
+                    _best_c, _best_c_dir = 1.0, -1.0
+                    for _ci in _c_grid:
+                        _smc = _SVC(kernel='rbf', C=_ci, gamma='scale',
+                                    probability=True, class_weight='balanced', random_state=42)
+                        _swc = np.exp(0.002 * np.arange(len(_Xtr_svm) - _n_cval))
+                        _dzc = _dz_mask_tr[:len(_Xtr_svm) - _n_cval]
+                        if _dzc.sum() >= 30:
+                            _smc.fit(_Xtr_svm[:-_n_cval][_dzc], _y_cls_tr[:-_n_cval][_dzc],
+                                     sample_weight=_swc[_dzc])
+                        else:
+                            _smc.fit(_Xtr_svm[:-_n_cval], _y_cls_tr[:-_n_cval],
+                                     sample_weight=_swc)
+                        _cp = _smc.predict_proba(_Xtr_svm[-_n_cval:])[:, 1]
+                        _cd = float(((_cp > 0.5).astype(int) == _y_cls_tr[-_n_cval:]).mean())
+                        if _cd > _best_c_dir:
+                            _best_c_dir, _best_c = _cd, _ci
+                    log.info(f"        SVM C 그리드: best_C={_best_c} (검증_dir={_best_c_dir*100:.1f}%)")
+
+                    _sm = _SVC(kernel='rbf', C=_best_c, gamma='scale',
                                probability=True, class_weight='balanced', random_state=42)
                     _sw_svm = np.exp(0.002 * np.arange(len(_y_cls_tr)))
                     if _dz_mask_tr.sum() >= 100:
@@ -2494,6 +2525,85 @@ def train_models(feature_df: pd.DataFrame):
                         log.info(f"        → SVM+CEEMDAN 채택 (dir={_best_svm_dir*100:.1f}%)")
                 except Exception as _se:
                     log.warning(f"    SVM 실패({_se})")
+
+                # ── ② Bidirectional LSTM 앙상블 (SVM 확률과 결합)
+                try:
+                    import torch as _tc, torch.nn as _tnn
+                    _LD = _tc.device('cuda' if _tc.cuda.is_available() else 'cpu')
+                    _LB = 20  # lookback
+
+                    class _BiLSTM(_tnn.Module):
+                        def __init__(self, nf):
+                            super().__init__()
+                            self.lstm = _tnn.LSTM(nf, 64, 1, batch_first=True, bidirectional=True)
+                            self.drop = _tnn.Dropout(0.3)
+                            self.norm = _tnn.LayerNorm(128)
+                            self.fc   = _tnn.Linear(128, 1)
+                        def forward(self, x):
+                            o, _ = self.lstm(x)
+                            return _tc.sigmoid(self.fc(self.drop(self.norm(o[:, -1, :]))))
+
+                    def _lseq(X, y, lb=_LB):
+                        Xs, ys = [], []
+                        for i in range(lb, len(X)):
+                            Xs.append(X[i-lb:i]); ys.append(y[i])
+                        return np.array(Xs, np.float32), np.array(ys, np.float32)
+
+                    def _ltrain(Xtr, ytr, Xva, yva, sw, dz, seed=0):
+                        _tc.manual_seed(seed); np.random.seed(seed)
+                        m   = _BiLSTM(Xtr.shape[2]).to(_LD)
+                        opt = _tc.optim.Adam(m.parameters(), lr=1e-3, weight_decay=1e-4)
+                        crt = _tnn.BCELoss(reduction='none')
+                        dzi = np.where(dz)[0] if dz.sum() >= 20 else np.arange(len(Xtr))
+                        bl, bw, bs = 1e9, 0, None
+                        for _ in range(60):
+                            m.train()
+                            pm = dzi[np.random.permutation(len(dzi))]
+                            for s in range(0, len(pm), 32):
+                                b  = pm[s:s+32]
+                                xb = _tc.tensor(Xtr[b]).to(_LD)
+                                yb = _tc.tensor(ytr[b]).unsqueeze(1).to(_LD)
+                                wb = _tc.tensor(sw[b].astype(np.float32)).unsqueeze(1).to(_LD)
+                                opt.zero_grad()
+                                (crt(m(xb), yb) * wb).mean().backward()
+                                _tnn.utils.clip_grad_norm_(m.parameters(), 1.0)
+                                opt.step()
+                            m.eval()
+                            with _tc.no_grad():
+                                vl = crt(m(_tc.tensor(Xva).to(_LD)),
+                                         _tc.tensor(yva).unsqueeze(1).to(_LD)).mean().item()
+                            if vl < bl - 1e-5: bl, bw, bs = vl, 0, {k: v.clone() for k, v in m.state_dict().items()}
+                            else:
+                                bw += 1
+                                if bw >= 10: break
+                        if bs: m.load_state_dict(bs)
+                        m.eval()
+                        with _tc.no_grad():
+                            p = m(_tc.tensor(Xva).to(_LD)).cpu().numpy().flatten()
+                        return p
+
+                    # 테스트 시퀀스 생성 (훈련 끝 _LB행 + 테스트)
+                    _Xls_tr, _yls_tr = _lseq(_Xtr_svm, _y_cls_tr)
+                    _Xls_te, _yls_te = _lseq(
+                        np.vstack([_Xtr_svm[-_LB:], _Xte_svm]),
+                        np.concatenate([_y_cls_tr[-_LB:], _y_cls_te]))
+                    _Xls_te = _Xls_te[-len(_y_cls_te):]
+                    _yls_te = _yls_te[-len(_y_cls_te):]
+                    _sw_ls = np.exp(0.002 * np.arange(len(_Xls_tr))); _sw_ls /= _sw_ls.mean()
+                    _dz_ls = _dz_mask_tr[_LB:_LB+len(_Xls_tr)]
+
+                    _lprobs = [_ltrain(_Xls_tr, _yls_tr, _Xls_te, _yls_te,
+                                       _sw_ls, _dz_ls, seed=s) for s in range(3)]
+                    _prob_lstm    = np.mean(_lprobs, axis=0)
+                    _prob_combined = 0.5 * _prob_up_te + 0.5 * _prob_lstm
+                    _dir_combined  = float(((_prob_combined > 0.5).astype(int) == _y_cls_te).mean())
+                    _dir_svm_cur   = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
+                    log.info(f"        [BiLSTM 앙상블] dir={_dir_combined*100:.1f}% (SVM={_dir_svm_cur*100:.1f}%)")
+                    if _dir_combined > _dir_svm_cur:
+                        _prob_up_te = _prob_combined
+                        log.info(f"        → LSTM 앙상블 채택")
+                except Exception as _lstm_e:
+                    log.warning(f"    LSTM 앙상블 실패({_lstm_e})")
 
                 _best_th = 0.5
                 _dir_cls = float(((_prob_up_te > _best_th).astype(int) == _y_cls_te).mean())
