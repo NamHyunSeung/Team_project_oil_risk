@@ -400,6 +400,71 @@ def _dummy_prices(start_date, end_date):
     return df
 
 
+def _fetch_cot_wti() -> pd.Series:
+    """
+    CFTC COT Disaggregated 리포트에서 WTI(ICE) Money Manager 순포지션/OI 비율 반환.
+    캐시(output/cot_cache.csv) 활용 — 없으면 2016-현재 다운로드.
+    """
+    import urllib.request as _ur2, zipfile as _zf, io as _io2, csv as _csv2
+    _COT_CACHE = OUTPUT_DIR / 'cot_cache.csv'
+    _WTI_NAME  = 'CRUDE OIL, LIGHT SWEET-WTI - ICE FUTURES EUROPE'
+    _CUR_YEAR  = datetime.now().year
+
+    # 캐시 로드
+    _cached_df = pd.DataFrame()
+    if _COT_CACHE.exists():
+        try:
+            _cached_df = pd.read_csv(_COT_CACHE, parse_dates=['date']).set_index('date')
+        except Exception:
+            pass
+
+    # 다운로드할 연도 결정
+    _cached_years = set()
+    if not _cached_df.empty:
+        _cached_years = set(_cached_df.index.year.unique())
+    _years_to_dl = [y for y in range(2016, _CUR_YEAR + 1) if y not in _cached_years or y == _CUR_YEAR]
+
+    _new_rows = {}
+    for _yr in _years_to_dl:
+        _url = f'https://www.cftc.gov/files/dea/history/fut_disagg_txt_{_yr}.zip'
+        try:
+            _req = _ur2.Request(_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with _ur2.urlopen(_req, timeout=25) as _r:
+                _raw = _r.read()
+            with _zf.ZipFile(_io2.BytesIO(_raw)) as _z:
+                with _z.open(_z.namelist()[0]) as _f:
+                    _content = _f.read().decode('latin-1')
+            _reader = _csv2.DictReader(_io2.StringIO(_content))
+            for _row in _reader:
+                if _row.get('Market_and_Exchange_Names','').strip().strip('"') != _WTI_NAME:
+                    continue
+                _date = _row.get('Report_Date_as_YYYY-MM-DD','').strip()
+                _oi   = float(_row.get('Open_Interest_All','0').replace(',','') or 1)
+                _ml   = float(_row.get('M_Money_Positions_Long_All','0').replace(',','') or 0)
+                _ms   = float(_row.get('M_Money_Positions_Short_All','0').replace(',','') or 0)
+                if _date and _oi > 0:
+                    _new_rows[_date] = (_ml - _ms) / _oi * 100
+            log.info(f"    COT {_yr}: {sum(1 for d in _new_rows if d.startswith(str(_yr)))}건")
+        except Exception as _ce:
+            log.debug(f"    COT {_yr} 다운로드 실패: {_ce}")
+
+    if _new_rows:
+        _new_s = pd.Series(_new_rows)
+        _new_s.index = pd.to_datetime(_new_s.index)
+        _new_df = _new_s.rename('cot_net_pct').to_frame()
+        _combined = pd.concat([_cached_df, _new_df])
+        _combined = _combined[~_combined.index.duplicated(keep='last')].sort_index()
+        try:
+            _combined.index.name = 'date'
+            _combined.reset_index().to_csv(_COT_CACHE, index=False)
+        except Exception:
+            pass
+        return _combined['cot_net_pct']
+    elif not _cached_df.empty and 'cot_net_pct' in _cached_df.columns:
+        return _cached_df['cot_net_pct']
+    return pd.Series(dtype=float)
+
+
 def _attach_gpr(df: pd.DataFrame) -> pd.DataFrame:
     """
     GPR Index (Caldara & Iacoviello 2022) 로딩 후 df에 결합.
@@ -684,18 +749,20 @@ def fetch_data(start_date=None, end_date=None):
             _fsk   = _pe.submit(_safe_dl, '^SKEW')
             _fng   = _pe.submit(_safe_dl, 'NG=F',  'NatGas')
             _frb   = _pe.submit(_safe_dl, 'RB=F',  'RBOB')
+            _fho   = _pe.submit(_safe_dl, 'HO=F',  'HeatingOil')
         brent = _fb.result();  dxy   = _fd.result()
         vix   = _fv.result();  ovx   = _fo.result()
         vix3m = _fv3.result(); skew  = _fsk.result()
         ng    = _fng.result(); rbob  = _frb.result()
-        log.info("    병렬 다운로드 완료 (BZ=F/DXY/VIX/OVX/VIX3M/SKEW/NG/RBOB)")
+        ho    = _fho.result()
+        log.info("    병렬 다운로드 완료 (BZ=F/DXY/VIX/OVX/VIX3M/SKEW/NG/RBOB/HO)")
 
         df = pd.DataFrame({'WTI': wti, 'Brent': brent, 'DXY': dxy,
                            'VIX': vix, 'OVX': ovx, 'futures_spread': futures_spread,
                            'WTI_High': wti_high, 'WTI_Low': wti_low,
                            'WTI_Open': wti_open, 'WTI_Volume': wti_vol,
                            'VIX3M': vix3m, 'SKEW': skew,
-                           'NatGas': ng, 'RBOB': rbob})
+                           'NatGas': ng, 'RBOB': rbob, 'HeatingOil': ho})
         df = df.ffill().bfill()
         df.dropna(subset=['WTI'], inplace=True)
 
@@ -1411,6 +1478,8 @@ FEATURE_COLS = [
     'ovx_zscore', 'ovx_change', 'ovx_rv_spread',
     # WTI 선물 커브 (contango/backwardation)
     'futures_spread', 'futures_spread_chg', 'contango_dummy',
+    # CFTC COT: WTI 투기 포지션 (시장 센티먼트 선행지표)
+    'cot_net_pct_z', 'cot_net_chg_z',
     # EIA 미국 원유·제품 재고 (실물 수급 지표)
     'inv_chg_zscore', 'inv_lvl_zscore',
     'gas_inv_chg_z', 'gas_inv_lvl_z', 'dist_inv_chg_z', 'dist_inv_lvl_z', 'product_inv_z',
@@ -1628,6 +1697,45 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
 
     # ── Brent-WTI 스프레드
     df['brent_wti_spread'] = (df['Brent'] - df['WTI']) if 'Brent' in df.columns else 0.0
+
+    # ── 3-2-1 크랙 스프레드 (정유 마진 = 원유 수요 강도 직접 지표)
+    # 공식: (2×RBOB + 1×HeatOil - 3×WTI) / 3  (단위: $/bbl)
+    if 'RBOB' in df.columns and 'HeatingOil' in df.columns:
+        try:
+            _rbob_bbl = df['RBOB'] * 42       # gal→bbl (×42)
+            _ho_bbl   = df['HeatingOil'] * 42
+            _crack321 = (2 * _rbob_bbl + _ho_bbl - 3 * df['WTI']) / 3
+            _crack_mu, _crack_sd = _crack321.mean(), _crack321.std()
+            df['crack_spread_321'] = _crack321
+            df['crack_spread_z']   = ((_crack321 - _crack_mu) / (_crack_sd + 1e-8)).fillna(0)
+            log.info(f"    3-2-1 크랙 스프레드: μ={_crack_mu:.2f}  σ={_crack_sd:.2f}")
+        except Exception as _cke:
+            log.warning(f"    크랙 스프레드 실패({_cke})")
+            df['crack_spread_321'] = 0.0
+            df['crack_spread_z']   = 0.0
+    else:
+        df['crack_spread_321'] = 0.0
+        df['crack_spread_z']   = 0.0
+
+    # ── CFTC COT: WTI 투기 순포지션 (Money Manager Net / OI)
+    try:
+        _cot = _fetch_cot_wti()
+        if len(_cot) > 50:
+            _cot_bday = _cot.resample('B').last().ffill()
+            _cot_z52  = ((_cot_bday - _cot_bday.rolling(52*5).mean()) /
+                         (_cot_bday.rolling(52*5).std() + 1e-8)).fillna(0)
+            df['cot_net_pct_z']  = _cot_z52.reindex(df.index).ffill().bfill().fillna(0)
+            df['cot_net_chg_z']  = (_cot_z52.diff().reindex(df.index)
+                                    .ffill().bfill().fillna(0))
+            log.info(f"    COT 피처 연결: {len(_cot)}주치, "
+                     f"최신={_cot.index[-1].date()}")
+        else:
+            df['cot_net_pct_z'] = 0.0
+            df['cot_net_chg_z'] = 0.0
+    except Exception as _cote:
+        log.warning(f"    COT 피처 실패({_cote}) → 0")
+        df['cot_net_pct_z'] = 0.0
+        df['cot_net_chg_z'] = 0.0
 
     # ── 기술적 지표
     df['price_vs_ma5']  = df['WTI'] / (df['ma_5d']  + 1e-8) - 1
