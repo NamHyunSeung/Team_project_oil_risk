@@ -1437,9 +1437,11 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['return_1d']  = df['WTI'].pct_change()
     df['log_return'] = np.log(df['WTI'] / df['WTI'].shift(1))
 
-    # ── 극단 수익률 Winsorization (상하위 0.5% 클리핑)
-    lo = df['return_1d'].quantile(0.005)
-    hi = df['return_1d'].quantile(0.995)
+    # 통계 산출 기준: 훈련 구간만 사용 (미래 누출 방지, N_TEST=60)
+    _n_tr_stat = max(len(df) - 60, 252)
+    # ── 극단 수익률 Winsorization (상하위 0.5% 클리핑, 훈련 분위수 적용)
+    lo = df['return_1d'].iloc[:_n_tr_stat].quantile(0.005)
+    hi = df['return_1d'].iloc[:_n_tr_stat].quantile(0.995)
     df['return_1d']  = df['return_1d'].clip(lo, hi)
     df['log_return'] = df['log_return'].clip(lo * 1.05, hi * 1.05)
 
@@ -1889,7 +1891,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['vix_sent_diverge']= df['vix_zscore'] - neg_sent
 
     # ── 5번: 시장 국면(Regime) 피처 — 변동성 75th pct 기준 고/저변동 구분
-    vol_thresh = df['vol_5d'].quantile(0.75)
+    vol_thresh = df['vol_5d'].iloc[:_n_tr_stat].quantile(0.75)  # 훈련 구간 기준
     df['regime']       = (df['vol_5d'] > vol_thresh).astype(float)
     df['regime_x_mom'] = df['regime'] * df['mom_5d']         # 국면 × 모멘텀
     df['regime_x_sent']= df['regime'] * df['news_sentiment_smooth']  # 국면 × 감성
