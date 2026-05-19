@@ -2483,8 +2483,10 @@ def train_models(feature_df: pd.DataFrame):
                 )
                 _mD_cls_dir = xgb.XGBClassifier(**_xgb_cls_p)
                 _mD_cls_dir.fit(_Xtr_sel, _y_cls_tr, sample_weight=w_ret)
-                _prob_xgb_orig = _mD_cls_dir.predict_proba(_Xte_sel)[:, 1]  # XGB 확률 보존
+                _xgb_cls_saved = _mD_cls_dir          # SVM 교체 전 XGB 모델 보존
+                _prob_xgb_orig = _mD_cls_dir.predict_proba(_Xte_sel)[:, 1]
                 _prob_up_te = _prob_xgb_orig
+                _xgb_blend_w_best = 0.0               # 채택된 블렌드 가중치
 
                 # ── ① SVM 분류기 + CEEMDAN 전용 주입 (회귀 feature selection 미영향)
                 try:
@@ -2685,6 +2687,7 @@ def train_models(feature_df: pd.DataFrame):
                         _db = float(((_pb > 0.5).astype(int) == _y_cls_te).mean())
                         if _db > _xgb_blend_best:
                             _xgb_blend_best, _prob_up_te = _db, _pb
+                            _xgb_blend_w_best = _bw          # 라이브 예측 반영용 기록
                             log.info(f"        [XGB-Cls blend w={_bw}] dir={_db*100:.1f}%")
                 except Exception as _be:
                     log.warning(f"    XGB blend 실패({_be})")
@@ -2749,6 +2752,9 @@ def train_models(feature_df: pd.DataFrame):
                     'name': f'XGBoost-Classifier (방향성={_dir_cls*100:.1f}%)',
                     'pred_price_test': _px_cls_adj,
                     'threshold': _best_th,
+                    # 라이브 예측용: XGB-Cls 블렌드 정보 (백테스트와 라이브 일관성)
+                    'xgb_cls_model':   _xgb_cls_saved,
+                    'xgb_cls_blend_w': _xgb_blend_w_best,
                 }
             except Exception as _cls_e:
                 log.warning(f"    XGB 분류기 실패({_cls_e})")
@@ -2798,10 +2804,12 @@ def train_models(feature_df: pd.DataFrame):
                 'name': f'XGBoost-Return (방향성={dir_acc*100:.1f}%)',
                 'model_q10': _mD_q10, 'model_q90': _mD_q90,
             }
-            # Classifier-adj 채택 시: 회귀 모델을 크기 예측 백업으로 보관
+            # Classifier-adj 채택 시: 회귀 모델 + XGB-Cls 블렌드 정보 보관 (라이브 예측 반영)
             if _cname == 'Classifier-adj' and _mD_sel is not None:
-                _xr_entry['_reg_model']  = _mD_sel
-                _xr_entry['_reg_scaler'] = _sc_sel
+                _xr_entry['_reg_model']      = _mD_sel
+                _xr_entry['_reg_scaler']     = _sc_sel
+                _xr_entry['xgb_cls_model']   = locals().get('_xgb_cls_saved', None)
+                _xr_entry['xgb_cls_blend_w'] = locals().get('_xgb_blend_w_best', 0.0)
             results['xgb_return'] = {**_xr_entry,
             }
         except Exception as exc:
@@ -3137,6 +3145,16 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                 _reg_m = info.get('_reg_model')
                 _mag_ret = float(_reg_m.predict(last_s)[0]) if _reg_m is not None else 0.001
                 _prob_up_fc = float(model.predict_proba(last_s)[0, 1])
+                # XGB-Cls 블렌드 (백테스트와 동일 방식으로 라이브 예측에 반영)
+                _xcls_live = info.get('xgb_cls_model')
+                _xcls_bw   = info.get('xgb_cls_blend_w', 0.0)
+                if _xcls_live is not None and _xcls_bw > 0:
+                    try:
+                        _prob_xcls_fc = float(_xcls_live.predict_proba(last_s)[0, 1])
+                        _prob_up_fc = (1 - _xcls_bw) * _prob_up_fc + _xcls_bw * _prob_xcls_fc
+                        log.info(f"    XGB-Cls blend 적용 (w={_xcls_bw})")
+                    except Exception:
+                        pass
                 _cls_th = info.get('threshold', 0.5)
                 pred_ret_d1 = abs(_mag_ret) * (1.0 if _prob_up_fc > _cls_th else -1.0)
             else:
