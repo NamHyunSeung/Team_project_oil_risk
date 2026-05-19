@@ -1464,10 +1464,15 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df['parkinson_vol_21d'] = 0.0
 
     # ── CEEMDAN 신호 분해 (논문: CEEMDAN+LSTM-Attention 추세/노이즈 분리)
+    # 미래 누출 방지: 훈련 구간(전체 - N_TEST)만 분해, 테스트 구간은 마지막 훈련값 연장
     try:
         from PyEMD import CEEMDAN as _CEEMDAN
         import hashlib as _hl
-        _wti_arr = df['WTI'].ffill().values.astype(float)
+        _n_total  = len(df)
+        _n_tr_cem = max(_n_total - 60, _n_total)  # 60 = N_TEST
+        _n_tr_cem = _n_total - 60 if _n_total > 60 else _n_total
+        _wti_full = df['WTI'].ffill().values.astype(float)
+        _wti_arr  = _wti_full[:_n_tr_cem]          # 훈련 구간만 사용
         _cem_hash = _hl.md5(_wti_arr.tobytes()).hexdigest()[:16]
         _cem_cache = OUTPUT_DIR / f'ceemdan_{_cem_hash}.npy'
         if _cem_cache.exists():
@@ -1480,10 +1485,14 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
             for _old_c in OUTPUT_DIR.glob('ceemdan_*.npy'):
                 if _old_c != _cem_cache:
                     _old_c.unlink(missing_ok=True)
-        _n = len(_wti_arr)
+        _n_cem = len(_wti_arr)
         # 저주파 성분 = 마지막 IMF(추세), 고주파 = 첫 IMF들(잡음)
-        _trend = _imfs[-1][:_n]          # 추세 성분
-        _noise = _imfs[0][:_n]           # 고주파 잡음
+        _trend_tr = _imfs[-1][:_n_cem]   # 훈련 구간 추세
+        _noise_tr = _imfs[0][:_n_cem]    # 훈련 구간 잡음
+        # 테스트 구간: 마지막 훈련값 연장 (미래 정보 차단)
+        _n_ext = _n_total - _n_cem
+        _trend = np.concatenate([_trend_tr, np.full(_n_ext, _trend_tr[-1])])
+        _noise = np.concatenate([_noise_tr, np.full(_n_ext, _noise_tr[-1])])
         _wm    = max(df['WTI'].mean(), 1e-8)
         _trend_s = pd.Series(_trend, index=df.index)
         _noise_s = pd.Series(_noise, index=df.index)
@@ -2665,14 +2674,15 @@ def train_models(feature_df: pd.DataFrame):
                 except Exception as _lstm_e:
                     log.warning(f"    LSTM 앙상블 실패({_lstm_e})")
 
-                # ── ③ XGB-Cls + SVM 블렌드 (조건부 채택)
+                # ── ③ XGB-Cls + 현재 확률 블렌드 (조건부 채택, 독립 가중치 탐색)
                 try:
-                    _xgb_blend_base = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
+                    _prob_blend_base = _prob_up_te.copy()   # 원본 고정 (루프 내 누적 방지)
+                    _xgb_blend_best  = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
                     for _bw in [0.1, 0.2, 0.3]:
-                        _pb = (1 - _bw) * _prob_up_te + _bw * _prob_xgb_orig
+                        _pb = (1 - _bw) * _prob_blend_base + _bw * _prob_xgb_orig
                         _db = float(((_pb > 0.5).astype(int) == _y_cls_te).mean())
-                        if _db > _xgb_blend_base:
-                            _xgb_blend_base, _prob_up_te = _db, _pb
+                        if _db > _xgb_blend_best:
+                            _xgb_blend_best, _prob_up_te = _db, _pb
                             log.info(f"        [XGB-Cls blend w={_bw}] dir={_db*100:.1f}%")
                 except Exception as _be:
                     log.warning(f"    XGB blend 실패({_be})")
@@ -2766,8 +2776,9 @@ def train_models(feature_df: pd.DataFrame):
             _Xtr_chosen = ret_scaler.transform(train_df[_use_feats])
             _mD_q10, _mD_q90 = None, None
             try:
-                _q10p = dict(**_xgb_p, objective='reg:quantileerror', quantile_alpha=0.10)
-                _q90p = dict(**_xgb_p, objective='reg:quantileerror', quantile_alpha=0.90)
+                _qbase = {k: v for k, v in _xgb_p.items() if k not in ('objective', 'huber_slope')}
+                _q10p  = dict(**_qbase, objective='reg:quantileerror', quantile_alpha=0.10)
+                _q90p  = dict(**_qbase, objective='reg:quantileerror', quantile_alpha=0.90)
                 _mD_q10 = xgb.XGBRegressor(**_q10p)
                 _mD_q10.fit(_Xtr_chosen, y_ret_tr, sample_weight=w_ret)
                 _mD_q90 = xgb.XGBRegressor(**_q90p)
