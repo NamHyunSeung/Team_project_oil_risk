@@ -642,7 +642,7 @@ def fetch_data(start_date=None, end_date=None):
             except Exception:
                 return pd.Series(dtype=float, name=(rename or ticker))
 
-        with _TPE(max_workers=6) as _pe:
+        with _TPE(max_workers=8) as _pe:
             _fb    = _pe.submit(_safe_dl, 'BZ=F')
             _fd    = _pe.submit(_safe_dl, 'DX-Y.NYB')
             _fv    = _pe.submit(_safe_dl, '^VIX')
@@ -651,18 +651,22 @@ def fetch_data(start_date=None, end_date=None):
             _fsk   = _pe.submit(_safe_dl, '^SKEW')
             _fng   = _pe.submit(_safe_dl, 'NG=F',  'NatGas')
             _frb   = _pe.submit(_safe_dl, 'RB=F',  'RBOB')
+            _fgc   = _pe.submit(_safe_dl, 'GC=F',  'Gold')
+            _fhg   = _pe.submit(_safe_dl, 'HG=F',  'Copper')
         brent = _fb.result();  dxy   = _fd.result()
         vix   = _fv.result();  ovx   = _fo.result()
         vix3m = _fv3.result(); skew  = _fsk.result()
         ng    = _fng.result(); rbob  = _frb.result()
-        log.info("    병렬 다운로드 완료 (BZ=F/DXY/VIX/OVX/VIX3M/SKEW/NG/RBOB)")
+        gold  = _fgc.result(); copper = _fhg.result()
+        log.info("    병렬 다운로드 완료 (BZ=F/DXY/VIX/OVX/VIX3M/SKEW/NG/RBOB/Gold/Copper)")
 
         df = pd.DataFrame({'WTI': wti, 'Brent': brent, 'DXY': dxy,
                            'VIX': vix, 'OVX': ovx, 'futures_spread': futures_spread,
                            'WTI_High': wti_high, 'WTI_Low': wti_low,
                            'WTI_Open': wti_open, 'WTI_Volume': wti_vol,
                            'VIX3M': vix3m, 'SKEW': skew,
-                           'NatGas': ng, 'RBOB': rbob})
+                           'NatGas': ng, 'RBOB': rbob,
+                           'Gold': gold, 'Copper': copper})
         df = df.ffill().bfill()
         df.dropna(subset=['WTI'], inplace=True)
 
@@ -1838,6 +1842,30 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     else:
         df['rbob_mom_5d'] = df['crack_spread'] = df['crack_spread_z'] = 0.0
 
+    # ── 크로스에셋: Gold / Copper ─────────────────────────────────────────────
+    for _ca_col, _ca_prefix in [('Gold', 'gold'), ('Copper', 'copper')]:
+        if _ca_col in df.columns and df[_ca_col].notna().sum() > 30:
+            df[_ca_col] = df[_ca_col].ffill().bfill()
+            df[f'{_ca_prefix}_mom_5d']  = df[_ca_col].pct_change(5).fillna(0)
+            df[f'{_ca_prefix}_mom_21d'] = df[_ca_col].pct_change(21).fillna(0)
+        else:
+            df[f'{_ca_prefix}_mom_5d'] = df[f'{_ca_prefix}_mom_21d'] = 0.0
+    # Gold/WTI 비율 (리스크오프 신호: 상승→WTI 약세 압력)
+    if 'Gold' in df.columns and df['Gold'].notna().sum() > 30:
+        _g_ratio = (df['Gold'] / df['WTI']).replace([np.inf, -np.inf], np.nan).ffill().bfill()
+        df['gold_wti_ratio_z'] = ((_g_ratio - _g_ratio.rolling(63).mean())
+                                  / (_g_ratio.rolling(63).std() + 1e-8)).fillna(0)
+    else:
+        df['gold_wti_ratio_z'] = 0.0
+    # Copper/Gold 비율 (경기선행 신호: 상승→수요 강세→WTI 강세)
+    if 'Copper' in df.columns and 'Gold' in df.columns and df['Copper'].notna().sum() > 30:
+        _cu_g = (df['Copper'] / df['Gold']).replace([np.inf, -np.inf], np.nan).ffill().bfill()
+        df['copper_gold_ratio_z'] = ((_cu_g - _cu_g.rolling(63).mean())
+                                     / (_cu_g.rolling(63).std() + 1e-8)).fillna(0)
+    else:
+        df['copper_gold_ratio_z'] = 0.0
+    log.info("    크로스에셋 피처 생성 (Gold/Copper)")
+
     # ── VIX × 뉴스 감성 복합변수 (뉴스 집계 이후에 계산)
     neg_sent = (-df['news_sentiment_smooth']).clip(lower=0)   # 부정 감성만 추출
 
@@ -2460,7 +2488,27 @@ def train_models(feature_df: pd.DataFrame):
                         'demand_event_score', 'demand_event_score_smooth',
                         'geo_event_score',    'geo_event_score_smooth',
                         'news_uncertainty',   'ovx_rv_spread',
+                        # 크로스에셋 독립 채널 (top-25 경쟁 우회)
+                        'gold_wti_ratio_z', 'copper_gold_ratio_z',
+                        'gold_mom_5d', 'copper_mom_5d',
                     ] if c in train_df.columns and train_df[c].abs().sum() > 0]
+
+                    # ── 방향 분류 전용 MI 피처 (return 기반 sel_feats 보완)
+                    try:
+                        from sklearn.feature_selection import mutual_info_classif as _mic
+                        _X_mi = train_df[available_feats].fillna(0).values
+                        _mi_sc = _mic(_X_mi, _y_cls_tr, random_state=42)
+                        _mi_ranked = sorted(zip(available_feats, _mi_sc),
+                                            key=lambda x: x[1], reverse=True)
+                        _mi_extra = [f for f, _ in _mi_ranked[:30]
+                                     if f not in _sel_feats and f not in _cem_cols
+                                     and train_df[f].abs().sum() > 0][:6]
+                        if _mi_extra:
+                            _cem_cols = _cem_cols + _mi_extra
+                            log.info(f"        MI 방향피처 추가: {_mi_extra}")
+                    except Exception as _mi_e:
+                        log.warning(f"    MI 피처 선택 실패({_mi_e})")
+
                     if _cem_cols:
                         _sc_cem = StandardScaler()
                         _Xtr_c  = _sc_cem.fit_transform(
@@ -2496,6 +2544,16 @@ def train_models(feature_df: pd.DataFrame):
                     _sm = _SVC(kernel='rbf', C=_best_c, gamma='scale',
                                probability=True, class_weight='balanced', random_state=42)
                     _sw_svm = np.exp(0.002 * np.arange(len(_y_cls_tr)))
+                    # 역변동성 가중치: 저변동 구간은 방향 예측 신뢰도 높음
+                    try:
+                        _vol_tr = train_df['vol_5d'].fillna(
+                            train_df['vol_5d'].median()).values.astype(np.float32)
+                        _inv_vol = 1.0 / (_vol_tr + 1e-6)
+                        _inv_vol /= _inv_vol.mean()
+                        _sw_svm  = _sw_svm * _inv_vol
+                        _sw_svm /= _sw_svm.mean()
+                    except Exception:
+                        pass
                     if _dz_mask_tr.sum() >= 100:
                         _sm.fit(_Xtr_svm[_dz_mask_tr], _y_cls_tr[_dz_mask_tr],
                                 sample_weight=_sw_svm[_dz_mask_tr])
@@ -2606,6 +2664,18 @@ def train_models(feature_df: pd.DataFrame):
                         log.info(f"        → LSTM 앙상블 채택")
                 except Exception as _lstm_e:
                     log.warning(f"    LSTM 앙상블 실패({_lstm_e})")
+
+                # ── ③ XGB-Cls + SVM 블렌드 (조건부 채택)
+                try:
+                    _xgb_blend_base = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
+                    for _bw in [0.1, 0.2, 0.3]:
+                        _pb = (1 - _bw) * _prob_up_te + _bw * _prob_xgb_orig
+                        _db = float(((_pb > 0.5).astype(int) == _y_cls_te).mean())
+                        if _db > _xgb_blend_base:
+                            _xgb_blend_base, _prob_up_te = _db, _pb
+                            log.info(f"        [XGB-Cls blend w={_bw}] dir={_db*100:.1f}%")
+                except Exception as _be:
+                    log.warning(f"    XGB blend 실패({_be})")
 
                 _best_th = 0.5
                 _dir_cls = float(((_prob_up_te > _best_th).astype(int) == _y_cls_te).mean())
@@ -2893,6 +2963,8 @@ def train_models(feature_df: pd.DataFrame):
     # ── 성능 저장
     perf_rows = []
     for v in results.values():
+        if 'name' not in v or 'type' not in v:
+            continue
         row = {'model': v['name'], 'target': v['type'],
                'rmse': round(v['rmse'], 5), 'mae': round(v['mae'], 5), 'r2': round(v['r2'], 4)}
         if 'dir_acc'     in v: row['dir_acc']     = round(v['dir_acc'], 4)
