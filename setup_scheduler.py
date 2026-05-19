@@ -11,12 +11,14 @@ if hasattr(sys.stdout, 'reconfigure'):
     try: sys.stdout.reconfigure(encoding='utf-8')
     except Exception: pass
 
-TASK_NAME  = "OilRiskPipeline"
-BASE_DIR   = Path(__file__).parent
-SCRIPT     = BASE_DIR / "oil_risk_mvp.py"
-LOG_FILE   = BASE_DIR / "output" / "scheduler.log"
-RUN_HOUR   = 7   # 실행 시각 (24h)
-RUN_MINUTE = 0
+TASK_NAME       = "OilRiskPipeline"
+TASK_NAME_RSS   = "OilRiskRSSAlert"
+BASE_DIR        = Path(__file__).parent
+SCRIPT          = BASE_DIR / "oil_risk_mvp.py"
+LOG_FILE        = BASE_DIR / "output" / "scheduler.log"
+RSS_LOG_FILE    = BASE_DIR / "output" / "rss_alert.log"
+RUN_HOUR        = 7
+RUN_MINUTE      = 0
 
 
 def _python():
@@ -49,15 +51,38 @@ def remove():
         print(f"❌ 해제 실패: {r.stderr.strip()}")
 
 
-def status():
-    r = subprocess.run(
-        ["schtasks", "/Query", "/TN", TASK_NAME, "/FO", "LIST"],
-        capture_output=True, text=True, encoding="cp949", errors="replace"
-    )
+def install_rss():
+    """매시 정각 RSS 경보 모니터링 등록 (파이프라인과 독립)"""
+    rss_script = f'"{sys.executable}" -c "import oil_risk_mvp; oil_risk_mvp.monitor_rss_alerts()"'
+    cmd = [
+        "schtasks", "/Create", "/F",
+        "/TN", TASK_NAME_RSS,
+        "/TR", f'{rss_script} >> "{RSS_LOG_FILE}" 2>&1',
+        "/SC", "HOURLY",
+        "/MO", "1",
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode == 0:
-        print(r.stdout)
+        print("✅ RSS 경보 스케줄 등록 완료 — 매시간 실행")
     else:
-        print(f"등록된 스케줄 없음 ({TASK_NAME})")
+        print(f"❌ RSS 등록 실패: {r.stderr.strip()}")
+
+
+def remove_rss():
+    r = subprocess.run(
+        ["schtasks", "/Delete", "/TN", TASK_NAME_RSS, "/F"],
+        capture_output=True, text=True
+    )
+    print("✅ RSS 경보 스케줄 해제" if r.returncode == 0 else f"❌ {r.stderr.strip()}")
+
+
+def status():
+    for tn in [TASK_NAME, TASK_NAME_RSS]:
+        r = subprocess.run(
+            ["schtasks", "/Query", "/TN", tn, "/FO", "LIST"],
+            capture_output=True, text=True, encoding="cp949", errors="replace"
+        )
+        print(r.stdout if r.returncode == 0 else f"등록 없음 ({tn})")
 
 
 if __name__ == "__main__":
@@ -66,7 +91,11 @@ if __name__ == "__main__":
         hour   = int(sys.argv[2]) if len(sys.argv) > 2 else RUN_HOUR
         minute = int(sys.argv[3]) if len(sys.argv) > 3 else RUN_MINUTE
         install(hour, minute)
+    elif cmd == "install-rss":
+        install_rss()
     elif cmd == "remove":
         remove()
+    elif cmd == "remove-rss":
+        remove_rss()
     else:
         status()

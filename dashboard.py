@@ -252,6 +252,28 @@ if not (OUTPUT_DIR / 'latest_risk_signal.csv').exists():
 
 data = load_all()
 
+# ── 실시간 RSS 이벤트 경보 배너 ───────────────────────────────────────────────
+import json as _json
+_alert_path = OUTPUT_DIR / 'latest_alerts.json'
+if _alert_path.exists():
+    try:
+        _al = _json.loads(_alert_path.read_text(encoding='utf-8'))
+        if _al.get('alert_level') in ('WARNING', 'CRITICAL'):
+            _ac = '#e74c3c' if _al['alert_level'] == 'CRITICAL' else '#f39c12'
+            _trigs = _al.get('triggers', [])[:3]
+            _trig_html = ''.join(f"<li style='margin:2px 0'>{t['title'][:80]}</li>" for t in _trigs)
+            st.markdown(f"""
+            <div style="background:{_ac}18;border:2px solid {_ac};border-radius:12px;
+                        padding:14px 20px;margin-bottom:12px;">
+              <b style="color:{_ac}">🚨 실시간 이벤트 경보: {_al['alert_level']}</b>
+              &nbsp;<span style="color:#8b949e;font-size:0.8rem">({_al['checked_at']} 기준)</span>
+              <ul style="color:#c9d1d9;margin:6px 0 0;padding-left:18px;font-size:0.85rem">
+              {_trig_html}
+              </ul>
+            </div>""", unsafe_allow_html=True)
+    except Exception:
+        pass
+
 # ── 리스크 신호 배너 ───────────────────────────────────────────────────────────
 if 'latest_risk_signal' in data:
     sig   = data['latest_risk_signal'].iloc[0]

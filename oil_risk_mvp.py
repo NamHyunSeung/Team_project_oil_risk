@@ -3414,6 +3414,121 @@ WTI 현재가   : ${wti:.2f} / bbl
         return False
 
 
+def monitor_rss_alerts() -> dict:
+    """
+    RSS 피드에서 최신 기사 수집 → 긴급 이벤트 키워드 스캔 → OVX 급등 체크.
+    경보 발생 시 이메일 즉시 발송 + latest_alerts.json 저장.
+    파이프라인과 독립 실행 (1시간마다).
+    """
+    import json as _json, urllib.request as _ur, xml.etree.ElementTree as _ET
+
+    ALERT_KEYWORDS = {
+        'supply_cut':  ['opec cut','production cut','supply disruption','pipeline attack',
+                        'embargo','export ban','field shutdown','force majeure'],
+        'geopolitical':['nuclear plant','missile strike','drone attack','war escalat',
+                        'strait of hormuz','tanker attack','oil facility','refinery attack'],
+        'demand_shock':['recession','demand collapse','economic crisis','china slowdown',
+                        'global downturn','demand destruction'],
+        'price_move':  ['oil surges','oil plunges','crude spikes','wti jumps','brent soars',
+                        'oil prices surge','oil prices plunge','oil prices jump'],
+    }
+    SCORE = {'supply_cut': 3, 'geopolitical': 3, 'demand_shock': 2, 'price_move': 2}
+
+    triggered   = []
+    seen_titles = set()
+
+    # ── RSS 수집
+    for url in NEWS_RSS:
+        try:
+            req  = _ur.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with _ur.urlopen(req, timeout=8) as resp:
+                root = _ET.fromstring(resp.read())
+            items = root.findall('.//item')[:15]
+            for item in items:
+                title = (item.findtext('title') or '').strip()
+                link  = item.findtext('link') or ''
+                if not title or title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                tl = title.lower()
+                for cat, kws in ALERT_KEYWORDS.items():
+                    if any(kw in tl for kw in kws):
+                        triggered.append({'title': title, 'category': cat,
+                                          'score': SCORE[cat], 'url': link,
+                                          'source': url.split('/')[2]})
+                        break
+        except Exception as _re:
+            log.debug(f"RSS 수집 실패({url}): {_re}")
+
+    # ── OVX 급등 체크 (당일 변화율 ≥ 8%)
+    ovx_alert = False
+    try:
+        import yfinance as _yf
+        _ovx = _yf.download('^OVX', period='5d', progress=False, auto_adjust=True)['Close']
+        if hasattr(_ovx, 'columns'): _ovx = _ovx.iloc[:, 0]
+        _ovx = _ovx.dropna()
+        if len(_ovx) >= 2:
+            ovx_chg = (_ovx.iloc[-1] - _ovx.iloc[-2]) / _ovx.iloc[-2] * 100
+            if abs(ovx_chg) >= 8:
+                ovx_alert = True
+                triggered.append({'title': f'OVX 급변 {ovx_chg:+.1f}% (원유 변동성 지수)',
+                                   'category': 'ovx_spike', 'score': 3, 'url': '', 'source': 'yfinance'})
+    except Exception:
+        pass
+
+    # ── 경보 판단
+    total_score  = sum(t['score'] for t in triggered)
+    alert_level  = 'CRITICAL' if total_score >= 6 else 'WARNING' if total_score >= 3 else 'NORMAL'
+    detected_now = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    result = {
+        'checked_at':  detected_now,
+        'alert_level': alert_level,
+        'total_score': total_score,
+        'ovx_alert':   ovx_alert,
+        'triggers':    triggered[:10],
+    }
+
+    # ── 저장
+    try:
+        (OUTPUT_DIR / 'latest_alerts.json').write_text(
+            _json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+    except Exception:
+        pass
+
+    # ── 이메일 발송 (WARNING 이상)
+    if alert_level in ('WARNING', 'CRITICAL') and SMTP_USER and SMTP_PASSWORD and ALERT_TO:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText, MIMEMultipart
+            _lines = '\n'.join(f"  [{t['category'].upper()}] {t['title'][:80]}"
+                               for t in triggered[:5])
+            _body  = f"""[유가 리스크] 🚨 실시간 이벤트 경보 — {detected_now}
+
+경보 레벨 : {alert_level}  (점수: {total_score})
+OVX 급변  : {'⚠ 감지됨' if ovx_alert else '정상'}
+
+▶ 감지된 이벤트
+{_lines}
+
+* 파이프라인을 실행하여 최신 리스크 신호를 확인하세요.
+국제 유가 리스크 예측 시스템 MVP""".strip()
+            _msg = MIMEText(_body, 'plain', 'utf-8')
+            _msg['From']    = SMTP_USER
+            _msg['To']      = ALERT_TO
+            _msg['Subject'] = f"[유가 리스크] 🚨 {alert_level} — {detected_now}"
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as _sv:
+                _sv.starttls()
+                _sv.login(SMTP_USER, SMTP_PASSWORD)
+                _sv.sendmail(SMTP_USER, ALERT_TO, _msg.as_string())
+            log.info(f"    📧 RSS 경보 이메일 발송 → {ALERT_TO} ({alert_level})")
+        except Exception as _ee:
+            log.warning(f"    RSS 경보 이메일 실패: {_ee}")
+
+    log.info(f"    RSS 모니터링 완료: {alert_level} (점수={total_score}, 트리거={len(triggered)}건)")
+    return result
+
+
 def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
     """실시간 리스크 신호등: 정상 / 주의 / 급등위험 / 급락위험"""
     log.info("[6/9] 리스크 분류 중...")
