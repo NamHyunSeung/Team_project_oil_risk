@@ -572,6 +572,44 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
         for _c in ('inv_chg_zscore', 'inv_lvl_zscore', 'inv_surprise', 'inv_mom4_z'):
             df[_c] = 0.0
 
+    # ── EIA 휘발유·정제유 재고 (수요 강도 지표) ─────────────────────────────
+    try:
+        def _eia_stoc(product, process='SAE'):
+            _p = _up.urlencode({
+                'api_key': EIA_API_KEY, 'frequency': 'weekly', 'data[0]': 'value',
+                'facets[duoarea][]': 'NUS', 'facets[product][]': product,
+                'facets[process][]': process, 'start': start_date[:7],
+                'end': end_date[:7], 'sort[0][column]': 'period',
+                'sort[0][direction]': 'asc', 'length': 5000,
+            })
+            with _ur.urlopen(f"https://api.eia.gov/v2/petroleum/stoc/wstk/data/?{_p}", timeout=20) as _r:
+                _rows = _json.loads(_r.read())['response']['data']
+            _s = pd.Series({row['period']: float(row['value'])
+                            for row in _rows if row['value'] is not None})
+            _s.index = pd.to_datetime(_s.index)
+            return _s.sort_index()
+
+        gas_inv  = _eia_stoc('EPM0F')   # 휘발유 총재고 (천배럴)
+        dist_inv = _eia_stoc('EPD0')    # 정제유 재고
+
+        for inv_s, col_chg, col_lvl in [
+            (gas_inv,  'gas_inv_chg_z',  'gas_inv_lvl_z'),
+            (dist_inv, 'dist_inv_chg_z', 'dist_inv_lvl_z'),
+        ]:
+            _chg  = inv_s.diff().resample('B').first().ffill()
+            _lvl  = inv_s.resample('B').first().ffill()
+            df[col_chg] = _zscore(_chg).reindex(df.index).ffill().bfill().fillna(0)
+            df[col_lvl] = _zscore(_lvl).reindex(df.index).ffill().bfill().fillna(0)
+
+        # 제품 재고 합산 z-score (수요 총량 지표)
+        _prod_tot = (gas_inv + dist_inv).resample('B').first().ffill()
+        df['product_inv_z'] = _zscore(_prod_tot).reindex(df.index).ffill().bfill().fillna(0)
+        log.info(f"      휘발유 재고: {len(gas_inv)}주  정제유: {len(dist_inv)}주 연결 완료")
+    except Exception as exc:
+        log.warning(f"      제품 재고 수집 실패({exc}) → 0 사용")
+        for _c in ('gas_inv_chg_z', 'gas_inv_lvl_z', 'dist_inv_chg_z', 'dist_inv_lvl_z', 'product_inv_z'):
+            df[_c] = 0.0
+
     # ── 지정학 더미: GPR Index (Caldara & Iacoviello) ─────────────────────
     df = _attach_gpr(df)
 
@@ -1373,8 +1411,9 @@ FEATURE_COLS = [
     'ovx_zscore', 'ovx_change', 'ovx_rv_spread',
     # WTI 선물 커브 (contango/backwardation)
     'futures_spread', 'futures_spread_chg', 'contango_dummy',
-    # EIA 미국 원유 재고 (실물 수급 지표)
+    # EIA 미국 원유·제품 재고 (실물 수급 지표)
     'inv_chg_zscore', 'inv_lvl_zscore',
+    'gas_inv_chg_z', 'gas_inv_lvl_z', 'dist_inv_chg_z', 'dist_inv_lvl_z', 'product_inv_z',
     # HAR 장기 성분 + 레버리지 효과 + EIA 요일 효과
     'RV_63d', 'neg_return', 'return_neg', 'return_pos',
     'leverage_effect', 'dow_wednesday', 'dow_thursday', 'dow_monday',
@@ -1399,8 +1438,9 @@ FEATURE_COLS = [
     'month_sin', 'month_cos', 'driving_season', 'heating_season',
     # 천연가스·RBOB (에너지 동조화·크랙 스프레드)
     'ng_mom_5d', 'ng_mom_21d', 'rbob_mom_5d', 'crack_spread_z',
-    # EIA 재고 서프라이즈·모멘텀
+    # EIA 재고 서프라이즈·모멘텀 + 제품 재고
     'inv_surprise', 'inv_mom4_z',
+    'gas_inv_chg_z', 'dist_inv_chg_z', 'product_inv_z',
 ]
 
 
