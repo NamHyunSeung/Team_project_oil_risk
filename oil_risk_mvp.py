@@ -1322,9 +1322,8 @@ def _apply_embeddings(news_df: pd.DataFrame) -> pd.DataFrame:
 HAR_FEATURE_COLS = [
     # 핵심 HAR 성분
     'RV_1d', 'RV_5d', 'RV_21d', 'RV_63d',
-    # GARCH / Parkinson / EWMA
-    'garch_vol', 'parkinson_vol', 'parkinson_vol_5d', 'parkinson_vol_21d',
-    'ewma_vol_10', 'ewma_vol_21', 'ewma_vol_63',
+    # GARCH / EWMA (parkinson=rv_intraday 완전중복 제거)
+    'garch_vol', 'ewma_vol_10', 'ewma_vol_21', 'ewma_vol_63',
     # 변동성 모멘텀
     'rv_term_slope', 'rv_5d_chg', 'rv_mom_5_21',
     # 레버리지 효과
@@ -1357,18 +1356,18 @@ FEATURE_COLS = [
     'news_sentiment_lag1', 'news_count_lag1',
     'news_sentiment_lag2', 'news_count_lag2',
     'news_sentiment_smooth7', 'sentiment_magnitude',
-    'extreme_neg_news', 'news_count_pos', 'news_count_neg',
+    'extreme_neg_news', 'news_count_neg',
     'oil_event_score', 'oil_event_score_smooth',
     # 기술적 지표
     'price_vs_ma5', 'price_vs_ma21', 'bb_position',
     'return_lag1', 'return_lag2', 'RV_lag1',
-    'vol_5d', 'vol_10d', 'vol_21d', 'brent_wti_spread',
+    'vol_10d', 'brent_wti_spread',
     # 추가 기술적 지표 (RSI, MACD, ATR, 가격 z-score)
     'rsi_14', 'macd', 'macd_signal', 'atr_14', 'price_zscore',
     # VIX 기반 피처
     'vix_zscore', 'vix_change',
     # VIX × 뉴스 감성 복합변수
-    'fear_composite', 'vix_amplified', 'vix_sent_diverge',
+    'fear_composite', 'vix_amplified',
     # OVX (원유 변동성 지수) 피처
     'ovx_zscore', 'ovx_change', 'ovx_rv_spread',
     # WTI 선물 커브 (contango/backwardation)
@@ -1381,8 +1380,8 @@ FEATURE_COLS = [
     'eia_vol_signal',
     # A: GARCH 조건부 분산
     'garch_vol',
-    # B: Parkinson 장중 범위 추정
-    'parkinson_vol', 'parkinson_vol_5d', 'parkinson_vol_21d',
+    # B: Parkinson 장중 범위 추정 (rv_intraday 중복으로 FEATURE_COLS 제외, HAR만 유지)
+    'parkinson_vol',
     # C: EWMA 변동성
     'ewma_vol_10', 'ewma_vol_21', 'ewma_vol_63',
     # D: 변동성 모멘텀
@@ -1392,7 +1391,7 @@ FEATURE_COLS = [
     # VIX 기간구조 + SKEW
     'vix_term_slope', 'vix_ts_zscore', 'skew_zscore', 'skew_chg',
     # 5번: 시장 국면(Regime) 피처
-    'regime', 'regime_x_mom', 'regime_x_sent', 'regime_x_gpr',
+    'regime', 'regime_x_sent', 'regime_x_gpr',
     # COVID 특수 변수
     'covid_dummy',
     # 계절성 (원유 수요 사이클)
