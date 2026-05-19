@@ -562,8 +562,8 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
         df['inv_chg_zscore'] = _zscore(inv_chg_bday).reindex(df.index).ffill().bfill().fillna(0)
         df['inv_lvl_zscore'] = _zscore(inv_level_bday).reindex(df.index).ffill().bfill().fillna(0)
 
-        # 서프라이즈: 실제 변화량 vs 4주 이동평균 대비 이탈 (시장 기대 프록시)
-        inv_chg_ma4 = inv_chg.rolling(4).mean()
+        # 서프라이즈: 실제 변화량 vs 직전 4주 이동평균 대비 이탈 (shift(1)로 당주 자기참조 방지)
+        inv_chg_ma4 = inv_chg.shift(1).rolling(4).mean()
         inv_surprise_raw = (inv_chg - inv_chg_ma4).resample('B').first().ffill()
         df['inv_surprise'] = _zscore(inv_surprise_raw).reindex(df.index).ffill().bfill().fillna(0)
 
@@ -3745,7 +3745,9 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
     n_pos     = float(row.get('news_count_pos',        0.0))
     extreme_n = float(row.get('extreme_neg_news',      0.0))
 
-    hist_vol_75 = float(feature_df['vol_5d'].quantile(0.75)) if 'vol_5d' in feature_df.columns else 0.022
+    # 훈련 구간(최근 60일 제외) 기준 분위수 사용 (CEEMDAN/Regime과 동일 기준)
+    _n_tr_cr = max(len(feature_df) - 60, 252)
+    hist_vol_75 = float(feature_df['vol_5d'].iloc[:_n_tr_cr].quantile(0.75)) if 'vol_5d' in feature_df.columns else 0.022
 
     # ── 리스크 점수
     vol_ratio     = vol / (hist_vol_75 + 1e-8)
