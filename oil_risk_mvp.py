@@ -138,12 +138,7 @@ except ImportError:
     _PMDARIMA = False
     log.warning("pmdarima 없음 → 기본 SARIMAX 파라미터 사용")
 
-try:
-    from prophet import Prophet as _Prophet
-    _PROPHET = True
-except ImportError:
-    _PROPHET = False
-    log.warning("prophet 없음 → 2모델 앙상블 유지")
+
 
 try:
     from sklearn.ensemble import GradientBoostingRegressor
@@ -1457,13 +1452,9 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         _l = df['WTI_Low'].replace(0, np.nan).clip(lower=0.01)
         _hl_ratio = (_h / _l).clip(lower=1.0)
         df['parkinson_vol'] = (np.log(_hl_ratio) ** 2 / (4 * np.log(2))).apply(np.sqrt).fillna(0)
-        df['parkinson_vol_5d']  = df['parkinson_vol'].rolling(5).mean().fillna(0)
-        df['parkinson_vol_21d'] = df['parkinson_vol'].rolling(21).mean().fillna(0)
         log.info(f"    Parkinson vol 생성 (μ={df['parkinson_vol'].mean():.5f})")
     else:
         df['parkinson_vol']     = 0.0
-        df['parkinson_vol_5d']  = 0.0
-        df['parkinson_vol_21d'] = 0.0
 
     # ── CEEMDAN 신호 분해 (논문: CEEMDAN+LSTM-Attention 추세/노이즈 분리)
     # 미래 누출 방지: 훈련 구간(전체 - N_TEST)만 분해, 테스트 구간은 마지막 훈련값 연장
@@ -1600,9 +1591,10 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['heating_season']  = _month.isin([11,12,1,2,3]).astype(float)  # 11~3월 난방유 시즌
 
     # ── 이동평균 & 모멘텀
-    for w in [5, 10, 21]:
-        df[f'ma_{w}d']  = df['WTI'].rolling(w).mean()
-        df[f'vol_{w}d'] = df['log_return'].rolling(w).std()
+    df['ma_5d']  = df['WTI'].rolling(5).mean()
+    df['ma_21d'] = df['WTI'].rolling(21).mean()
+    df['vol_5d']  = df['log_return'].rolling(5).std()
+    df['vol_10d'] = df['log_return'].rolling(10).std()
     df['mom_5d']  = df['WTI'].pct_change(5)
     df['mom_21d'] = df['WTI'].pct_change(21)
 
@@ -1784,7 +1776,6 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['sentiment_magnitude']    = df['news_sentiment'].abs() * np.log1p(df['news_count'])
     # 극단 감성 더미 (EWM 평활 기준 ±0.35 초과)
     df['extreme_neg_news'] = (df['news_sentiment_smooth'] < -0.35).astype(float)
-    df['extreme_pos_news'] = (df['news_sentiment_smooth'] >  0.35).astype(float)
     for lag in [1, 2]:
         df[f'news_sentiment_lag{lag}'] = df['news_sentiment'].shift(lag)
         df[f'news_count_lag{lag}']     = df['news_count'].shift(lag)
@@ -1887,13 +1878,9 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['vix_amplified']   = (df['news_sentiment_smooth']
                              * (1 + df['vix_zscore'].clip(lower=0)))
 
-    # VIX-감성 괴리도: VIX↑ + 뉴스 긍정 → 과매도 반등, VIX↓ + 뉴스 부정 → 뉴스 과반응
-    df['vix_sent_diverge']= df['vix_zscore'] - neg_sent
-
     # ── 5번: 시장 국면(Regime) 피처 — 변동성 75th pct 기준 고/저변동 구분
     vol_thresh = df['vol_5d'].iloc[:_n_tr_stat].quantile(0.75)  # 훈련 구간 기준
     df['regime']       = (df['vol_5d'] > vol_thresh).astype(float)
-    df['regime_x_mom'] = df['regime'] * df['mom_5d']         # 국면 × 모멘텀
     df['regime_x_sent']= df['regime'] * df['news_sentiment_smooth']  # 국면 × 감성
     df['regime_x_gpr'] = df['regime'] * df['gpr_zscore']     # 국면 × 지정학
 
@@ -2077,14 +2064,12 @@ def train_models(feature_df: pd.DataFrame):
         except Exception as _he:
             log.warning(f"    HAR-Ridge 평가 실패({_he})")
 
-        # ── 피처 중요도 저장 + 상위 30개 기록
+        # ── 피처 중요도 Top8 로그
         if hasattr(modelA, 'feature_importances_'):
             imp = sorted(zip(available_feats, modelA.feature_importances_),
                          key=lambda x: x[1], reverse=True)
             top_str = ', '.join(f"{n}({v:.3f})" for n, v in imp[:8])
             log.info(f"        피처 중요도 Top8: {top_str}")
-            imp_df = pd.DataFrame(imp, columns=['feature', 'importance'])
-            imp_df.to_csv(OUTPUT_DIR / 'feature_importance.csv', index=False)
 
         # ── 장중 RV를 타깃으로 한 별도 모델 (최근 730일, 더 정확한 측정값)
         if 'rv_intraday' in feature_df.columns:
@@ -3206,33 +3191,10 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         except Exception as e:
             log.warning(f"잔차 교정 예측 실패: {e}")
 
-    # ── 4번: Prophet 예측
-    if 'prophet' in results:
-        try:
-            pm      = results['prophet']['model']
-            rcols   = results['prophet']['reg_cols']
-            fut_p   = pd.DataFrame({'ds': fc_dates})
-            for c in rcols:
-                fut_p[c] = float(feature_df[c].tail(5).mean()) if c in feature_df.columns else 0.0
-            forecasts['prophet'] = pm.predict(fut_p)['yhat'].values
-            log.info(f"    Prophet 7일 예측: {forecasts['prophet'].round(2)}")
-        except Exception as e:
-            log.warning(f"Prophet 예측 실패: {e}")
-
     # ── 동적 앙상블 가중치 (최근 backtest 오차 기반)
     w_sarimax, w_xgb = compute_ensemble_weights()
 
-    # ── 앙상블 — Prophet 있으면 3모델, 없으면 기존 2모델
-    if 'sarimax' in forecasts and 'prophet' in forecasts and 'xgb' in forecasts:
-        # Prophet 25% 고정, SARIMAX/XGBoost는 동적 가중치 75% 내 배분
-        ensemble = (0.75 * (w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb'])
-                    + 0.25 * forecasts['prophet'])
-        log.info(f"    ✅ 3모델 앙상블 활성: SARIMAX×{w_sarimax*0.75:.2f} "
-                 f"Prophet×0.25 XGB×{w_xgb*0.75:.2f}")
-        log.info(f"       D+1 예측: SARIMAX={forecasts['sarimax'][0]:.2f} "
-                 f"Prophet={forecasts['prophet'][0]:.2f} XGB={forecasts['xgb'][0]:.2f} "
-                 f"→ 앙상블={ensemble[0]:.2f}")
-    elif 'sarimax' in forecasts and 'xgb' in forecasts and 'stacking' in results:
+    if 'sarimax' in forecasts and 'xgb' in forecasts and 'stacking' in results:
         _sx_fc      = forecasts['sarimax']
         _xb_fc      = forecasts['xgb']
         _stk        = results['stacking']
@@ -3280,7 +3242,7 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         log.info(f"    ✅ Stacking 앙상블 적용: D+1={ensemble[0]:.2f}")
     elif 'sarimax' in forecasts and 'xgb' in forecasts:
         ensemble = w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb']
-        log.info(f"    ⚠️ 2모델 앙상블 (Prophet 미채택): SARIMAX×{w_sarimax:.2f} XGB×{w_xgb:.2f}")
+        log.info(f"    ⚠️ 2모델 앙상블: SARIMAX×{w_sarimax:.2f} XGB×{w_xgb:.2f}")
         log.info(f"       D+1 예측: SARIMAX={forecasts['sarimax'][0]:.2f} "
                  f"XGB={forecasts['xgb'][0]:.2f} → 앙상블={ensemble[0]:.2f}")
     elif 'sarimax' in forecasts:
@@ -3351,11 +3313,8 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         fc_df['sarimax_forecast'] = np.round(forecasts['sarimax'], 2)
     if 'xgb' in forecasts:
         fc_df['xgb_forecast'] = np.round(forecasts['xgb'], 2)
-    if 'prophet' in forecasts:
-        fc_df['prophet_forecast'] = np.round(forecasts['prophet'], 2)
-
     # 모델 합의도: 예측값들의 표준편차 (낮을수록 모델 간 일치)
-    pred_cols = [c for c in ['sarimax_forecast', 'xgb_forecast', 'prophet_forecast']
+    pred_cols = [c for c in ['sarimax_forecast', 'xgb_forecast']
                  if c in fc_df.columns]
     if len(pred_cols) >= 2:
         fc_df['model_std'] = fc_df[pred_cols].std(axis=1).round(2)
