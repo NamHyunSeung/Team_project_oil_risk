@@ -2343,9 +2343,11 @@ def train_models(feature_df: pd.DataFrame):
             _xgb_p = dict(n_estimators=500, max_depth=3, learning_rate=0.015,
                           subsample=0.75, colsample_bytree=0.6,
                           min_child_weight=8, reg_alpha=0.3, reg_lambda=3.0,
+                          objective='reg:pseudohubererror', huber_slope=1.0,
                           n_jobs=-1, random_state=42, verbosity=0)
             # Quantile(α=0.45): 하방 편향 → 방향성 정확도 향상 목적
-            _xgb_q = dict(**_xgb_p, objective='reg:quantileerror', quantile_alpha=0.45)
+            _xgb_q = dict(**{k: v for k, v in _xgb_p.items() if k not in ('objective','huber_slope')},
+                          objective='reg:quantileerror', quantile_alpha=0.45)
 
             _n_ret  = len(y_ret_tr)
             _tw_ret = np.exp(np.log(2) / 252 * np.arange(_n_ret)) ; _tw_ret /= _tw_ret.mean()
