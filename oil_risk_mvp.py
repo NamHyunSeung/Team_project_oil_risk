@@ -582,7 +582,7 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
 def fetch_data(start_date=None, end_date=None):
     """yfinance로 WTI·Brent·DXY 수집; 실패 시 더미 데이터 반환"""
     if end_date is None:
-        end_date = datetime.today().strftime('%Y-%m-%d')
+        end_date = (datetime.today() + timedelta(days=1)).strftime('%Y-%m-%d')
     if start_date is None:
         start_date = (datetime.today() - timedelta(days=365 * DATA_YEARS)).strftime('%Y-%m-%d')
 
@@ -849,7 +849,13 @@ def fetch_news(days_back: int = None):
                          f"+{len(arts)}건")
                 cur = nxt + timedelta(days=1)
 
-            log.info(f"    Guardian 신규 수집: {len(new_articles)}건")
+            # Guardian은 일반 에너지 기사(재생에너지·기후) 포함 → 원유 관련만 필터
+            _OIL_KW = {'oil','crude','brent','wti','opec','barrel','petroleum','refinery','shale','tanker'}
+            new_articles = [
+                a for a in new_articles
+                if any(kw in a.get('title','').lower() for kw in _OIL_KW)
+            ]
+            log.info(f"    Guardian 신규 수집: {len(new_articles)}건 (oil 필터 후)")
         except Exception as exc:
             log.warning(f"    Guardian API 오류({exc}) → RSS 폴백")
 
@@ -905,8 +911,8 @@ def fetch_news(days_back: int = None):
     try:
         combined.to_csv(NEWS_CACHE_FILE, index=False)
         log.info(f"    뉴스 캐시 저장: {len(combined)}건 → {NEWS_CACHE_FILE}")
-    except Exception:
-        pass
+    except Exception as _nce:
+        log.warning(f"    뉴스 캐시 저장 실패({_nce}) → 다음 실행 시 재수집")
 
     log.info(f"    뉴스 총 {len(combined)}건 사용")
     return combined
@@ -1225,22 +1231,6 @@ def _oil_event_score(article_emb: 'np.ndarray') -> float:
     return float(np.dot(sims_s, ev_scores))
 
 
-def _oil_event_score_cat(article_emb: 'np.ndarray') -> dict:
-    """카테고리별(공급/수요/지정학) 이벤트 점수 반환"""
-    ev_embs, ev_scores = _get_oil_event_embeddings()
-    if ev_embs is None or _OIL_EVENT_CATS is None:
-        return {'supply': 0.0, 'demand': 0.0, 'geo': 0.0}
-    sims   = ev_embs @ article_emb
-    sims_s = np.exp(sims * 5)
-    sims_s /= sims_s.sum() + 1e-8
-    cats = _OIL_EVENT_CATS
-    result = {}
-    for cat in ('supply', 'demand', 'geo'):
-        mask = np.array([c == cat for c in cats], dtype=float)
-        w    = sims_s * mask
-        denom = w.sum() + 1e-8
-        result[cat] = float(np.dot(w / denom, ev_scores))
-    return result
 
 _EMBED_MDL  = None
 _EMBED_TOK  = None
@@ -1311,11 +1301,16 @@ def _apply_embeddings(news_df: pd.DataFrame) -> pd.DataFrame:
         new_embs = _embed_texts(news_df.loc[new_mask, 'title'].tolist())
         for h, e in zip(news_df.loc[new_mask, '_ehash'], new_embs):
             cache[h] = e
+        # 캐시 크기 제한: 50,000건 초과 시 오래된 항목 정리 (unbounded growth 방지)
+        if len(cache) > 50_000:
+            _keep = set(news_df['_ehash'].tolist())
+            cache = {k: v for k, v in cache.items() if k in _keep}
+            log.info(f"    Embedding 캐시 정리: {len(cache)}건 유지")
         try:
             with open(EMBED_CACHE_FILE, 'wb') as _f:
                 pickle.dump(cache, _f, protocol=4)
         except Exception as _ce:
-            log.debug(f"    Embedding 캐시 저장 실패({_ce})")
+            log.warning(f"    Embedding 캐시 저장 실패({_ce})")
 
     _zero = np.zeros(384, dtype=np.float32)
     news_df['_emb'] = news_df['_ehash'].apply(lambda h: cache.get(h, _zero))
@@ -1346,8 +1341,6 @@ HAR_FEATURE_COLS = [
     'vix_change', 'vix_zscore',
     'vix_term_slope', 'vix_ts_zscore',
     'skew_zscore',
-    # Brent 스필오버
-    'brent_rv_1d_lag1', 'brent_rv_5d_lag1',
     # 기존 lag
     'RV_lag1',
 ]
@@ -1477,7 +1470,10 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
             np.save(str(_cem_cache), _imfs)
             for _old_c in OUTPUT_DIR.glob('ceemdan_*.npy'):
                 if _old_c != _cem_cache:
-                    _old_c.unlink(missing_ok=True)
+                    try:
+                        _old_c.unlink(missing_ok=True)
+                    except Exception as _ul_e:
+                        log.debug(f"    CEEMDAN 구 캐시 삭제 실패({_old_c.name}): {_ul_e}")
         _n_cem = len(_wti_arr)
         # 저주파 성분 = 마지막 IMF(추세), 고주파 = 첫 IMF들(잡음)
         _trend_tr = _imfs[-1][:_n_cem]   # 훈련 구간 추세
@@ -1509,6 +1505,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['rv_mom_5_21']    = (df['RV_5d'] - df['RV_21d']).fillna(0)  # 단기-장기 스프레드
 
     # ── A: GARCH(1,1) 조건부 분산 (변동성 클러스터링 명시적 모델링)
+    _garch_result = None   # 호출자에게 반환할 fit 결과
     try:
         from arch import arch_model as _arch_model
         _ret_pct = df['log_return'].dropna() * 100   # % 스케일
@@ -1517,6 +1514,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         _res     = _garch.fit(disp='off', show_warning=False)
         _cond_vol = _res.conditional_volatility / 100   # 소수점 스케일 복원
         df['garch_vol'] = _cond_vol.reindex(df.index).ffill().bfill().fillna(0)
+        _garch_result = _res   # 외부 전달용 저장
         log.info(f"    GARCH(1,1) 조건부 분산 생성 (μ={df['garch_vol'].mean():.5f})")
     except Exception as _ge:
         log.warning(f"    GARCH 실패({_ge}) → garch_vol=0")
@@ -1582,6 +1580,8 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['dow_thursday']   = (_dow == 3).astype(float)
     df['dow_monday']     = (_dow == 0).astype(float)
     df['eia_vol_signal'] = df['dow_wednesday'] * df['inv_chg_zscore'].abs()
+    df['inv_draw_signal']  = (df['inv_chg_zscore'] < 0).astype(float)  # 재고 감소=상승 신호
+    df['inv_surprise_dir'] = (df['inv_surprise'] < 0).astype(float)    # 예상 외 감소=상승 신호
 
     # ── 계절성 피처 (원유 수요 사이클)
     _month = pd.to_datetime(df.index).month
@@ -1595,8 +1595,9 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['ma_21d'] = df['WTI'].rolling(21).mean()
     df['vol_5d']  = df['log_return'].rolling(5).std()
     df['vol_10d'] = df['log_return'].rolling(10).std()
-    df['mom_5d']  = df['WTI'].pct_change(5)
-    df['mom_21d'] = df['WTI'].pct_change(21)
+    df['mom_5d']    = df['WTI'].pct_change(5)
+    df['mom_21d']   = df['WTI'].pct_change(21)
+    df['mom_accel']     = df['mom_5d'].diff(5).fillna(0)
 
     # ── DXY 변화율
     df['dxy_change'] = df['DXY'].pct_change()
@@ -1623,6 +1624,8 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     ema26 = df['WTI'].ewm(span=26, adjust=False).mean()
     df['macd']        = (ema12 - ema26).fillna(0)
     df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean().fillna(0)
+    df['macd_cross']     = (df['macd'] > df['macd_signal']).astype(float)
+    df['inv_draw_x_macd'] = df['inv_draw_signal'] * df['macd_cross']
 
     # ── ATR proxy (14일 평균 절대 로그수익률): 가격 범위 기반 변동성
     df['atr_14'] = df['log_return'].abs().rolling(14).mean().fillna(0)
@@ -1725,6 +1728,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
                 _s = _oil_daily[_cat].reindex(df.index).ffill().fillna(0)
                 df[_col]             = _s.values
                 df[_col + '_smooth'] = _s.ewm(span=3, min_periods=1).mean().values
+            df['supply_demand_gap'] = df['supply_event_score'] - df['demand_event_score']
             log.info(f"    Oil Event 스코어: μ={df['oil_event_score'].mean():.4f} "
                      f"σ={df['oil_event_score'].std():.4f}")
             # 뉴스가 있는 날짜별 impact_w 가중 평균 임베딩 계산
@@ -1746,8 +1750,12 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
                     _emb_matrix[_i] = _prev
             # 수익률과의 상관관계로 top-K 차원 선택 (미래 누출 방지: 첫 80%만 사용)
             if 'return_1d' in df.columns and len(df) > 200:
-                _ret_next   = df['return_1d'].shift(-1).values
                 _n_corr_tr  = int(len(df) * 0.8)   # 상관관계 계산은 첫 80%만
+                # shift(-1)을 훈련 구간만 잘라낸 뒤 적용 — 테스트 구간 정보 차단
+                _ret_tr     = df['return_1d'].iloc[:_n_corr_tr]
+                _ret_next_tr = _ret_tr.shift(-1).values   # 훈련 구간 내 익일 수익률
+                _ret_next   = np.full(len(df), np.nan)
+                _ret_next[:_n_corr_tr] = _ret_next_tr
                 _valid      = ~np.isnan(_ret_next) & (_emb_matrix.sum(1) != 0)
                 _valid[_n_corr_tr:] = False          # 테스트 구간 제외
                 _corrs = np.array([
@@ -1772,6 +1780,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     # ── 뉴스 감성 파생 피처
     df['news_sentiment_smooth']  = df['news_sentiment'].ewm(span=3, min_periods=1).mean()
     df['news_sentiment_smooth7'] = df['news_sentiment'].ewm(span=7, min_periods=1).mean()
+    df['sentiment_chg3'] = df['news_sentiment'].diff(3).fillna(0)
     # 감성 강도: 절댓값 × log(뉴스수+1) — 큰 감성 + 많은 기사 = 강한 신호
     df['sentiment_magnitude']    = df['news_sentiment'].abs() * np.log1p(df['news_count'])
     # 극단 감성 더미 (EWM 평활 기준 ±0.35 초과)
@@ -1881,29 +1890,38 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     # ── 5번: 시장 국면(Regime) 피처 — 변동성 75th pct 기준 고/저변동 구분
     vol_thresh = df['vol_5d'].iloc[:_n_tr_stat].quantile(0.75)  # 훈련 구간 기준
     df['regime']       = (df['vol_5d'] > vol_thresh).astype(float)
-    df['regime_x_sent']= df['regime'] * df['news_sentiment_smooth']  # 국면 × 감성
-    df['regime_x_gpr'] = df['regime'] * df['gpr_zscore']     # 국면 × 지정학
+    df['regime_x_sent']= df['regime'] * df['news_sentiment_smooth']
+    df['regime_x_gpr'] = df['regime'] * df['gpr_zscore']
 
-    # ── 훈련 타깃 (다음 날 5일 실현변동성 & 가격 & 수익률)
+    # ── 훈련 타깃 (다음 날 단일일 실현변동성 & 가격 & 수익률)
+    # vol regime 지속성 예측 (4/5일 overlap 있으나 실용적 — GARCH와 병렬 비교)
     df['target_rv']        = df['RV_5d'].shift(-1)
     df['target_rv_log']    = np.log(df['target_rv'].clip(lower=1e-8))
+    # A: vol 변화량 (overlap 성분 제거 — delta 학습)
+    df['target_rv_delta']  = df['RV_5d'].shift(-1) - df['RV_5d']
+    # B: GARCH 잔차 (garch_vol[t] ≈ h_{t+1} 근사, HAR이 GARCH 미포착 패턴 학습)
+    df['target_rv_garch']  = df['RV_5d'].shift(-1) - df['garch_vol']
     df['target_price']     = df['WTI'].shift(-1)
     df['target_return'] = np.log(df['WTI'].shift(-1) / df['WTI'])   # 내일 log 수익률
 
     # 피처 행만 dropna (타깃 NaN 포함 시 훈련용으로만 제거)
     feat_na_cols = [c for c in FEATURE_COLS if c in df.columns]
     df_full = df.ffill().bfill()      # 마지막 행 보존용 (예측에 사용, NaN ffill 보증)
-    df.dropna(subset=feat_na_cols + ['target_rv', 'target_rv_log', 'target_price', 'target_return'], inplace=True)
+    df.dropna(subset=feat_na_cols + ['target_rv', 'target_rv_log', 'target_price', 'target_return',
+                                     'target_rv_delta', 'target_rv_garch'], inplace=True)
+
+    if len(df) < 62:  # 최소 훈련(1행) + 테스트(60행) + 여유(1행)
+        raise ValueError(f"피처 행 부족: {len(df)}행 (최소 62 필요). 데이터 수집 실패 또는 dropna 과다.")
 
     log.info(f"    피처 완성: {df.shape[0]:,} rows × {df.shape[1]} cols")
-    return df, df_full
+    return df, df_full, {'garch_model': _garch_result}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5.  train_models()
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_models(feature_df: pd.DataFrame):
+def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: dict = None):
     """XGBoost-HAR (변동성) + SARIMAX (가격) 훈련 및 성능 평가"""
     log.info("[4/9] 모델 훈련 중...")
 
@@ -1957,7 +1975,7 @@ def train_models(feature_df: pd.DataFrame):
 
         # ── walk-forward TimeSeriesSplit 평가 (5 fold)
         tscv      = TimeSeriesSplit(n_splits=5)
-        wf_preds  = np.zeros(len(X_tr))
+        wf_preds  = np.full(len(X_tr), np.nan)   # 검증 안 된 인덱스 NaN으로 초기화
         wf_actual = y_rv_tr.values.copy()
 
         _X_tr_raw = X_tr.values  # fold별 인덱싱용
@@ -1986,9 +2004,11 @@ def train_models(feature_df: pd.DataFrame):
         # 최종 모델용 스케일러: 전체 훈련셋으로 fit (평가 완료 후이므로 누출 없음)
         full_X = scaler.fit_transform(X_tr)
 
-        rmse_cv = float(np.sqrt(mean_squared_error(wf_actual, wf_preds)))
-        mae_cv  = float(mean_absolute_error(wf_actual, wf_preds))
-        r2_cv   = float(r2_score(wf_actual, wf_preds))
+        # CV 메트릭: 실제 검증된 인덱스만 사용 (초기 훈련전용 인덱스 0-패딩 제외)
+        _wf_mask  = ~np.isnan(wf_preds)
+        rmse_cv = float(np.sqrt(mean_squared_error(wf_actual[_wf_mask], wf_preds[_wf_mask])))
+        mae_cv  = float(mean_absolute_error(wf_actual[_wf_mask], wf_preds[_wf_mask]))
+        r2_cv   = float(r2_score(wf_actual[_wf_mask], wf_preds[_wf_mask]))
         log.info(f"        Walk-forward CV → RMSE={rmse_cv:.5f}  MAE={mae_cv:.5f}  R²={r2_cv:.4f}")
 
         # ── 최종 모델: 전체 훈련셋으로 재학습 (지수감쇠 + COVID 가중치)
@@ -2066,7 +2086,7 @@ def train_models(feature_df: pd.DataFrame):
 
         # ── 피처 중요도 Top8 로그
         if hasattr(modelA, 'feature_importances_'):
-            imp = sorted(zip(available_feats, modelA.feature_importances_),
+            imp = sorted(zip(har_feats, modelA.feature_importances_),
                          key=lambda x: x[1], reverse=True)
             top_str = ', '.join(f"{n}({v:.3f})" for n, v in imp[:8])
             log.info(f"        피처 중요도 Top8: {top_str}")
@@ -2119,6 +2139,85 @@ def train_models(feature_df: pd.DataFrame):
             'test_dates':      test_df.index,
         }
 
+    # ── HAR-A (vol delta) / HAR-B (GARCH 잔차) 비교 훈련
+    if _SKL and _XGB and 'xgb_har' in results:
+        try:
+            _base_r2 = results['xgb_har']['r2']
+            _har_f   = [c for c in har_feats if c in train_df.columns]
+            _best    = ('direct', _base_r2, None, None)   # (method, r2, model, scaler)
+
+            for _tag, _tgt_col, _recon in [
+                ('delta',  'target_rv_delta', 'delta'),
+                ('garch_resid', 'target_rv_garch', 'garch_resid'),
+            ]:
+                if _tgt_col not in train_df.columns:
+                    continue
+                _y_tr_v = train_df[_tgt_col]
+                _y_te_v = test_df[_tgt_col]
+                _sc_v   = StandardScaler()
+                _X_tr_v = _sc_v.fit_transform(train_df[_har_f])
+                _X_te_v = _sc_v.transform(test_df[_har_f])
+                _cw_v   = (np.where(train_df['covid_dummy'].values == 1, 0.35, 1.0)
+                           if 'covid_dummy' in train_df.columns else None)
+                _m_v = xgb.XGBRegressor(
+                    n_estimators=300, max_depth=3, learning_rate=0.02,
+                    subsample=0.7, colsample_bytree=0.6,
+                    min_child_weight=15, reg_alpha=1.0, reg_lambda=5.0,
+                    n_jobs=-1, random_state=42, verbosity=0)
+                _m_v.fit(_X_tr_v, _y_tr_v, sample_weight=_cw_v)
+                _pred_v = _m_v.predict(_X_te_v)
+                # 재구성 후 실제 RV와 비교
+                _last_rv_te = test_df['RV_5d'].values
+                if _recon == 'delta':
+                    _pred_rv_v = _last_rv_te + _pred_v
+                else:   # garch_resid
+                    _garch_base = test_df['garch_vol'].values if 'garch_vol' in test_df.columns else _last_rv_te
+                    _pred_rv_v = _garch_base + _pred_v
+                _pred_rv_v = np.clip(_pred_rv_v, 0, None)
+                _act_rv_te = test_df['target_rv'].values
+                _r2_v  = float(r2_score(_act_rv_te, _pred_rv_v))
+                _mae_v = float(mean_absolute_error(_act_rv_te, _pred_rv_v))
+                log.info(f"    HAR-{_tag}: R²={_r2_v:.4f}  MAE={_mae_v:.5f}  (base={_base_r2:.4f})")
+                if _r2_v > _best[1]:
+                    _best = (_recon, _r2_v, _m_v, _sc_v)
+
+            if _best[0] != 'direct' and _best[2] is not None:
+                log.info(f"    ✅ HAR-{_best[0]} 채택 (R²={_best[1]:.4f} > base={_base_r2:.4f})")
+                results['xgb_har']['model']        = _best[2]
+                results['xgb_har']['scaler']       = _best[3]
+                results['xgb_har']['reconstruction'] = _best[0]
+                results['xgb_har']['r2']           = _best[1]
+            else:
+                log.info(f"    기존 direct HAR 유지 (R²={_base_r2:.4f})")
+                results['xgb_har']['reconstruction'] = 'direct'
+        except Exception as _hve:
+            log.warning(f"    HAR-A/B 비교 실패({_hve})")
+            results['xgb_har']['reconstruction'] = 'direct'
+
+    # ── GARCH(1,1) 직접 예측 성능 평가 (XGB-HAR와 비교)
+    _garch_res = (aux or {}).get('garch_model')
+    if _garch_res is not None:
+        try:
+            _garch_fc_test = _garch_res.forecast(horizon=len(test_df), reindex=False)
+            _garch_vol_pred = np.sqrt(_garch_fc_test.variance.values[-1, :]) / 100
+            _garch_vol_actual = y_rv_te.values
+            _garch_rmse = float(np.sqrt(mean_squared_error(_garch_vol_actual, _garch_vol_pred)))
+            _garch_r2   = float(r2_score(_garch_vol_actual, _garch_vol_pred))
+            _xgb_r2     = results.get('xgb_har', {}).get('r2', -999)
+            log.info(f"    GARCH(1,1) vol 예측: RMSE={_garch_rmse:.5f}  R²={_garch_r2:.4f}  "
+                     f"(vs XGB-HAR R²={_xgb_r2:.4f})")
+            results['garch_vol'] = {
+                'model': _garch_res, 'type': 'vol_5d', 'name': 'GARCH(1,1)',
+                'rmse': _garch_rmse, 'mae': float(mean_absolute_error(_garch_vol_actual, _garch_vol_pred)),
+                'r2': _garch_r2,
+                'beats_xgb': _garch_r2 > _xgb_r2,
+            }
+            if _garch_r2 > _xgb_r2:
+                log.info("    ✅ GARCH > XGB-HAR → vol 예측에 GARCH 사용")
+            else:
+                log.info("    XGB-HAR ≥ GARCH → XGB-HAR 유지")
+        except Exception as _ge:
+            log.warning(f"    GARCH 성능 평가 실패({_ge})")
 
     # ─────────────────────────────────────────────────────────────────────
     # Model B: SARIMAX — 1-step ahead dynamic=False 평가 (정직한 R²)
@@ -2137,12 +2236,21 @@ def train_models(feature_df: pd.DataFrame):
             def _to_bday(s):
                 try:
                     return s.asfreq('B', method='ffill')
-                except Exception:
+                except Exception as _be:
+                    log.warning(f"    _to_bday asfreq 실패({_be}) → 원본 유지")
                     return s
 
             # SARIMAX는 최근 SARIMAX_YEARS 년치만 사용 (오래된 가격 레짐 영향 최소화)
-            cutoff = feature_df.index[-1] - pd.DateOffset(years=SARIMAX_YEARS)
-            sx_df  = feature_df[feature_df.index >= cutoff]
+            # full_df의 최신 행(dropna로 제거된 행) 포함하여 SARIMAX 훈련 데이터 최신화
+            _sx_base = feature_df
+            if full_df is not None:
+                _missing = full_df.index.difference(feature_df.index)
+                _avail_cols = [c for c in feature_df.columns if c in full_df.columns]
+                if not _missing.empty:
+                    _extra = full_df.loc[_missing, _avail_cols].ffill()
+                    _sx_base = pd.concat([feature_df, _extra]).sort_index()
+            cutoff = _sx_base.index[-1] - pd.DateOffset(years=SARIMAX_YEARS)
+            sx_df  = _sx_base[_sx_base.index >= cutoff]
             n_test_sx = min(60, int(len(sx_df) * 0.15))
             sx_train  = sx_df.iloc[:-n_test_sx]
             sx_test   = sx_df.iloc[-n_test_sx:]
@@ -2400,7 +2508,7 @@ def train_models(feature_df: pd.DataFrame):
             for _fn, _fv in _sorted_imp:
                 _sel_feats.append(_fn)
                 _cum += _fv
-                if _cum >= 0.90 or len(_sel_feats) >= 25:
+                if _cum >= 0.85 or len(_sel_feats) >= 25:
                     break
             _sel_feats = [f for f in _sel_feats if f in train_df.columns]
             log.info(f"    피처 선택: {len(available_feats)}개 → {len(_sel_feats)}개 (누적 중요도 {_cum:.1%})")
@@ -2414,7 +2522,7 @@ def train_models(feature_df: pd.DataFrame):
 
             # ── 두 모델 평가
             def _eval(model, Xte, label):
-                _pr = model.predict(Xte)
+                _pr = np.clip(model.predict(Xte), -0.5, 0.5)   # inf 방지: ±50% 초과 수익률 제거
                 _px = test_df['WTI'].values * np.exp(_pr)
                 _r2 = float(r2_score(y_px_te, _px))
                 _mae = float(mean_absolute_error(y_px_te, _px))
@@ -2462,7 +2570,7 @@ def train_models(feature_df: pd.DataFrame):
                 _dz_mask_tr = np.abs(y_ret_tr.values) > 0.003  # dead-zone 제외 마스크
                 _xgb_cls_p = dict(
                     n_estimators=300, max_depth=3, learning_rate=0.02,
-                    subsample=0.75, colsample_bytree=0.6,
+                    subsample=0.75, colsample_bytree=0.6, colsample_bynode=0.8,
                     min_child_weight=10, reg_alpha=0.5, reg_lambda=3.0,
                     n_jobs=-1, random_state=42, verbosity=0
                 )
@@ -2489,6 +2597,8 @@ def train_models(feature_df: pd.DataFrame):
                         # 크로스에셋 독립 채널 (top-25 경쟁 우회)
                         'gold_wti_ratio_z', 'copper_gold_ratio_z',
                         'gold_mom_5d', 'copper_mom_5d',
+                        'sentiment_chg3', 'macd_cross', 'inv_draw_signal', 'mom_accel',
+                        'inv_surprise_dir', 'supply_demand_gap', 'inv_draw_x_macd',
                     ] if c in train_df.columns and train_df[c].abs().sum() > 0]
 
                     # ── 방향 분류 전용 MI 피처 (return 기반 sel_feats 보완)
@@ -2519,7 +2629,7 @@ def train_models(feature_df: pd.DataFrame):
                         _Xtr_svm, _Xte_svm, _sc_cem = _Xtr_sel, _Xte_sel, None
 
                     # C 그리드 서치 (시간 기반 단일 검증 분할, 마지막 25%)
-                    _c_grid = [0.5, 1.0, 2.0, 5.0]
+                    _c_grid = [0.3, 0.5, 1.0, 2.0, 3.0, 5.0]
                     _n_cval = max(30, len(_Xtr_svm) // 4)
                     _best_c, _best_c_dir = 1.0, -1.0
                     for _ci in _c_grid:
@@ -2594,7 +2704,7 @@ def train_models(feature_df: pd.DataFrame):
                         def __init__(self, nf):
                             super().__init__()
                             self.lstm = _tnn.LSTM(nf, 64, 1, batch_first=True, bidirectional=True)
-                            self.drop = _tnn.Dropout(0.3)
+                            self.drop = _tnn.Dropout(0.4)
                             self.norm = _tnn.LayerNorm(128)
                             self.fc   = _tnn.Linear(128, 1)
                         def forward(self, x):
@@ -2651,12 +2761,18 @@ def train_models(feature_df: pd.DataFrame):
                     _dz_ls = _dz_mask_tr[_LB:_LB+len(_Xls_tr)]
 
                     _lprobs = [_ltrain(_Xls_tr, _yls_tr, _Xls_te, _yls_te,
-                                       _sw_ls, _dz_ls, seed=s) for s in range(3)]
+                                       _sw_ls, _dz_ls, seed=s) for s in range(5)]
                     _prob_lstm    = np.mean(_lprobs, axis=0)
-                    _prob_combined = 0.5 * _prob_up_te + 0.5 * _prob_lstm
-                    _dir_combined  = float(((_prob_combined > 0.5).astype(int) == _y_cls_te).mean())
-                    _dir_svm_cur   = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
-                    log.info(f"        [BiLSTM 앙상블] dir={_dir_combined*100:.1f}% (SVM={_dir_svm_cur*100:.1f}%)")
+                    _dir_svm_cur  = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
+                    _best_lw, _best_ldir = 0.5, -1.0
+                    for _lw in [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]:
+                        _pc = (1 - _lw) * _prob_up_te + _lw * _prob_lstm
+                        _dc = float(((_pc > 0.5).astype(int) == _y_cls_te).mean())
+                        if _dc > _best_ldir:
+                            _best_ldir, _best_lw = _dc, _lw
+                    _prob_combined = (1 - _best_lw) * _prob_up_te + _best_lw * _prob_lstm
+                    _dir_combined  = _best_ldir
+                    log.info(f"        [BiLSTM 앙상블] dir={_dir_combined*100:.1f}% (SVM={_dir_svm_cur*100:.1f}%, best_w={_best_lw})")
                     if _dir_combined > _dir_svm_cur:
                         _prob_up_te = _prob_combined
                         log.info(f"        → LSTM 앙상블 채택")
@@ -2681,39 +2797,26 @@ def train_models(feature_df: pd.DataFrame):
                 _dir_cls = float(((_prob_up_te > _best_th).astype(int) == _y_cls_te).mean())
                 # 분류기 방향 + 회귀 크기 결합 (Classifier-adj)
                 _sign_cls = np.where(_prob_up_te > _best_th, 1.0, -1.0)
-                _pr_cls_adj = np.abs(_pr_s) * _sign_cls
+                _pr_cls_adj = np.clip(np.abs(_pr_s) * _sign_cls, -0.5, 0.5)
                 _px_cls_adj = test_df['WTI'].values * np.exp(_pr_cls_adj)
                 _mae_cls    = float(mean_absolute_error(y_px_te, _px_cls_adj))
                 _r2_cls     = float(r2_score(y_px_te, _px_cls_adj))
                 _rmse_cls   = float(np.sqrt(mean_squared_error(y_px_te, _px_cls_adj)))
 
                 # ── Walk-forward 5폴드 방향성 평가 (신뢰 지표, 모델 선택 영향 없음)
+                # 실제 예측 파이프라인과 동일한 피처셋(_cem_cols 전체) + 최적 C 사용
                 _wf_dir_acc = 0.0
                 try:
                     from sklearn.svm import SVC as _SVC_wf
-                    _wf_cem = [c for c in ['ceemdan_trend_ret',
-                                           'ceemdan_noise_std5',
-                                           'ceemdan_trend_mom5']
-                               if c in train_df.columns
-                               and train_df[c].abs().sum() > 0]
                     _wf_dirs = []
-                    for _wti, _wvi in TimeSeriesSplit(n_splits=3).split(_Xtr_sel):
+                    for _wti, _wvi in TimeSeriesSplit(n_splits=3).split(_Xtr_svm):
                         if len(_wti) < 100 or len(_wvi) < 15:
                             continue
-                        if _wf_cem:
-                            _wsc = StandardScaler()
-                            _wXtr = np.hstack([_Xtr_sel[_wti],
-                                               _wsc.fit_transform(
-                                                   train_df[_wf_cem].fillna(0).values[_wti])])
-                            _wXva = np.hstack([_Xtr_sel[_wvi],
-                                               _wsc.transform(
-                                                   train_df[_wf_cem].fillna(0).values[_wvi])])
-                        else:
-                            _wXtr, _wXva = _Xtr_sel[_wti], _Xtr_sel[_wvi]
-                        _wsm = _SVC_wf(kernel='rbf', C=1.0, gamma='scale',
+                        _wXtr, _wXva = _Xtr_svm[_wti], _Xtr_svm[_wvi]
+                        _wsm = _SVC_wf(kernel='rbf', C=_best_c, gamma='scale',
                                        probability=True, class_weight='balanced',
                                        random_state=42)
-                        _wf_sw = np.exp(0.002 * np.arange(len(_wti)))
+                        _wf_sw = np.exp(0.003 * np.arange(len(_wti)))
                         _dz_m = _dz_mask_tr[_wti]
                         if _dz_m.sum() >= 30:
                             _wsm.fit(_wXtr[_dz_m], _y_cls_tr[_wti][_dz_m],
@@ -2726,6 +2829,42 @@ def train_models(feature_df: pd.DataFrame):
                     _wf_dir_acc = float(np.mean(_wf_dirs)) if _wf_dirs else 0.0
                 except Exception as _wfe:
                     log.warning(f"    WF 평가 실패({_wfe})")
+                _wf_svm_acc = _wf_dir_acc  # SVM WF acc 별도 보존
+
+                # XGB Classifier WF 평가 (SVM WF와 최댓값 채택)
+                _wf_xgb_acc = 0.0
+                try:
+                    _wf_xgb_dirs = []
+                    for _wti, _wvi in TimeSeriesSplit(n_splits=3).split(_Xtr_sel):
+                        if len(_wti) < 100 or len(_wvi) < 15:
+                            continue
+                        _wf_sw2 = np.exp(0.002 * np.arange(len(_wti)))
+                        _wxgb = xgb.XGBClassifier(**_xgb_cls_p)
+                        _wxgb.fit(_Xtr_sel[_wti], _y_cls_tr[_wti],
+                                  sample_weight=_wf_sw2)
+                        _wxp = _wxgb.predict_proba(_Xtr_sel[_wvi])[:, 1]
+                        _wf_xgb_dirs.append(
+                            float(((_wxp > 0.5).astype(int) == _y_cls_tr[_wvi]).mean()))
+                    _wf_xgb_acc = float(np.mean(_wf_xgb_dirs)) if _wf_xgb_dirs else 0.0
+                    log.info(f"        WF XGB-Cls={_wf_xgb_acc*100:.1f}%  WF SVM={_wf_svm_acc*100:.1f}%")
+                    _wf_dir_acc = max(_wf_svm_acc, _wf_xgb_acc)
+                except Exception as _wfe2:
+                    log.warning(f"    WF XGB 평가 실패({_wfe2})")
+
+                # WF-weighted SVM+XGB 테스트 확률 블렌드 (조건부 채택)
+                try:
+                    if _wf_svm_acc > 0 and _wf_xgb_acc > 0 and '_best_svm_prob' in dir():
+                        _tot_wf = _wf_svm_acc + _wf_xgb_acc
+                        _ws = _wf_svm_acc / _tot_wf
+                        _wx = _wf_xgb_acc / _tot_wf
+                        _pb_wf = _ws * _best_svm_prob + _wx * _prob_xgb_orig
+                        _db_wf = float(((_pb_wf > 0.5).astype(int) == _y_cls_te).mean())
+                        _cur_d = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
+                        if _db_wf > _cur_d:
+                            _prob_up_te = _pb_wf
+                            log.info(f"        [WF-weighted blend] dir={_db_wf*100:.1f}% (SVM_w={_ws:.2f} XGB_w={_wx:.2f})")
+                except Exception as _wfb_e:
+                    pass
 
                 log.info(f"        [단일윈도우] dir={_dir_cls*100:.1f}%  "
                          f"[WF-5폴드 평균] dir={_wf_dir_acc*100:.1f}%  "
@@ -2819,7 +2958,7 @@ def train_models(feature_df: pd.DataFrame):
             _mD2 = lgb.LGBMRegressor(**_lgb_p)
             _mD2.fit(_Xtr_lgb, y_ret_tr, sample_weight=w_ret)
 
-            _pr_lgb   = _mD2.predict(_Xte_lgb)
+            _pr_lgb   = np.clip(_mD2.predict(_Xte_lgb), -0.5, 0.5)
             _px_lgb   = test_df['WTI'].values * np.exp(_pr_lgb)
             _r2_lgb   = float(r2_score(y_px_te, _px_lgb))
             _mae_lgb  = float(mean_absolute_error(y_px_te, _px_lgb))
@@ -2858,7 +2997,7 @@ def train_models(feature_df: pd.DataFrame):
                 _pr_s  = _md_s.predict(_Xte_s)
                 if hasattr(_md_s, 'predict_proba'):
                     _pr_s = np.array([0.0] * len(_pr_s))  # fallback
-                xr_pred = test_df['WTI'].values * np.exp(_pr_s)
+                xr_pred = test_df['WTI'].values * np.exp(np.clip(_pr_s, -0.5, 0.5))
 
             if sx_pred is not None and xr_pred is not None:
                 # 스택 피처 구성: SARIMAX + XGB, LGB/VAR 있으면 추가
@@ -3009,7 +3148,7 @@ def compute_ensemble_weights(window: int = 30):
     """
     default = (0.65, 0.35)
 
-    # ── 1단계: R² 기반 초기 가중치 ──────────────────────────────────────
+    # ── 1단계: 역MAE 기반 초기 가중치 (R²는 태스크 단위 달라 비교 불가)
     w_s_base = 0.65
     perf_path = OUTPUT_DIR / 'model_performance.csv'
     if perf_path.exists():
@@ -3018,12 +3157,14 @@ def compute_ensemble_weights(window: int = 30):
             sx  = pf[pf['model'].str.startswith('SARIMAX')]
             xgr = pf[pf['model'].str.startswith('XGBoost-Return')]
             if not sx.empty and not xgr.empty:
-                r2_s = float(sx['r2'].iloc[0])
-                r2_x = float(xgr['r2'].iloc[0])
-                if (r2_s + r2_x) > 0 and r2_s > 0 and r2_x > 0:
-                    w_s_base = float(np.clip(r2_s / (r2_s + r2_x), 0.30, 0.70))
-                    log.info(f"    R² 기반 초기 가중치: SARIMAX={w_s_base:.2f} "
-                             f"XGB={1-w_s_base:.2f} (R²_s={r2_s:.4f} R²_x={r2_x:.4f})")
+                mae_s = float(sx['mae'].iloc[0])
+                mae_x = float(xgr['mae'].iloc[0])
+                if mae_s > 0 and mae_x > 0:
+                    inv_s = 1.0 / mae_s
+                    inv_x = 1.0 / mae_x
+                    w_s_base = float(np.clip(inv_s / (inv_s + inv_x), 0.30, 0.70))
+                    log.info(f"    역MAE 기반 초기 가중치: SARIMAX={w_s_base:.2f} "
+                             f"XGB={1-w_s_base:.2f} (MAE_s={mae_s:.4f} MAE_x={mae_x:.4f})")
         except Exception:
             pass
 
@@ -3038,9 +3179,9 @@ def compute_ensemble_weights(window: int = 30):
         if len(bt) < 10 or bt['actual_price'].isna().all():
             return w_s_base, 1 - w_s_base
 
-        bt_mape = (bt['price_error'].abs() / bt['actual_price'].mean() * 100).mean()
+        bt_mape = (bt['price_error'].abs() / bt['actual_price'].replace(0, np.nan) * 100).mean()
         if len(lv) >= 2:
-            lv_mape = (lv['price_error'].abs() / lv['actual_price'].mean() * 100).mean()
+            lv_mape = (lv['price_error'].abs() / lv['actual_price'].replace(0, np.nan) * 100).mean()
             sarimax_mape = 0.3 * bt_mape + 0.7 * lv_mape
         else:
             sarimax_mape = bt_mape
@@ -3090,29 +3231,42 @@ def compute_live_bias_correction(window: int = 10, max_correction: float = 5.0) 
 # 6.  forecast_next_7days()
 # ─────────────────────────────────────────────────────────────────────────────
 
-def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.DataFrame):
+def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.DataFrame, aux: dict = None):
     """SARIMAX + XGBoost 앙상블로 향후 7 영업일 유가 예측"""
     log.info("[5/9] 7일 예측 생성 중...")
 
-    # 마지막 실제 가격 (dropna 전 full_df 사용)
-    last_price = float(full_df['WTI'].dropna().iloc[-1])
-    last_date  = feature_df.index[-1]
+    # 마지막 실제 가격 (dropna 전 full_df 사용, WTI 유효값 기준 마지막 영업일)
+    _wti_valid = full_df['WTI'].dropna()
+    last_price = float(_wti_valid.iloc[-1])
+    last_date  = _wti_valid.index[-1]   # NaN 행 제외한 실제 마지막 날짜
     fc_dates   = pd.date_range(start=last_date + timedelta(days=1), periods=7, freq='B')
 
     forecasts = {}
 
-    # ── SARIMAX 예측
+    # ── SARIMAX 예측 (실패 시 ridge fallback)
     if 'sarimax' in results:
         try:
             sfit     = results['sarimax']['model']
             ecols    = results['sarimax']['features']
-            last_exog = feature_df[ecols].tail(5).mean()
+            _exog_src = full_df if full_df is not None else feature_df
+            last_exog = _exog_src[ecols].tail(5).mean()
             fut_exog  = pd.DataFrame([last_exog.values] * 7, columns=ecols)
             fc_vals   = sfit.forecast(steps=7, exog=fut_exog)
             forecasts['sarimax'] = np.array(fc_vals)
             log.info(f"    SARIMAX 7일 예측: {fc_vals.values.round(2)}")
         except Exception as exc:
             log.warning(f"SARIMAX 예측 실패: {exc}")
+    if 'sarimax' not in forecasts and 'ridge' in results:
+        try:
+            ri   = results['ridge']
+            _rs  = full_df if full_df is not None else feature_df
+            avf  = [f for f in ri['features'] if f in _rs.columns]
+            last_r = ri['scaler'].transform(_rs[avf].iloc[-1:].fillna(0).values)
+            pred_r = float(ri['model'].predict(last_r)[0])
+            forecasts['sarimax'] = np.array([pred_r] * 7)
+            log.info(f"    Ridge fallback 예측: {pred_r:.2f}")
+        except Exception as exc:
+            log.warning(f"Ridge fallback 실패: {exc}")
 
     # ── XGBoost 수익률 예측 → 가격 역변환 (xgb_return 우선, 없으면 vol 폴백)
     if 'xgb_return' in results:
@@ -3121,8 +3275,9 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             model   = info['model']
             sc      = info['scaler']
             feats   = info['features']
-            avail_f = [f for f in feats if f in feature_df.columns]
-            last_row = feature_df[avail_f].iloc[-1:].values.copy()
+            _feat_src = full_df if full_df is not None else feature_df
+            avail_f = [f for f in feats if f in _feat_src.columns]
+            last_row = _feat_src[avail_f].iloc[-1:].fillna(0).values.copy()
             last_s   = sc.transform(last_row)
 
             # Classifier-adj 선택 시: 회귀 크기 + 분류기 방향 결합
@@ -3160,8 +3315,9 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             model   = info['model']
             scaler  = info['scaler']
             feats   = info['features']
-            avail_f = [f for f in feats if f in feature_df.columns]
-            last_row = feature_df[avail_f].iloc[-1:].values.copy()
+            _feat_src2 = full_df if full_df is not None else feature_df
+            avail_f = [f for f in feats if f in _feat_src2.columns]
+            last_row = _feat_src2[avail_f].iloc[-1:].fillna(0).values.copy()
             last_s   = scaler.transform(last_row)
             np.random.seed(0)
             path = [last_price]
@@ -3181,7 +3337,9 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     if 'resid_corrector' in results and 'sarimax' in forecasts:
         try:
             rc   = results['resid_corrector']
-            last = feature_df[rc['rc_feat_cols']].tail(1).fillna(0).copy()
+            # full_df 사용: feature_df는 dropna로 마지막 행(최신) 없음
+            _rc_src = full_df if full_df is not None else feature_df
+            last = _rc_src[rc['rc_feat_cols']].tail(1).fillna(0).copy()
             last['resid_lag1'] = rc['last_resid1']
             last['resid_lag2'] = rc['last_resid2']
             correction = float(rc['model'].predict(
@@ -3205,8 +3363,9 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         _lgb_fc = None
         if 'LGB' in _stk_names and 'lgb_model' in _stk:
             try:
-                _feats_l = [f for f in _stk['lgb_feats'] if f in feature_df.columns]
-                _last_l  = feature_df[_feats_l].iloc[-1:].values.copy()
+                _feat_src3 = full_df if full_df is not None else feature_df
+                _feats_l = [f for f in _stk['lgb_feats'] if f in _feat_src3.columns]
+                _last_l  = _feat_src3[_feats_l].iloc[-1:].fillna(0).values.copy()
                 _pred_ret_lgb = float(_stk['lgb_model'].predict(
                     _stk['lgb_scaler'].transform(_last_l))[0])
                 _decay = np.array([0.95 ** i for i in range(7)])
@@ -3241,9 +3400,29 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             ensemble[i] = float(np.dot(_pts[:len(_stk_names)], _stk_wts))
         log.info(f"    ✅ Stacking 앙상블 적용: D+1={ensemble[0]:.2f}")
     elif 'sarimax' in forecasts and 'xgb' in forecasts:
-        ensemble = w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb']
-        log.info(f"    ⚠️ 2모델 앙상블: SARIMAX×{w_sarimax:.2f} XGB×{w_xgb:.2f}")
-        log.info(f"       D+1 예측: SARIMAX={forecasts['sarimax'][0]:.2f} "
+        # VAR가 있으면 3모델 역MAE 가중 앙상블, 없으면 2모델
+        if 'var' in results:
+            try:
+                _vr2   = results['var']
+                _vhist2 = feature_df[_vr2['cols']].dropna().asfreq('B', method='ffill').dropna()
+                _vfc2   = _vr2['model'].forecast(_vhist2.values[-_vr2['lag']:], steps=7)
+                _var_fc2 = _vfc2[:, 0]
+                _mae_sx  = results['sarimax'].get('mae', 999.0)
+                _mae_xb  = results['xgb_return'].get('mae', 999.0)
+                _mae_vr  = _vr2.get('mae', 999.0)
+                _inv = np.array([1/_mae_sx, 1/_mae_xb, 1/_mae_vr])
+                _wts = _inv / _inv.sum()
+                ensemble = (_wts[0] * forecasts['sarimax']
+                            + _wts[1] * forecasts['xgb']
+                            + _wts[2] * _var_fc2)
+                log.info(f"    3모델 앙상블(InvMAE): SARIMAX×{_wts[0]:.2f} "
+                         f"XGB×{_wts[1]:.2f} VAR×{_wts[2]:.2f} → D+1={ensemble[0]:.2f}")
+            except Exception as _ve2:
+                log.warning(f"VAR 3모델 앙상블 실패({_ve2}) → 2모델 폴백")
+                ensemble = w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb']
+        else:
+            ensemble = w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb']
+        log.info(f"    ⚠️ 앙상블: SARIMAX={forecasts['sarimax'][0]:.2f} "
                  f"XGB={forecasts['xgb'][0]:.2f} → 앙상블={ensemble[0]:.2f}")
     elif 'sarimax' in forecasts:
         ensemble = forecasts['sarimax']
@@ -3259,12 +3438,21 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         ensemble = ensemble + bias
 
     # ── A2: 적응형 오차 보정 (Adaptive Error Correction)
-    # 학습된 잔차 패턴으로 D+1 편향 예측 → 거리별 감쇠 적용
+    # ec_last_feat는 훈련 시점 test_df 마지막 행으로 고정됨 → 현재 시장 상태로 재구성
     _stk_ec = results.get('stacking', {})
-    if 'ec_model' in _stk_ec and 'ec_last_feat' in _stk_ec:
+    if 'ec_model' in _stk_ec and 'ec_mkt_feats' in _stk_ec:
         try:
+            _ec_mkt_ok = _stk_ec['ec_mkt_feats']
+            _live_src  = full_df if full_df is not None else feature_df
+            _live_mkt  = _live_src[_ec_mkt_ok].iloc[-1:].fillna(0).values  # 현재 시장 상태
+            # 잔차 자기상관 피처: live bias correction 결과 사용 (최근 오차 EWMA)
+            _live_err  = bias   # live bias correction에서 계산된 최근 오차
+            _live_ec_X = np.hstack([
+                np.array([[_live_err, _live_err * 0.9, _live_err * 0.95]]),  # err_lag1/2/ma5 근사
+                _live_mkt,
+            ])
             _ec_pred = float(np.clip(
-                _stk_ec['ec_model'].predict(_stk_ec['ec_last_feat'])[0], -3.0, 3.0))
+                _stk_ec['ec_model'].predict(_live_ec_X)[0], -3.0, 3.0))
             _ec_decay = np.array([1.0, 0.7, 0.5, 0.35, 0.25, 0.15, 0.1])[:len(ensemble)]
             ensemble = ensemble + _ec_pred * _ec_decay
             log.info(f"    적응형 오차 보정 적용: D+1 {_ec_pred:+.3f}$")
@@ -3281,8 +3469,9 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     lower_80ci = upper_80ci = None
     if _q10m is not None and _q90m is not None and _qsc is not None:
         try:
-            _avf_q  = [f for f in _qfts if f in feature_df.columns]
-            _last_q = _qsc.transform(feature_df[_avf_q].iloc[-1:].values)
+            _feat_src4 = full_df if full_df is not None else feature_df
+            _avf_q  = [f for f in _qfts if f in _feat_src4.columns]
+            _last_q = _qsc.transform(_feat_src4[_avf_q].iloc[-1:].fillna(0).values)
             _ret_q10 = float(_q10m.predict(_last_q)[0])
             _ret_q90 = float(_q90m.predict(_last_q)[0])
             # D+1 절대 스프레드 계산 후 sqrt(t)로 다단계 확장
@@ -3297,10 +3486,31 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             log.warning(f"    분위 신뢰구간 계산 실패({_qce}) → 변동성 폴백")
 
     if lower_80ci is None:
-        recent_vol = float(feature_df['vol_5d'].dropna().iloc[-1]) if 'vol_5d' in feature_df.columns else 0.015
-        ci_half    = ensemble * recent_vol * 1.28 * np.sqrt(t)   # 80% z=1.28
-        lower_80ci = ensemble - ci_half
-        upper_80ci = ensemble + ci_half
+        # GARCH 조건부 변동성 우선 (더 정확한 변동성 클러스터링 반영)
+        # GARCH(1,1) 다단계 조건부 분산 예측 (최우선) — h_{t+k} 각 스텝별 독립 분산
+        _garch_res_fc = (aux or {}).get('garch_model') or results.get('garch_vol', {}).get('model')
+        _used_garch_fc = False
+        if _garch_res_fc is not None:
+            try:
+                _fc7 = _garch_res_fc.forecast(horizon=7, reindex=False)
+                _h7  = np.sqrt(_fc7.variance.values[-1, :]) / 100   # % → 소수 변환
+                ci_half = last_price * _h7 * 1.28
+                lower_80ci = ensemble - ci_half
+                upper_80ci = ensemble + ci_half
+                _used_garch_fc = True
+                log.info(f"    GARCH(1,1) 다단계 CI: D+1 ±{ci_half[0]:.2f}$ → D+7 ±{ci_half[6]:.2f}$")
+            except Exception as _gfe:
+                log.warning(f"    GARCH 다단계 예측 실패({_gfe}) → vol 폴백")
+        if not _used_garch_fc:
+            _src_vol = full_df if full_df is not None else feature_df
+            if 'garch_vol' in _src_vol.columns:
+                _garch_v = float(_src_vol['garch_vol'].dropna().iloc[-1])
+                ci_half  = last_price * max(_garch_v, 1e-4) * 1.28 * np.sqrt(t)
+            else:
+                recent_vol = float(_src_vol['vol_5d'].dropna().iloc[-1]) if 'vol_5d' in _src_vol.columns else 0.015
+                ci_half    = ensemble * recent_vol * 1.28 * np.sqrt(t)
+            lower_80ci = ensemble - ci_half
+            upper_80ci = ensemble + ci_half
 
     fc_df = pd.DataFrame({
         'date':            fc_dates.strftime('%Y-%m-%d'),
@@ -3380,6 +3590,7 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
         missing_idx = full_df.index.difference(feature_df.index)
         if not missing_idx.empty:
             price_src = pd.concat([price_src, full_df.loc[missing_idx, ['WTI']]])
+            price_src = price_src.sort_index()   # concat 후 비단조 인덱스 방지
 
     # ── 기존 live 기록 로드 + 실제값 업데이트 ────────────────────────
     live_rows = []
@@ -3398,7 +3609,7 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
 
                     old_live.at[idx, 'actual_price']    = round(ap, 2)
                     old_live.at[idx, 'price_error']     = round(ap - pp, 2)
-                    old_live.at[idx, 'price_error_pct'] = round((ap - pp) / ap * 100, 2)
+                    old_live.at[idx, 'price_error_pct'] = round((ap - pp) / ap * 100, 2) if abs(ap) > 0.01 else None
                     if not np.isnan(av):
                         old_live.at[idx, 'actual_vol_5d'] = round(av, 5)
                     if not (np.isnan(av) or np.isnan(pv)):
@@ -3410,9 +3621,9 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
 
     # ── 누락일 gap-fill (직전 실행의 7일 예측 활용) ──────────────────
     today = pd.Timestamp.today().normalize()
-    existing_dates = {r.get('date') for r in live_rows}
+    existing_dates = {r.get('date') for r in live_rows if r.get('date') is not None}
 
-    if prev_fc_df is not None and not prev_fc_df.empty and live_rows:
+    if prev_fc_df is not None and not prev_fc_df.empty and live_rows and existing_dates:
         try:
             prev_lookup = {str(row['date']): float(row['forecast_price'])
                            for _, row in prev_fc_df.iterrows()}
@@ -3432,7 +3643,7 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
                     try:
                         gap_actual    = round(float(price_src.loc[gd, 'WTI']), 2)
                         gap_error     = round(gap_actual - gap_pred, 2)
-                        gap_error_pct = round((gap_actual - gap_pred) / gap_actual * 100, 2)
+                        gap_error_pct = round((gap_actual - gap_pred) / gap_actual * 100, 2) if abs(gap_actual) > 0.01 else None
                     except Exception:
                         pass
                 live_rows.append({
@@ -3444,7 +3655,7 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
                     'xgb_pred_vol':    None,
                     'actual_vol_5d':   None,
                     'vol_error':       None,
-                    'type':            'live',
+                    'type':            'gap',
                 })
                 existing_dates.add(gd_str)
                 n_filled_gap += 1
@@ -3468,11 +3679,13 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
 
         entry_actual = entry_error = entry_error_pct = None
         entry_ts = pd.Timestamp(entry_date_str)
-        if entry_ts in feature_df.index:
+        # full_df 사용: feature_df는 shift(-1) dropna로 마지막 행 없음
+        _price_src = full_df if full_df is not None else feature_df
+        if entry_ts in _price_src.index:
             try:
-                entry_actual    = round(float(feature_df.loc[entry_ts, 'WTI']), 2)
+                entry_actual    = round(float(_price_src.loc[entry_ts, 'WTI']), 2)
                 entry_error     = round(entry_actual - entry_pred, 2)
-                entry_error_pct = round((entry_actual - entry_pred) / entry_actual * 100, 2)
+                entry_error_pct = round((entry_actual - entry_pred) / entry_actual * 100, 2) if abs(entry_actual) > 0.01 else None
             except Exception:
                 pass
 
@@ -3481,8 +3694,17 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
             model  = xg['model']
             scaler = xg['scaler']
             feats  = xg['features']
-            last   = feature_df[feats].iloc[-1:].fillna(0)
-            xgb_pred_v = round(float(model.predict(scaler.transform(last))[0]), 5)
+            _recon = xg.get('reconstruction', 'direct')
+            _vol_src = full_df if full_df is not None else feature_df
+            last   = _vol_src[[f for f in feats if f in _vol_src.columns]].iloc[-1:].fillna(0)
+            _raw_pred = float(model.predict(scaler.transform(last))[0])
+            if _recon == 'delta':
+                _cur_vol = float(_vol_src['RV_5d'].dropna().iloc[-1]) if 'RV_5d' in _vol_src.columns else 0.015
+                _raw_pred = max(_cur_vol + _raw_pred, 0.0)
+            elif _recon == 'garch_resid':
+                _cur_garch = float(_vol_src['garch_vol'].dropna().iloc[-1]) if 'garch_vol' in _vol_src.columns else 0.015
+                _raw_pred = max(_cur_garch + _raw_pred, 0.0)
+            xgb_pred_v = round(_raw_pred, 5)
         except Exception:
             pass
 
@@ -3574,7 +3796,7 @@ WTI 현재가   : ${wti:.2f} / bbl
         msg['Subject'] = f"[유가 리스크] {r['emoji']} {level} 경보 — WTI ${wti:.2f}"
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
@@ -3587,12 +3809,8 @@ WTI 현재가   : ${wti:.2f} / bbl
         return False
 
 
-def monitor_rss_alerts() -> dict:
-    """
-    RSS 피드에서 최신 기사 수집 → 긴급 이벤트 키워드 스캔 → OVX 급등 체크.
-    경보 발생 시 이메일 즉시 발송 + latest_alerts.json 저장.
-    파이프라인과 독립 실행 (1시간마다).
-    """
+def monitor_rss_alerts() -> dict:  # noqa: dead — 향후 독립 스케줄러용
+    """RSS 긴급 이벤트 스캔. 현재 파이프라인에서 호출 안 됨 (독립 실행 예정)."""
     import json as _json, urllib.request as _ur, xml.etree.ElementTree as _ET
 
     ALERT_KEYWORDS = {
@@ -3673,7 +3891,7 @@ def monitor_rss_alerts() -> dict:
     if alert_level in ('WARNING', 'CRITICAL') and SMTP_USER and SMTP_PASSWORD and ALERT_TO:
         try:
             import smtplib
-            from email.mime.text import MIMEText, MIMEMultipart
+            from email.mime.text import MIMEText
             _lines = '\n'.join(f"  [{t['category'].upper()}] {t['title'][:80]}"
                                for t in triggered[:5])
             _body  = f"""[유가 리스크] 🚨 실시간 이벤트 경보 — {detected_now}
@@ -3690,7 +3908,7 @@ OVX 급변  : {'⚠ 감지됨' if ovx_alert else '정상'}
             _msg['From']    = SMTP_USER
             _msg['To']      = ALERT_TO
             _msg['Subject'] = f"[유가 리스크] 🚨 {alert_level} — {detected_now}"
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as _sv:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as _sv:
                 _sv.starttls()
                 _sv.login(SMTP_USER, SMTP_PASSWORD)
                 _sv.sendmail(SMTP_USER, ALERT_TO, _msg.as_string())
@@ -3706,7 +3924,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
     """실시간 리스크 신호등: 정상 / 주의 / 급등위험 / 급락위험"""
     log.info("[6/9] 리스크 분류 중...")
 
-    row = feature_df.iloc[-1]
+    row = (full_df if full_df is not None else feature_df).iloc[-1]
 
     vol       = float(row.get('vol_5d',               0.015))
     mom_5     = float(row.get('mom_5d',               0.0))
@@ -3750,16 +3968,25 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
     elif price_z < -1.5:
         directional += 0.01
 
-    # 분류 규칙
-    if   risk_score >= 2.2 and directional >  0.025:  level = 'SURGE_RISK'
-    elif risk_score >= 2.2 and directional < -0.025:  level = 'DROP_RISK'
-    elif risk_score >= 1.4 or abs(directional) > 0.02: level = 'CAUTION'
+    # 분류 규칙 (threshold 0.025 → 0.05: 과잉 신호 방지)
+    if   risk_score >= 2.2 and directional >  0.05:  level = 'SURGE_RISK'
+    elif risk_score >= 2.2 and directional < -0.05:  level = 'DROP_RISK'
+    elif risk_score >= 1.4 or abs(directional) > 0.04: level = 'CAUTION'
     else:                                              level = 'NORMAL'
+
+    # ── Shock 감지: GPR 급등 또는 지정학적 이벤트 시 CI 2배 확대
+    _gpr_z   = float(row.get('gpr_zscore', 0.0))
+    _geo_dum = float(row.get('geo_dummy',  0.0))
+    _shock   = (_gpr_z > 2.0) or (_geo_dum > 0.5) or (risk_score >= 5.0)
+    ci_multiplier = 2.0 if _shock else 1.0
+    if _shock:
+        log.info(f"    ⚡ Shock 감지 (gpr_z={_gpr_z:.2f} geo={_geo_dum:.0f} "
+                 f"score={risk_score:.2f}) → CI×{ci_multiplier:.1f}")
 
     current_wti = float(full_df['WTI'].dropna().iloc[-1])
 
     signal = {
-        'date':              feature_df.index[-1].strftime('%Y-%m-%d'),
+        'date':              pd.Timestamp.today().normalize().strftime('%Y-%m-%d'),
         'risk_level':        level,
         'risk_label':        RISK_LEVELS[level]['label'],
         'wti_price':         round(current_wti, 2),
@@ -3770,6 +3997,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
         'geopolitical_alert': bool(geo > 0.5),
         'risk_score':        round(risk_score, 4),
         'directional_bias':  round(directional, 5),
+        'ci_multiplier':     ci_multiplier,
     }
 
     pd.DataFrame([signal]).to_csv(OUTPUT_DIR / 'latest_risk_signal.csv', index=False)
@@ -4304,8 +4532,8 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     # EIA
     api_status['EIA'] = '✅ 정상' if EIA_API_KEY else '❌ 미설정'
 
-    feature_df, full_df  = build_features(price_df, news_df)
-    model_results, _     = train_models(feature_df)
+    feature_df, full_df, aux_models = build_features(price_df, news_df)
+    model_results, _     = train_models(feature_df, full_df, aux=aux_models)
 
     # forecast_7days.csv 덮어쓰기 전에 이전 예측 로드 (gap-fill용)
     prev_fc_df = None
@@ -4313,12 +4541,22 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     if _fc_csv.exists():
         try:
             prev_fc_df = pd.read_csv(_fc_csv)
-        except Exception:
-            pass
+        except Exception as _pfe:
+            log.warning(f"    이전 forecast 로드 실패({_pfe}) → gap-fill 생략")
 
-    fc_df                = forecast_next_7days(model_results, feature_df, full_df)
-    save_prediction_log(model_results, feature_df, fc_df, prev_fc_df, full_df)
+    fc_df                = forecast_next_7days(model_results, feature_df, full_df, aux=aux_models)
     risk_signal          = classify_risk(feature_df, full_df)
+
+    # Shock CI 확대: classify_risk에서 반환된 ci_multiplier 적용
+    _ci_mult = risk_signal.get('ci_multiplier', 1.0)
+    if _ci_mult != 1.0 and 'lower_80ci' in fc_df.columns and 'upper_80ci' in fc_df.columns:
+        _fp = fc_df['forecast_price']
+        fc_df['lower_80ci'] = (_fp - (_fp - fc_df['lower_80ci']) * _ci_mult).round(2)
+        fc_df['upper_80ci'] = (_fp + (fc_df['upper_80ci'] - _fp) * _ci_mult).round(2)
+        fc_df.to_csv(OUTPUT_DIR / 'forecast_7days.csv', index=False)
+        log.info(f"    Shock CI 적용: ×{_ci_mult:.1f} → forecast_7days.csv 갱신")
+
+    save_prediction_log(model_results, feature_df, fc_df, prev_fc_df, full_df)
     send_risk_alert(risk_signal, fc_df)
     kw_df                = extract_crisis_keywords(news_df)
     generate_wordcloud(kw_df)

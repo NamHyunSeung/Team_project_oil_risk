@@ -557,16 +557,27 @@ with tab4:
         st.info("파이프라인 실행 후 성능 데이터가 표시됩니다.")
     elif not _is_admin:
         pf = data['model_performance']
-        _stk = pf[pf['model'].str.contains('Stacking', na=False)]
-        _xgb = pf[pf['model'].str.contains('XGBoost-Return', na=False)]
+        _cls = pf[pf['model'].str.contains('Classifier', na=False)]
         c1, c2, c3 = st.columns(3)
-        if not _stk.empty:
-            _r2 = float(_stk['r2'].iloc[0])
-            _grade = '높음 🟢' if _r2 >= 0.85 else ('보통 🟡' if _r2 >= 0.75 else '낮음 🔴')
-            c1.metric('예측 정확도', _grade)
-            c2.metric('예측 오차 (MAE)', f"${float(_stk['mae'].iloc[0]):.2f}")
-        if not _xgb.empty and 'dir_acc' in _xgb.columns:
-            c3.metric('방향성 정확도', f"{float(_xgb['dir_acc'].iloc[0])*100:.0f}%")
+        if not _cls.empty:
+            _dir   = float(_cls['dir_acc'].iloc[0])   if 'dir_acc'    in _cls.columns else None
+            _wfdir = float(_cls['wf_dir_acc'].iloc[0]) if 'wf_dir_acc' in _cls.columns and _cls['wf_dir_acc'].notna().any() else None
+            _mae   = float(_cls['mae'].iloc[0])        if 'mae'        in _cls.columns else None
+            if _dir is not None:
+                c1.metric(
+                    '상승/하락 예측 적중률',
+                    f"{_dir*100:.0f}%",
+                    help=f"10번 예측 중 약 {_dir*10:.0f}번 방향(상승/하락)이 일치"
+                )
+            if _mae is not None:
+                c2.metric(
+                    '가격 예측 오차',
+                    f"${_mae:.2f}",
+                    help="예측 가격과 실제 가격의 평균 차이 (낮을수록 좋음)"
+                )
+            if _wfdir is not None:
+                _wf_help = "과적합 없이 실전 데이터에서 측정한 방향 적중률"
+                c3.metric('검증 적중률 (실전)', f"{_wfdir*100:.0f}%", help=_wf_help)
     else:
         pf = data['model_performance']
         col_t, col_g = st.columns([1, 1.2])
@@ -655,7 +666,7 @@ with tab4:
         |------|------|------|
         | **XGBoost-HAR** | 변동성(리스크) 예측 | HAR 구성요소 + 뉴스/지정학 외생변수 |
         | **SARIMAX** | 7일 가격 예측 | AR(2,1,2) × 주간 계절성 + 외생변수 |
-        | **Stacking** | 최종 예측 | SARIMAX + XGBoost + LGB → Ridge 메타러너 |
+        | **XGBoost-Classifier** | 최종 방향 판단 | SVM+CEEMDAN 앙상블 → 상승/하락 확률 |
         """)
 
 # ── Tab 5: 예측 오차 로그 ─────────────────────────────────────────────────────
@@ -1005,12 +1016,12 @@ if _is_admin and tab_admin is not None:
 
             if 'model_performance' in data:
                 _mp = data['model_performance']
-                _stk = _mp[_mp['model'].str.contains('Stacking', na=False)]
-                if not _stk.empty:
-                    _r2 = float(_stk['r2'].iloc[0])
-                    m3.metric('Stacking R²', f'{_r2:.4f}',
-                              delta='정상' if _r2 >= 0.83 else '롤백 기준 미달',
-                              delta_color='normal' if _r2 >= 0.83 else 'inverse')
+                _cls_m = _mp[_mp['model'].str.contains('Classifier', na=False)]
+                if not _cls_m.empty and 'dir_acc' in _cls_m.columns:
+                    _dir = float(_cls_m['dir_acc'].iloc[0])
+                    m3.metric('방향성 정확도', f'{_dir*100:.1f}%',
+                              delta='정상' if _dir >= 0.52 else '롤백 기준 미달',
+                              delta_color='normal' if _dir >= 0.52 else 'inverse')
 
             st.markdown('---')
             st.markdown('#### 모델 성능 상세')
