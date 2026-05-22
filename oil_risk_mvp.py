@@ -51,6 +51,9 @@ from collections import Counter
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 EMBED_CACHE_FILE = OUTPUT_DIR / 'news_embed_cache.pkl'
+COT_CACHE_FILE   = OUTPUT_DIR / 'cot_cache.csv'
+COT_RAW_FILE     = Path('annual.txt')   # CFTC 연간 전체 데이터
+XGB_OPTUNA_CACHE = OUTPUT_DIR / 'xgb_optuna_cache.json'
 EMBED_MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
 EMBED_TOP_K      = 15   # WTI 수익률 상관관계 상위 차원 수
 
@@ -86,6 +89,7 @@ EIA_API_KEY      = os.getenv("EIA_API_KEY",      "")
 GPR_FILE         = "data_gpr_daily_recent.xls"   # 프로젝트 폴더에 위치
 DATA_YEARS       = 10                             # 데이터 수집 기간 (XGBoost 학습용)
 SARIMAX_YEARS    = 5                              # SARIMAX 학습 기간 (최근 가격 패턴 집중)
+XGB_YEARS        = 3                              # XGBoost 슬라이딩 윈도우 (최근 레짐 집중)
 
 # ── 이메일 알림 설정 (.env 또는 환경변수)
 # Gmail 사용 시: Google 계정 → 보안 → 앱 비밀번호 생성 후 SMTP_PASSWORD에 입력
@@ -137,6 +141,13 @@ try:
 except ImportError:
     _PMDARIMA = False
     log.warning("pmdarima 없음 → 기본 SARIMAX 파라미터 사용")
+
+try:
+    import optuna as _optuna
+    _optuna.logging.set_verbosity(_optuna.logging.WARNING)
+    _OPTUNA = True
+except ImportError:
+    _OPTUNA = False
 
 
 
@@ -795,6 +806,73 @@ def _guardian_fetch_chunk(api_key: str, from_dt: str, to_dt: str) -> list:
     return articles
 
 
+def fetch_cot() -> pd.DataFrame:
+    """CFTC WTI COT 데이터 로드 (캐시 + annual.txt 갱신).
+    반환: DatetimeIndex, 컬럼 [cot_net_pct, cot_mm_long_pct, cot_mm_short_pct]
+    """
+    cache = pd.DataFrame()
+    if COT_CACHE_FILE.exists():
+        try:
+            cache = pd.read_csv(COT_CACHE_FILE, parse_dates=['date'])
+            cache = cache.set_index('date')
+            cache.index = pd.to_datetime(cache.index).normalize()
+        except Exception:
+            cache = pd.DataFrame()
+
+    # annual.txt에서 WTI-PHYSICAL (067651) 파싱
+    if COT_RAW_FILE.exists():
+        try:
+            rows = []
+            with open(COT_RAW_FILE, encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    if '067651' not in line:
+                        continue
+                    parts = [p.strip().strip('"') for p in line.split(',')]
+                    if len(parts) < 20:
+                        continue
+                    try:
+                        date_str = parts[2]   # YYYY-MM-DD
+                        oi       = float(parts[7])
+                        # disaggregated 형식: M_Money Long=13, Short=14
+                        mm_long  = float(parts[12])
+                        mm_short = float(parts[13])
+                        if oi <= 0:
+                            continue
+                        net_pct  = (mm_long - mm_short) / oi * 100
+                        rows.append({
+                            'date': pd.Timestamp(date_str),
+                            'cot_net_pct':      round(net_pct, 4),
+                            'cot_mm_long_pct':  round(mm_long  / oi * 100, 4),
+                            'cot_mm_short_pct': round(mm_short / oi * 100, 4),
+                        })
+                    except (ValueError, IndexError):
+                        continue
+            if rows:
+                new_df = pd.DataFrame(rows).set_index('date')
+                new_df.index = pd.to_datetime(new_df.index).normalize()
+                new_df = new_df[~new_df.index.duplicated(keep='last')]
+                if cache.empty:
+                    cache = new_df
+                else:
+                    # 신규 날짜만 병합
+                    cache = pd.concat([cache, new_df[~new_df.index.isin(cache.index)]])
+                    cache = cache.sort_index()
+                # 캐시 저장
+                try:
+                    cache.reset_index().rename(columns={'index':'date'}).to_csv(
+                        COT_CACHE_FILE, index=False)
+                except Exception:
+                    pass
+        except Exception as _ce:
+            log.warning(f"    COT annual.txt 파싱 실패({_ce})")
+
+    if cache.empty:
+        log.warning("    COT 데이터 없음 → 0으로 대체")
+    else:
+        log.info(f"    COT 로드: {len(cache)}주 ({cache.index[-1].date()}까지)")
+    return cache
+
+
 def fetch_news(days_back: int = None):
     """
     Guardian API로 유가 뉴스 수집 (10년치 캐시 지원).
@@ -1372,6 +1450,12 @@ FEATURE_COLS = [
     'fear_composite', 'vix_amplified',
     # OVX (원유 변동성 지수) 피처
     'ovx_zscore', 'ovx_change', 'ovx_rv_spread',
+    # OVX/VIX 공포 스프레드 (원유 공포 vs 시장 공포)
+    'ovx_vix_ratio_z',
+    # 오더플로우 (매수압력, CMF, 거래량 이상)
+    'buy_pressure', 'cmf_10', 'volume_zscore',
+    # COT (CFTC 기관 포지션 — 역발상 신호)
+    'cot_net_pct', 'cot_chg_z', 'cot_net_z',
     # WTI 선물 커브 (contango/backwardation)
     'futures_spread', 'futures_spread_chg', 'contango_dummy',
     # EIA 미국 원유 재고 (실물 수급 지표)
@@ -1822,6 +1906,65 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df['ovx_change']   = 0.0
         df['ovx_rv_spread']= 0.0
 
+    # ── OVX/VIX 공포 스프레드 (원유 공포 vs 시장 공포)
+    if 'OVX' in df.columns and 'VIX' in df.columns and \
+       df['OVX'].notna().sum() > 30 and df['VIX'].notna().sum() > 30:
+        _ovx_vix = (df['OVX'] / df['VIX'].replace(0, np.nan)).replace(
+            [np.inf, -np.inf], np.nan).ffill().bfill()
+        df['ovx_vix_ratio_z'] = ((_ovx_vix - _ovx_vix.rolling(252).mean()) /
+                                  (_ovx_vix.rolling(252).std() + 1e-8)).fillna(0)
+        log.info(f"    OVX/VIX 공포 스프레드 생성 (μ={_ovx_vix.mean():.3f})")
+    else:
+        df['ovx_vix_ratio_z'] = 0.0
+
+    # ── 오더플로우 피처 (OHLCV 기반, 매수압력 + Chaikin Money Flow)
+    if all(c in df.columns for c in ['WTI_High', 'WTI_Low', 'WTI_Volume']):
+        _h = df['WTI_High'].replace(0, np.nan)
+        _l = df['WTI_Low'].replace(0, np.nan)
+        _c = df['WTI'].replace(0, np.nan)
+        _v = df['WTI_Volume'].replace(0, np.nan)
+        # 매수 압력: (close-low)/(high-low), 1=완전 상단 마감(강세)
+        _hl = (_h - _l).replace(0, np.nan)
+        df['buy_pressure'] = ((_c - _l) / _hl).clip(0, 1).fillna(0.5)
+        # Money Flow Multiplier & CMF 10일
+        _mfm = (((_c - _l) - (_h - _c)) / _hl).fillna(0)
+        _mfv = _mfm * _v
+        df['cmf_10'] = (_mfv.rolling(10).sum() /
+                        _v.rolling(10).sum().replace(0, np.nan)).fillna(0)
+        # Volume z-score (비정상 거래량)
+        df['volume_zscore'] = ((_v - _v.rolling(252).mean()) /
+                               (_v.rolling(252).std() + 1e-8)).fillna(0)
+        log.info(f"    오더플로우 피처 생성 (buy_pressure/cmf_10/volume_zscore)")
+    else:
+        df['buy_pressure']   = 0.5
+        df['cmf_10']         = 0.0
+        df['volume_zscore']  = 0.0
+
+    # ── COT (CFTC Commitments of Traders) 피처
+    try:
+        _cot = fetch_cot()
+        if not _cot.empty and 'cot_net_pct' in _cot.columns:
+            # 주간 → 영업일 ffill (3일 발표 지연 반영: shift(3))
+            _bdays_cot = pd.date_range(_cot.index.min(), df.index.max(), freq='B')
+            _cot_d = _cot.reindex(_bdays_cot).ffill().shift(3)   # 발표 지연
+            _cot_d = _cot_d.reindex(df.index).ffill().bfill().fillna(0)
+            df['cot_net_pct']  = _cot_d['cot_net_pct'].values
+            # 주간 변화량 z-score (역발상 신호: 포지션↑→가격↓, r=-0.12***)
+            _cot_chg = _cot_d['cot_net_pct'].diff(5)
+            _cot_chg_z = ((_cot_chg - _cot_chg.rolling(252).mean()) /
+                          (_cot_chg.rolling(252).std() + 1e-8)).fillna(0)
+            df['cot_chg_z']    = _cot_chg_z.values
+            # 포지션 절대 수준 z-score
+            _cot_z = ((_cot_d['cot_net_pct'] - _cot_d['cot_net_pct'].rolling(252).mean()) /
+                      (_cot_d['cot_net_pct'].rolling(252).std() + 1e-8)).fillna(0)
+            df['cot_net_z']    = _cot_z.values
+            log.info(f"    COT 피처 생성 (net_pct μ={df['cot_net_pct'].mean():.2f})")
+        else:
+            df['cot_net_pct'] = df['cot_chg_z'] = df['cot_net_z'] = 0.0
+    except Exception as _coterr:
+        log.warning(f"    COT 피처 실패({_coterr}) → 0")
+        df['cot_net_pct'] = df['cot_chg_z'] = df['cot_net_z'] = 0.0
+
     # ── WTI 선물 커브 스프레드 피처 (contango/backwardation)
     if 'futures_spread' in df.columns and df['futures_spread'].notna().sum() > 30:
         df['futures_spread']     = df['futures_spread'].ffill().bfill().fillna(0)
@@ -1903,6 +2046,8 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['target_rv_garch']  = df['RV_5d'].shift(-1) - df['garch_vol']
     df['target_price']     = df['WTI'].shift(-1)
     df['target_return'] = np.log(df['WTI'].shift(-1) / df['WTI'])   # 내일 log 수익률
+    for _h in range(2, 8):
+        df[f'target_return_h{_h}'] = np.log(df['WTI'].shift(-_h) / df['WTI'].clip(lower=1e-6))
 
     # 피처 행만 dropna (타깃 NaN 포함 시 훈련용으로만 제거)
     feat_na_cols = [c for c in FEATURE_COLS if c in df.columns]
@@ -2194,28 +2339,36 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             log.warning(f"    HAR-A/B 비교 실패({_hve})")
             results['xgb_har']['reconstruction'] = 'direct'
 
-    # ── GARCH(1,1) 직접 예측 성능 평가 (XGB-HAR와 비교)
+    # ── GARCH(1,1) 1-step ahead 성능 평가 (conditional_volatility 사용)
+    # GARCH는 전체 데이터로 학습됨 → conditional_volatility[t] = h_t^0.5 (t-1까지 사용)
+    # → 1-step ahead 예측으로 test 기간 추출해 공정 비교
     _garch_res = (aux or {}).get('garch_model')
     if _garch_res is not None:
         try:
-            _garch_fc_test = _garch_res.forecast(horizon=len(test_df), reindex=False)
-            _garch_vol_pred = np.sqrt(_garch_fc_test.variance.values[-1, :]) / 100
-            _garch_vol_actual = y_rv_te.values
+            # 1-step: conditional_volatility (% scale) → decimal 변환 후 test 기간 정렬
+            _gcv_pct = _garch_res.conditional_volatility  # % scale Series
+            _gcv_dec = (_gcv_pct / 100).reindex(test_df.index).ffill().bfill()
+            _garch_vol_pred   = _gcv_dec.values
+            _garch_vol_actual = test_df['RV_5d'].values   # 동일 기간 RV (1-step 평가 기준)
+            _n_g = min(len(_garch_vol_pred), len(_garch_vol_actual))
+            _garch_vol_pred   = _garch_vol_pred[:_n_g]
+            _garch_vol_actual = _garch_vol_actual[:_n_g]
+
             _garch_rmse = float(np.sqrt(mean_squared_error(_garch_vol_actual, _garch_vol_pred)))
             _garch_r2   = float(r2_score(_garch_vol_actual, _garch_vol_pred))
             _xgb_r2     = results.get('xgb_har', {}).get('r2', -999)
-            log.info(f"    GARCH(1,1) vol 예측: RMSE={_garch_rmse:.5f}  R²={_garch_r2:.4f}  "
+            log.info(f"    GARCH(1,1) 1-step: RMSE={_garch_rmse:.5f}  R²={_garch_r2:.4f}  "
                      f"(vs XGB-HAR R²={_xgb_r2:.4f})")
             results['garch_vol'] = {
-                'model': _garch_res, 'type': 'vol_5d', 'name': 'GARCH(1,1)',
+                'model': _garch_res, 'type': 'vol_5d', 'name': 'GARCH(1,1) 1-step',
                 'rmse': _garch_rmse, 'mae': float(mean_absolute_error(_garch_vol_actual, _garch_vol_pred)),
                 'r2': _garch_r2,
                 'beats_xgb': _garch_r2 > _xgb_r2,
             }
             if _garch_r2 > _xgb_r2:
-                log.info("    ✅ GARCH > XGB-HAR → vol 예측에 GARCH 사용")
+                log.info("    ✅ GARCH 1-step > XGB-HAR → vol 예측에 GARCH 사용")
             else:
-                log.info("    XGB-HAR ≥ GARCH → XGB-HAR 유지")
+                log.info("    XGB-HAR ≥ GARCH 1-step → XGB-HAR 유지")
         except Exception as _ge:
             log.warning(f"    GARCH 성능 평가 실패({_ge})")
 
@@ -2466,23 +2619,170 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         log.warning(f"    VAR 실패({_ve})")
 
     # ─────────────────────────────────────────────────────────────────────
+    # Model B3: ETS (지수평활 감쇠 트렌드) — SARIMAX 대체 후보
+    # ─────────────────────────────────────────────────────────────────────
+    try:
+        from statsmodels.tsa.holtwinters import ExponentialSmoothing as _ETS
+        log.info("    [B3] ETS(Holt-Winters 감쇠 트렌드) 학습 중...")
+        _cutoff_ets = feature_df.index[-1] - pd.DateOffset(years=SARIMAX_YEARS)
+        _ets_df     = feature_df[feature_df.index >= _cutoff_ets]
+        _n_te_ets   = min(60, int(len(_ets_df) * 0.15))
+        _ets_tr_wti = _ets_df['WTI'].iloc[:-_n_te_ets]
+        _ets_te_wti = _ets_df['WTI'].iloc[-_n_te_ets:]
+
+        _ets_m   = _ETS(_ets_tr_wti, trend='add', damped_trend=True, seasonal=None)
+        _ets_fit = _ets_m.fit(optimized=True)
+
+        # 1-step rolling 예측: Holt 감쇠 상태 갱신 (SARIMAX dynamic=False와 동일 조건)
+        _alpha = float(_ets_fit.params.get('smoothing_level', 0.3))
+        _beta  = float(_ets_fit.params.get('smoothing_trend', 0.1))
+        _phi   = float(_ets_fit.params.get('damping_trend', 0.98))
+        _L = float(_ets_fit.level.iloc[-1])
+        _T = float(_ets_fit.trend.iloc[-1])
+        _ets_preds_1s = []
+        for _y in _ets_te_wti.values:
+            _ets_preds_1s.append(_L + _phi * _T)  # forecast for WTI[t]
+            _Ln = _alpha * _y + (1 - _alpha) * (_L + _phi * _T)
+            _Tn = _beta * (_Ln - _L) + (1 - _beta) * _phi * _T
+            _L, _T = _Ln, _Tn
+        # target_price[t] = WTI[t+1] → 1스텝 앞당긴 예측 사용 (stacking 타깃 정렬)
+        _ets_fc_extra = _L + _phi * _T  # 루프 종료 후 마지막 추가 예측
+        _ets_pred = np.array(_ets_preds_1s[1:] + [_ets_fc_extra])  # 60값, target_price 정렬
+        _actual_tp = _ets_te_wti.values[1:].tolist() + [float(
+            _ets_df['WTI'].iloc[-_n_te_ets + len(_ets_te_wti.values)]) if
+            _n_te_ets < len(_ets_df) else _ets_te_wti.values[-1]]
+        _actual_tp = np.array(_actual_tp[:len(_ets_pred)])
+        # feature_df의 target_price 기준으로 평가 (stacking과 동일 타깃)
+        _tp_arr = _ets_df['target_price'].values[-_n_te_ets:]
+        _n_ev   = min(len(_ets_pred), len(_tp_arr))
+        _mae_ets  = float(mean_absolute_error(_tp_arr[:_n_ev], _ets_pred[:_n_ev]))
+        _r2_ets   = float(r2_score(_tp_arr[:_n_ev], _ets_pred[:_n_ev]))
+        _rmse_ets = float(np.sqrt(mean_squared_error(_tp_arr[:_n_ev], _ets_pred[:_n_ev])))
+        log.info(f"    [B3] ETS(1-step rolling) → RMSE={_rmse_ets:.4f}  "
+                 f"MAE={_mae_ets:.4f}  R²={_r2_ets:.4f}")
+
+        _ets_full_wti = _ets_df['WTI'].copy()
+        try:
+            _ets_full_wti = _ets_full_wti.asfreq('B', method='ffill')
+        except Exception:
+            pass
+        _ets_live = _ETS(_ets_full_wti, trend='add', damped_trend=True,
+                         seasonal=None).fit(optimized=True)
+
+        results['ets'] = {
+            'model': _ets_live, 'type': 'price', 'features': [],
+            'rmse': _rmse_ets, 'mae': _mae_ets, 'r2': _r2_ets,
+            'name': 'ETS(HW-Damped)',
+            'pred_price_test': _ets_pred,
+            'actual_price_test': _ets_te_wti.values,
+            'test_dates': _ets_te_wti.index,
+        }
+    except Exception as _ets_e:
+        log.warning(f"    ETS 실패({_ets_e})")
+
+    # ─────────────────────────────────────────────────────────────────────
     # Model D: XGBoost 수익률 예측 (log_return 타깃)
     # vol 시뮬레이션 대체 — 방향성+크기 직접 학습
     # ─────────────────────────────────────────────────────────────────────
     if _XGB and _SKL and scaler is not None:
         log.info("    [D] XGBoost 수익률 예측 학습 중 (2-pass 피처 선택)...")
         try:
+            # ── [D0] Optuna 하이퍼파라미터 최적화 (캐시 없을 때만 실행, ~2분)
+            _best_xgb_params = None
+            if _OPTUNA or XGB_OPTUNA_CACHE.exists():
+                try:
+                    import hashlib as _hl_xgb, json as _json_opt
+                    _opt_key = _hl_xgb.md5(X_tr_all.values.tobytes()[:8192]).hexdigest()[:16]
+                    _opt_cached = {}
+                    if XGB_OPTUNA_CACHE.exists():
+                        try:
+                            _opt_cached = _json_opt.loads(XGB_OPTUNA_CACHE.read_text())
+                        except Exception:
+                            pass
+                    if _opt_cached.get('key') == _opt_key:
+                        _best_xgb_params = _opt_cached.get('params')
+                        log.info(f"    Optuna 캐시 사용: {_best_xgb_params}")
+                    elif _OPTUNA:
+                        log.info("    [D0] Optuna 탐색 중 (20 trials, 3-fold CV)...")
+                        _tscv_opt = TimeSeriesSplit(n_splits=3)
+                        _n_opt = len(y_ret_tr)
+                        _tw_opt = np.exp(np.log(2) / 252 * np.arange(_n_opt))
+                        _tw_opt /= _tw_opt.mean()
+                        _cw_opt = (np.where(train_df['covid_dummy'].values == 1, 0.35, 1.0)
+                                   if 'covid_dummy' in train_df.columns else np.ones(_n_opt))
+                        _w_opt = _cw_opt * _tw_opt
+                        _X_opt = X_tr_all.values
+                        _y_opt = y_ret_tr.values
+                        _wti_opt = train_df['WTI'].values
+                        _tpx_opt = train_df['target_price'].values
+
+                        def _opt_objective(trial):
+                            _p = {
+                                'n_estimators':    trial.suggest_int('n_est', 200, 600),
+                                'max_depth':       trial.suggest_int('depth', 2, 5),
+                                'learning_rate':   trial.suggest_float('lr', 0.005, 0.05, log=True),
+                                'subsample':       trial.suggest_float('sub', 0.5, 0.9),
+                                'colsample_bytree':trial.suggest_float('col', 0.4, 0.8),
+                                'min_child_weight':trial.suggest_int('mcw', 3, 20),
+                                'reg_alpha':       trial.suggest_float('a', 0.01, 2.0, log=True),
+                                'reg_lambda':      trial.suggest_float('l', 0.5, 10.0, log=True),
+                                'objective': 'reg:pseudohubererror', 'huber_slope': 1.0,
+                                'n_jobs': -1, 'random_state': 42, 'verbosity': 0,
+                            }
+                            _maes = []
+                            for _ti, _vi in _tscv_opt.split(_X_opt):
+                                if len(_ti) < 60:
+                                    continue
+                                _sc_o = StandardScaler()
+                                _Xo_tr = _sc_o.fit_transform(_X_opt[_ti])
+                                _Xo_va = _sc_o.transform(_X_opt[_vi])
+                                _mo = xgb.XGBRegressor(**_p)
+                                _mo.fit(_Xo_tr, _y_opt[_ti], sample_weight=_w_opt[_ti])
+                                _pr_o = np.clip(_mo.predict(_Xo_va), -0.5, 0.5)
+                                _px_o = _wti_opt[_vi] * np.exp(_pr_o)
+                                _maes.append(mean_absolute_error(_tpx_opt[_vi], _px_o))
+                            return float(np.mean(_maes)) if _maes else 999.0
+
+                        _study = _optuna.create_study(
+                            direction='minimize',
+                            sampler=_optuna.samplers.TPESampler(seed=42))
+                        _study.optimize(_opt_objective, n_trials=20,
+                                        show_progress_bar=False)
+                        _best_xgb_params = _study.best_params
+                        log.info(f"    Optuna 완료: {_best_xgb_params} "
+                                 f"(MAE={_study.best_value:.4f})")
+                        try:
+                            XGB_OPTUNA_CACHE.write_text(_json_opt.dumps(
+                                {'key': _opt_key, 'params': _best_xgb_params}))
+                        except Exception:
+                            pass
+                except Exception as _oe:
+                    log.warning(f"    Optuna 실패({_oe}) → 기본 파라미터 사용")
+
             _xgb_p = dict(n_estimators=500, max_depth=3, learning_rate=0.015,
                           subsample=0.75, colsample_bytree=0.6,
                           min_child_weight=8, reg_alpha=0.3, reg_lambda=3.0,
                           objective='reg:pseudohubererror', huber_slope=1.0,
                           n_jobs=-1, random_state=42, verbosity=0)
+            if _best_xgb_params:
+                _xgb_p.update({
+                    'n_estimators':    _best_xgb_params.get('n_est',  _xgb_p['n_estimators']),
+                    'max_depth':       _best_xgb_params.get('depth',  _xgb_p['max_depth']),
+                    'learning_rate':   _best_xgb_params.get('lr',     _xgb_p['learning_rate']),
+                    'subsample':       _best_xgb_params.get('sub',    _xgb_p['subsample']),
+                    'colsample_bytree':_best_xgb_params.get('col',    _xgb_p['colsample_bytree']),
+                    'min_child_weight':_best_xgb_params.get('mcw',    _xgb_p['min_child_weight']),
+                    'reg_alpha':       _best_xgb_params.get('a',      _xgb_p['reg_alpha']),
+                    'reg_lambda':      _best_xgb_params.get('l',      _xgb_p['reg_lambda']),
+                })
+                log.info(f"    Optuna 파라미터 적용: depth={_xgb_p['max_depth']} "
+                         f"lr={_xgb_p['learning_rate']:.4f} n_est={_xgb_p['n_estimators']}")
             # Quantile(α=0.45): 하방 편향 → 방향성 정확도 향상 목적
             _xgb_q = dict(**{k: v for k, v in _xgb_p.items() if k not in ('objective','huber_slope')},
                           objective='reg:quantileerror', quantile_alpha=0.45)
 
             _n_ret  = len(y_ret_tr)
-            _tw_ret = np.exp(np.log(2) / 252 * np.arange(_n_ret)) ; _tw_ret /= _tw_ret.mean()
+            _tw_ret = np.exp(np.log(2) / 126 * np.arange(_n_ret)) ; _tw_ret /= _tw_ret.mean()  # 반감기 6개월 (XGB_YEARS 슬라이딩 효과)
             covid_w_ret = (np.where(train_df['covid_dummy'].values == 1, 0.35, 1.0)
                            if 'covid_dummy' in train_df.columns else np.ones(_n_ret))
             w_ret = covid_w_ret * _tw_ret
@@ -2936,6 +3236,42 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _xr_entry['xgb_cls_blend_w'] = locals().get('_xgb_blend_w_best', 0.0)
             results['xgb_return'] = {**_xr_entry,
             }
+
+            # ── [D3] Multi-step Direct 예측 (h=2..7) — horizon별 직접 학습
+            log.info("    [D3] Multi-step Direct (h=2..7) 학습 중...")
+            _ms_models, _ms_scalers = {}, {}
+            _ms_feats = results['xgb_return']['features']
+            _xgb_ms_p = {k: v for k, v in _xgb_p.items()}
+            _xgb_ms_p['n_estimators'] = min(_xgb_ms_p.get('n_estimators', 300), 300)
+            for _h in range(2, 8):
+                _tgt_h = f'target_return_h{_h}'
+                if _tgt_h not in feature_df.columns:
+                    continue
+                _ms_tr = train_df.dropna(subset=[_tgt_h])
+                if len(_ms_tr) < 120:
+                    continue
+                _avail_ms = [f for f in _ms_feats if f in _ms_tr.columns]
+                if not _avail_ms:
+                    continue
+                _sc_ms = StandardScaler()
+                _Xms = _sc_ms.fit_transform(_ms_tr[_avail_ms])
+                _nw_ms = len(_ms_tr)
+                _tw_ms = np.exp(np.log(2) / 252 * np.arange(_nw_ms))
+                _tw_ms /= _tw_ms.mean()
+                _cw_ms = (np.where(_ms_tr['covid_dummy'].values == 1, 0.35, 1.0)
+                          if 'covid_dummy' in _ms_tr.columns else np.ones(_nw_ms))
+                _m_ms = xgb.XGBRegressor(**_xgb_ms_p)
+                _m_ms.fit(_Xms, _ms_tr[_tgt_h], sample_weight=_cw_ms * _tw_ms)
+                _ms_models[_h] = _m_ms
+                _ms_scalers[_h] = _sc_ms
+                log.info(f"        h={_h}: {len(_ms_tr)}행 학습 완료")
+            if len(_ms_models) == 6:
+                results['xgb_return']['multistep_models'] = _ms_models
+                results['xgb_return']['multistep_scalers'] = _ms_scalers
+                log.info("    ✅ Multi-step Direct 완료 (h=2..7)")
+            else:
+                log.warning(f"    Multi-step 일부 미완성: {len(_ms_models)}/6 모델")
+
         except Exception as exc:
             log.warning(f"    XGBoost 수익률 예측 실패({exc})")
 
@@ -3024,12 +3360,17 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         _stack_parts.append(_var_pred_raw[-len(sx_pred):])
                         _stack_names.append('VAR')
 
+                # ETS는 stacking에서 제외 — SARIMAX가 앙상블 다양성 기여
+                # (ETS 단독 MAE 우수하더라도 스태킹 성능 저하 확인됨)
+                # ETS는 라이브 예측 대체에만 사용 (forecast_next_7days 참조)
+
                 _stack_X = np.column_stack(_stack_parts)
                 _stack_y = y_px_te
 
-                # 역MAE 가중평균 (메타러너 test set 학습 누출 제거)
+                # 역MAE 가중평균 (초기값)
                 _mae_lookup = {
                     'SARIMAX': sx_info.get('mae', 999.0),
+                    'ETS':     results.get('ets', {}).get('mae', 999.0),
                     'XGB':     xr_info.get('mae', 999.0),
                     'LGB':     results.get('lgb_return', {}).get('mae', 999.0),
                     'VAR':     results.get('var', {}).get('mae', 999.0),
@@ -3039,6 +3380,39 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _stack_weights = _inv_mae / _inv_mae.sum()
                 _stack_pred    = _stack_X @ _stack_weights
                 _meta_type     = 'InvMAE-WA'
+
+                # ── Ridge 메타러너 (전반/후반 50:50 분할로 leakage 최소화)
+                _n_meta = len(_stack_y)
+                if _n_meta >= 40 and _SKL:
+                    try:
+                        from sklearn.linear_model import RidgeCV as _RCV
+                        _split_m = _n_meta // 2
+                        _rm = _RCV(alphas=[0.1, 1.0, 10.0, 100.0], cv=3,
+                                   fit_intercept=False)
+                        _rm.fit(_stack_X[:_split_m], _stack_y[:_split_m])
+                        _ridge_half = _rm.predict(_stack_X[_split_m:])
+                        _invmae_half = (_stack_X[_split_m:] @ _stack_weights)
+                        _mae_rh = float(mean_absolute_error(
+                            _stack_y[_split_m:], _ridge_half))
+                        _mae_ih = float(mean_absolute_error(
+                            _stack_y[_split_m:], _invmae_half))
+                        log.info(f"    Ridge 메타러너 MAE(후반)={_mae_rh:.4f}  "
+                                 f"InvMAE(후반)={_mae_ih:.4f}")
+                        if _mae_rh < _mae_ih:
+                            _rm_full = _RCV(alphas=[0.1, 1.0, 10.0, 100.0], cv=3,
+                                            fit_intercept=False)
+                            _rm_full.fit(_stack_X, _stack_y)
+                            _coef = np.maximum(_rm_full.coef_, 0)
+                            if _coef.sum() > 0:
+                                _stack_weights = _coef / _coef.sum()
+                            else:
+                                _stack_weights = (np.abs(_rm_full.coef_)
+                                                  / np.abs(_rm_full.coef_).sum())
+                            _stack_pred = _stack_X @ _stack_weights
+                            _meta_type  = 'Ridge'
+                            log.info(f"    ✅ Ridge 메타러너 채택")
+                    except Exception as _re:
+                        log.warning(f"    Ridge 메타러너 실패({_re})")
 
                 _mae_stack  = float(mean_absolute_error(_stack_y, _stack_pred))
                 _r2_stack   = float(r2_score(_stack_y, _stack_pred))
@@ -3243,8 +3617,12 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
 
     forecasts = {}
 
-    # ── SARIMAX 예측 (실패 시 ridge fallback)
-    if 'sarimax' in results:
+    # ETS는 stacking 훈련 슬롯이 SARIMAX 기반 → live 대체 시 calibration 불일치
+    # 모니터링/진단 전용 (model_performance.csv 기록만), SARIMAX를 항상 사용
+    _use_ets = False
+
+    # ── SARIMAX 예측 (실패 시 ETS → ridge fallback 순으로)
+    if 'sarimax' in results and not _use_ets:
         try:
             sfit     = results['sarimax']['model']
             ecols    = results['sarimax']['features']
@@ -3256,6 +3634,14 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             log.info(f"    SARIMAX 7일 예측: {fc_vals.values.round(2)}")
         except Exception as exc:
             log.warning(f"SARIMAX 예측 실패: {exc}")
+
+    if _use_ets or ('sarimax' not in forecasts and 'ets' in results):
+        try:
+            _ets_fc7 = results['ets']['model'].forecast(7).values
+            forecasts['sarimax'] = _ets_fc7
+            log.info(f"    ETS 7일 예측: {_ets_fc7.round(2)}")
+        except Exception as _ete:
+            log.warning(f"ETS 예측 실패({_ete})")
     if 'sarimax' not in forecasts and 'ridge' in results:
         try:
             ri   = results['ridge']
@@ -3299,10 +3685,23 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                 pred_ret_d1 = abs(_mag_ret) * (1.0 if _prob_up_fc > _cls_th else -1.0)
             else:
                 pred_ret_d1 = float(model.predict(last_s)[0])   # D+1 log 수익률
-            # D+1~7: 수익률 예측값에 불확실성 감쇠 적용 (멀수록 0에 수렴)
-            decay = np.array([0.95 ** i for i in range(7)])
-            ret_path = pred_ret_d1 * decay
-            price_path = last_price * np.exp(np.cumsum(ret_path))
+            # D+1~7: Multi-step Direct (h별 독립 모델) 우선, 없으면 감쇠 체인 fallback
+            _ms_models_fc  = info.get('multistep_models', {})
+            _ms_scalers_fc = info.get('multistep_scalers', {})
+            if _ms_models_fc and len(_ms_models_fc) == 6:
+                price_path = [last_price * np.exp(np.clip(pred_ret_d1, -0.5, 0.5))]
+                for _h in range(2, 8):
+                    _avail_h = [f for f in feats if f in _feat_src.columns]
+                    _last_h  = _ms_scalers_fc[_h].transform(
+                        _feat_src[_avail_h].iloc[-1:].fillna(0).values)
+                    _ret_h = float(np.clip(_ms_models_fc[_h].predict(_last_h)[0], -0.5, 0.5))
+                    price_path.append(last_price * np.exp(_ret_h))
+                price_path = np.array(price_path)
+                log.info(f"    Multi-step Direct: D+1=${price_path[0]:.2f} D+7=${price_path[-1]:.2f}")
+            else:
+                decay = np.array([0.95 ** i for i in range(7)])
+                ret_path = pred_ret_d1 * decay
+                price_path = last_price * np.exp(np.cumsum(ret_path))
             forecasts['xgb'] = np.round(price_path, 2)
             log.info(f"    XGBoost-Return 예측 D+1: ret={pred_ret_d1:+.4f} "
                      f"→ ${price_path[0]:.2f} (방향: {'↑' if pred_ret_d1>0 else '↓'})")
