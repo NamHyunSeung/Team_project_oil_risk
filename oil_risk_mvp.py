@@ -3428,6 +3428,17 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         ensemble = forecasts['sarimax']
     elif 'xgb' in forecasts:
         ensemble = forecasts['xgb']
+    elif 'var' in results:
+        # VAR 단독 fallback (SARIMAX+XGB 모두 실패 시) — R²=0.73으로 최적 대안
+        try:
+            _vfb  = results['var']
+            _vhfb = feature_df[_vfb['cols']].dropna().asfreq('B', method='ffill').dropna()
+            ensemble = _vfb['model'].forecast(_vhfb.values[-_vfb['lag']:], steps=7)[:, 0]
+            log.info(f"    VAR 단독 fallback: D+1={ensemble[0]:.2f}")
+        except Exception as _vfe:
+            log.warning(f"    VAR fallback 실패({_vfe}) → trend 폴백")
+            trend = feature_df['WTI'].diff().tail(5).mean()
+            ensemble = np.array([last_price + trend * (i + 1) for i in range(7)])
     else:
         trend = feature_df['WTI'].diff().tail(5).mean()
         ensemble = np.array([last_price + trend * (i + 1) for i in range(7)])

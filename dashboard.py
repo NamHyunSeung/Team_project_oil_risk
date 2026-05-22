@@ -300,6 +300,9 @@ if 'latest_risk_signal' in data:
     c4.metric("뉴스 건수",  f"{int(sig['news_count'])}건")
     c5.metric("지정학 경보", "🔴 활성" if sig['geopolitical_alert'] else "🟢 없음")
     c6.metric("리스크 점수", f"{sig['risk_score']:.3f}")
+    _ci_mult = sig.get('ci_multiplier', 1.0)
+    if _ci_mult and float(_ci_mult) > 1.0:
+        st.warning(f"⚡ **Shock 감지** — CI 구간 ×{float(_ci_mult):.1f} 확대 적용 중 (GPR 급등 또는 지정학 이벤트)")
 
 st.markdown("---")
 
@@ -678,7 +681,7 @@ with tab5:
     else:
         pl = data['prediction_log'].copy()
         bt = pl[pl['type'] == 'backtest'].copy()
-        lv = pl[pl['type'] == 'live'].copy()
+        lv = pl[pl['type'].isin(['live', 'gap'])].copy()   # gap-fill 항목 포함
         live_confirmed = lv[lv['actual_price'].notna()]
 
         col_s1, col_s2, col_s3, col_s4 = st.columns(4)
@@ -694,10 +697,12 @@ with tab5:
             if not live_confirmed.empty:
                 st.markdown("---")
                 st.markdown("**실시간 예측 기록**")
-                _lv_cols = [c for c in ['date', 'forecast_price', 'actual_price', 'price_error_pct']
+                _lv_cols = [c for c in ['date', 'type', 'forecast_price', 'actual_price', 'price_error_pct']
                             if c in live_confirmed.columns]
                 _lv_show = live_confirmed[_lv_cols].tail(30).copy()
-                _lv_show.columns = [{'date':'날짜','forecast_price':'예측가($)',
+                if 'type' in _lv_show.columns:
+                    _lv_show['type'] = _lv_show['type'].map({'live': '실측', 'gap': '갭채움'})
+                _lv_show.columns = [{'date':'날짜','type':'구분','forecast_price':'예측가($)',
                                      'actual_price':'실제가($)',
                                      'price_error_pct':'오차(%)'}.get(c, c)
                                     for c in _lv_show.columns]
