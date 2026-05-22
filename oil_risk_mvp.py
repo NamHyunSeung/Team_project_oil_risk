@@ -1436,6 +1436,7 @@ NEWS_FEATS = [
     'vix_zscore', 'vix_change',
     'fear_composite', 'vix_amplified',
     'regime',
+    'sent_surprise', 'sent_surprise_z',
 ]
 
 FEATURE_COLS = [
@@ -1501,6 +1502,8 @@ FEATURE_COLS = [
     'ng_mom_5d', 'ng_mom_21d', 'rbob_mom_5d', 'crack_spread_z',
     # EIA 재고 서프라이즈·모멘텀
     'inv_surprise', 'inv_mom4_z',
+    # 감성 서프라이즈 (예상 외 뉴스 충격)
+    'sent_surprise_z',
 ]
 
 
@@ -1888,6 +1891,13 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         df[f'news_sentiment_lag{lag}'] = df['news_sentiment'].shift(lag)
         df[f'news_count_lag{lag}']     = df['news_count'].shift(lag)
 
+    # 감성 서프라이즈: 예상(7일 MA 이전값) 대비 실제 감성 편차 — 시장 미반영 충격
+    _sent_ma7  = df['news_sentiment'].rolling(7, min_periods=1).mean().shift(1)
+    _sent_surp = (df['news_sentiment'] - _sent_ma7).fillna(0)
+    _ss_mu     = _sent_surp.rolling(252).mean()
+    _ss_std    = _sent_surp.rolling(252).std()
+    df['sent_surprise']   = _sent_surp
+    df['sent_surprise_z'] = ((_sent_surp - _ss_mu) / (_ss_std + 1e-8)).fillna(0)
 
     # ── 시차 수익률 & 변동성
     for lag in [1, 2]:
@@ -3366,16 +3376,103 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _nws_imp = sorted(zip(_news_f, _m_nws.feature_importances_),
                                   key=lambda x: x[1], reverse=True)
                 log.info(f"        Top5: {', '.join(f'{n}({v:.3f})' for n,v in _nws_imp[:5])}")
+                _best_h   = 1
+                _best_dir = _dir_nws
+                _best_m   = _m_nws
+                _best_px  = _px_nws
+                _best_mae = _mae_nws
+                _best_r2  = _r2_nws
+
+                # 멀티-lag 탐색 (h=2..5): 뉴스가 D+1보다 D+k에 더 선행할 수 있음
+                for _h_n in range(2, 6):
+                    _tgt_h_n = f'target_return_h{_h_n}'
+                    if _tgt_h_n not in train_df.columns:
+                        continue
+                    _m_h = xgb.XGBRegressor(**_nws_p)
+                    _m_h.fit(_Xtr_nws, train_df[_tgt_h_n].fillna(0),
+                             sample_weight=_cw_nws * _tw_nws)
+                    _pr_h = np.clip(_m_h.predict(_Xte_nws), -0.5, 0.5)
+                    # 방향 정확도: h-step 실제 수익률 기준
+                    _act_h = test_df.get(_tgt_h_n, pd.Series(dtype=float)).values
+                    if len(_act_h) == len(_pr_h):
+                        _dir_h = float((np.sign(_pr_h) == np.sign(_act_h)).mean())
+                    else:
+                        _dir_h = 0.0
+                    # D+1 가격 프록시: h-day 수익률을 1일 환산
+                    _pr_d1 = _pr_h / _h_n
+                    _px_d1 = test_df['WTI'].values * np.exp(_pr_d1)
+                    _mae_h = float(mean_absolute_error(y_px_te, _px_d1))
+                    _r2_h  = float(r2_score(y_px_te, _px_d1))
+                    log.info(f"        h={_h_n}: dir={_dir_h*100:.1f}%  MAE={_mae_h:.4f}")
+                    if _dir_h > _best_dir:
+                        _best_h, _best_dir = _h_n, _dir_h
+                        _best_m, _best_px  = _m_h, _px_d1
+                        _best_mae, _best_r2 = _mae_h, _r2_h
+
+                log.info(f"    [D4] 최적 lag: h={_best_h}  dir={_best_dir*100:.1f}%")
                 results['news_sent'] = {
-                    'model': _m_nws, 'scaler': _sc_nws,
+                    'model': _best_m, 'scaler': _sc_nws,
                     'features': _news_f, 'type': 'price',
-                    'rmse': _rmse_nws, 'mae': _mae_nws, 'r2': _r2_nws,
-                    'dir_acc': _dir_nws,
-                    'name': f'News-Sent XGB (방향성={_dir_nws*100:.1f}%)',
-                    'pred_price_test': _px_nws,
+                    'rmse': float(np.sqrt(mean_squared_error(y_px_te, _best_px))),
+                    'mae': _best_mae, 'r2': _best_r2,
+                    'dir_acc': _best_dir, 'best_lag': _best_h,
+                    'name': f'News-Sent XGB h={_best_h} (방향성={_best_dir*100:.1f}%)',
+                    'pred_price_test': _best_px,
                 }
         except Exception as _nwe:
             log.warning(f"    News-Sent XGB 실패({_nwe})")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Model D4b: Crisis-Regime News 모델 (지정학 위기 기간 전용)
+    # ─────────────────────────────────────────────────────────────────────
+    if _XGB and _SKL and 'news_sent' in results:
+        try:
+            _crisis_mask_tr = (
+                (train_df.get('geo_dummy', pd.Series(0, index=train_df.index)) == 1) |
+                (train_df.get('gpr_zscore', pd.Series(0, index=train_df.index)) > 1.0)
+            )
+            _crisis_mask_te = (
+                (test_df.get('geo_dummy', pd.Series(0, index=test_df.index)) == 1) |
+                (test_df.get('gpr_zscore', pd.Series(0, index=test_df.index)) > 1.0)
+            )
+            _n_crisis_tr = int(_crisis_mask_tr.sum())
+            _n_crisis_te = int(_crisis_mask_te.sum())
+            log.info(f"    [D4b] 위기 구간: train={_n_crisis_tr}일, test={_n_crisis_te}일")
+            if _n_crisis_tr >= 80 and _n_crisis_te >= 5:
+                _nws_f_c = results['news_sent']['features']
+                _sc_c    = results['news_sent']['scaler']
+                _crisis_tr = train_df[_crisis_mask_tr]
+                _crisis_te = test_df[_crisis_mask_te]
+                _Xc_tr = _sc_c.transform(_crisis_tr[_nws_f_c].fillna(0))
+                _Xc_te = _sc_c.transform(_crisis_te[_nws_f_c].fillna(0))
+                _n_c   = len(_crisis_tr)
+                _tw_c  = np.exp(np.log(2) / 126 * np.arange(_n_c)); _tw_c /= _tw_c.mean()
+                _cw_c  = (np.where(_crisis_tr['covid_dummy'].values == 1, 0.35, 1.0)
+                          if 'covid_dummy' in _crisis_tr.columns else np.ones(_n_c))
+                _nws_p_c = dict(n_estimators=200, max_depth=3, learning_rate=0.03,
+                                subsample=0.8, colsample_bytree=0.9,
+                                min_child_weight=5, reg_alpha=1.0, reg_lambda=5.0,
+                                objective='reg:pseudohubererror', huber_slope=1.0,
+                                n_jobs=-1, random_state=42, verbosity=0)
+                _m_c = xgb.XGBRegressor(**_nws_p_c)
+                _m_c.fit(_Xc_tr, _crisis_tr['target_return'].fillna(0),
+                         sample_weight=_cw_c * _tw_c)
+                _pr_c  = np.clip(_m_c.predict(_Xc_te), -0.5, 0.5)
+                _px_c  = _crisis_te['WTI'].values * np.exp(_pr_c)
+                _act_c = _crisis_te['target_price'].values
+                _dir_c = float((np.sign(_pr_c) == np.sign(_crisis_te['target_return'].values)).mean())
+                _mae_c = float(mean_absolute_error(_act_c, _px_c))
+                _r2_c  = float(r2_score(_act_c, _px_c))
+                log.info(f"    [D4b] Crisis 모델 → MAE={_mae_c:.4f}  R²={_r2_c:.4f}  dir={_dir_c*100:.1f}%")
+                results['news_crisis'] = {
+                    'model': _m_c, 'scaler': _sc_c, 'features': _nws_f_c,
+                    'type': 'price', 'rmse': float(np.sqrt(mean_squared_error(_act_c, _px_c))),
+                    'mae': _mae_c, 'r2': _r2_c, 'dir_acc': _dir_c,
+                    'name': f'News-Crisis XGB (방향성={_dir_c*100:.1f}%)',
+                    'n_train': _n_crisis_tr, 'n_test': _n_crisis_te,
+                }
+        except Exception as _ce:
+            log.warning(f"    Crisis 모델 실패({_ce})")
 
     # ─────────────────────────────────────────────────────────────────────
     # Model E: Stacking 앙상블 (SARIMAX + XGBoost → Ridge 메타러너)
@@ -4484,14 +4581,24 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
     elif risk_score >= 1.4 or abs(directional) > 0.04: level = 'CAUTION'
     else:                                              level = 'NORMAL'
 
-    # ── Shock 감지: GPR 급등 또는 지정학적 이벤트 시 CI 2배 확대
-    _gpr_z   = float(row.get('gpr_zscore', 0.0))
-    _geo_dum = float(row.get('geo_dummy',  0.0))
-    _shock   = (_gpr_z > 2.0) or (_geo_dum > 0.5) or (risk_score >= 5.0)
-    ci_multiplier = 2.0 if _shock else 1.0
+    # ── CI 멀티플라이어: Shock 이진 + 뉴스 감성 서프라이즈 연속 조정
+    _gpr_z      = float(row.get('gpr_zscore', 0.0))
+    _geo_dum    = float(row.get('geo_dummy',  0.0))
+    _sent_surp  = abs(float(row.get('sent_surprise_z', 0.0)))
+    _news_smag  = abs(float(row.get('news_sentiment_smooth', 0.0)))
+    _shock      = (_gpr_z > 2.0) or (_geo_dum > 0.5) or (risk_score >= 5.0)
     if _shock:
+        ci_multiplier = 2.0
         log.info(f"    ⚡ Shock 감지 (gpr_z={_gpr_z:.2f} geo={_geo_dum:.0f} "
                  f"score={risk_score:.2f}) → CI×{ci_multiplier:.1f}")
+    elif _sent_surp > 1.5 or _news_smag > 0.4:
+        # 감성 서프라이즈 or 강한 부정 감성 → CI 연속 확대 (1.0 ~ 2.0)
+        _cont_mult = 1.0 + 0.4 * min(_sent_surp / 2.0 + _news_smag, 1.0)
+        ci_multiplier = float(np.clip(_cont_mult, 1.0, 2.0))
+        log.info(f"    📰 뉴스 서프라이즈 CI 조정: surp_z={_sent_surp:.2f} "
+                 f"mag={_news_smag:.2f} → CI×{ci_multiplier:.2f}")
+    else:
+        ci_multiplier = 1.0
 
     current_wti = float(full_df['WTI'].dropna().iloc[-1])
 
