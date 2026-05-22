@@ -1423,6 +1423,21 @@ HAR_FEATURE_COLS = [
     'RV_lag1',
 ]
 
+# 뉴스 감성 전용 베이스 모델 피처 (News-Sent XGBoost용 — 기술적 지표 제외)
+NEWS_FEATS = [
+    'news_sentiment_smooth', 'news_sentiment_smooth7',
+    'news_sentiment_lag1', 'news_sentiment_lag2',
+    'news_count', 'news_count_lag1', 'news_count_neg',
+    'oil_event_score', 'oil_event_score_smooth',
+    'sentiment_magnitude', 'extreme_neg_news',
+    'news_uncertainty',
+    'gpr_zscore', 'geo_dummy',
+    'ovx_zscore', 'ovx_change',
+    'vix_zscore', 'vix_change',
+    'fear_composite', 'vix_amplified',
+    'regime',
+]
+
 FEATURE_COLS = [
     # HAR 구성요소 (일·주·월 실현변동성)
     'RV_1d', 'RV_5d', 'RV_21d',
@@ -3315,6 +3330,54 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
 
 
     # ─────────────────────────────────────────────────────────────────────
+    # Model D4: News-Sentiment XGBoost (뉴스/감성/지정학 전용 베이스 모델)
+    # ─────────────────────────────────────────────────────────────────────
+    if _XGB and _SKL and scaler is not None:
+        try:
+            _news_f = [f for f in NEWS_FEATS
+                       if f in feature_df.columns and feature_df[f].abs().sum() > 0]
+            if len(_news_f) >= 5:
+                log.info(f"    [D4] News-Sent XGB 학습 중 ({len(_news_f)}개 피처)...")
+                _sc_nws = StandardScaler()
+                _Xtr_nws = _sc_nws.fit_transform(train_df[_news_f].fillna(0))
+                _Xte_nws = _sc_nws.transform(test_df[_news_f].fillna(0))
+                _n_nws = len(train_df)
+                _tw_nws = np.exp(np.log(2) / 126 * np.arange(_n_nws))
+                _tw_nws /= _tw_nws.mean()
+                _cw_nws = (np.where(train_df['covid_dummy'].values == 1, 0.35, 1.0)
+                           if 'covid_dummy' in train_df.columns else np.ones(_n_nws))
+                # 강한 정규화: 뉴스 피처는 노이즈 비율 높음
+                _nws_p = dict(n_estimators=300, max_depth=3, learning_rate=0.02,
+                              subsample=0.7, colsample_bytree=0.8,
+                              min_child_weight=20, reg_alpha=3.0, reg_lambda=15.0,
+                              objective='reg:pseudohubererror', huber_slope=1.0,
+                              n_jobs=-1, random_state=42, verbosity=0)
+                _m_nws = xgb.XGBRegressor(**_nws_p)
+                _m_nws.fit(_Xtr_nws, y_ret_tr, sample_weight=_cw_nws * _tw_nws)
+                _pr_nws  = np.clip(_m_nws.predict(_Xte_nws), -0.5, 0.5)
+                _px_nws  = test_df['WTI'].values * np.exp(_pr_nws)
+                _r2_nws  = float(r2_score(y_px_te, _px_nws))
+                _mae_nws = float(mean_absolute_error(y_px_te, _px_nws))
+                _dir_nws = float((np.sign(_pr_nws) == np.sign(y_ret_te.values)).mean())
+                _rmse_nws = float(np.sqrt(mean_squared_error(y_px_te, _px_nws)))
+                log.info(f"    [D4] News-Sent XGB → R²={_r2_nws:.4f}  MAE={_mae_nws:.4f}  "
+                         f"dir={_dir_nws*100:.1f}%")
+                # 피처 중요도 Top5
+                _nws_imp = sorted(zip(_news_f, _m_nws.feature_importances_),
+                                  key=lambda x: x[1], reverse=True)
+                log.info(f"        Top5: {', '.join(f'{n}({v:.3f})' for n,v in _nws_imp[:5])}")
+                results['news_sent'] = {
+                    'model': _m_nws, 'scaler': _sc_nws,
+                    'features': _news_f, 'type': 'price',
+                    'rmse': _rmse_nws, 'mae': _mae_nws, 'r2': _r2_nws,
+                    'dir_acc': _dir_nws,
+                    'name': f'News-Sent XGB (방향성={_dir_nws*100:.1f}%)',
+                    'pred_price_test': _px_nws,
+                }
+        except Exception as _nwe:
+            log.warning(f"    News-Sent XGB 실패({_nwe})")
+
+    # ─────────────────────────────────────────────────────────────────────
     # Model E: Stacking 앙상블 (SARIMAX + XGBoost → Ridge 메타러너)
     # ─────────────────────────────────────────────────────────────────────
     if (_SKL and 'sarimax' in results and 'xgb_return' in results):
@@ -3362,7 +3425,20 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
 
                 # ETS는 stacking에서 제외 — SARIMAX가 앙상블 다양성 기여
                 # (ETS 단독 MAE 우수하더라도 스태킹 성능 저하 확인됨)
-                # ETS는 라이브 예측 대체에만 사용 (forecast_next_7days 참조)
+
+                # ⑤ News-Sentiment XGBoost 추가 (MAE <= LGB이고 dir_acc >= 50% 조건)
+                if 'news_sent' in results:
+                    _newsi = results['news_sent']
+                    _lgb_mae_ref = results.get('lgb_return', {}).get('mae', float('inf'))
+                    _news_mae_ok = _newsi.get('mae', float('inf')) <= _lgb_mae_ref
+                    _news_dir_ok = _newsi.get('dir_acc', 0.0) >= 0.50
+                    if _news_mae_ok and _news_dir_ok:
+                        _stack_parts.append(_newsi['pred_price_test'])
+                        _stack_names.append('NEWS')
+                        log.info(f"    News-Sent stacking 진입: MAE={_newsi['mae']:.4f} dir={_newsi['dir_acc']*100:.1f}%")
+                    else:
+                        log.info(f"    News-Sent 제외: MAE={_newsi.get('mae',0):.4f}(vs LGB {_lgb_mae_ref:.4f}) "
+                                 f"dir={_newsi.get('dir_acc',0)*100:.1f}%")
 
                 _stack_X = np.column_stack(_stack_parts)
                 _stack_y = y_px_te
@@ -3374,6 +3450,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     'XGB':     xr_info.get('mae', 999.0),
                     'LGB':     results.get('lgb_return', {}).get('mae', 999.0),
                     'VAR':     results.get('var', {}).get('mae', 999.0),
+                    'NEWS':    results.get('news_sent', {}).get('mae', 999.0),
                 }
                 _inv_mae = np.array([1.0 / max(_mae_lookup.get(n, 999.0), 1e-6)
                                      for n in _stack_names])
@@ -3440,6 +3517,10 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         _stk_info['lgb_feats']  = results['lgb_return']['features']
                         _stk_info['lgb_scaler'] = results['lgb_return']['scaler']
                         _stk_info['lgb_model']  = results['lgb_return']['model']
+                    if 'news_sent' in results and 'NEWS' in _stack_names:
+                        _stk_info['news_feats']  = results['news_sent']['features']
+                        _stk_info['news_scaler'] = results['news_sent']['scaler']
+                        _stk_info['news_model']  = results['news_sent']['model']
                     results['stacking'] = _stk_info
                     log.info(f"    ✅ Stacking 채택: R²={_r2_stack:.4f}")
 
@@ -3772,6 +3853,23 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             except Exception as _le:
                 log.warning(f"LGB 예측 실패: {_le}")
 
+        # NEWS 예측 생성
+        _news_fc = None
+        if 'NEWS' in _stk_names and 'news_model' in _stk:
+            try:
+                _feat_src_n = full_df if full_df is not None else feature_df
+                _feats_n = [f for f in _stk['news_feats'] if f in _feat_src_n.columns]
+                _last_n  = _feat_src_n[_feats_n].iloc[-1:].fillna(0).values.copy()
+                _pred_ret_nws = float(np.clip(
+                    _stk['news_model'].predict(
+                        _stk['news_scaler'].transform(_last_n))[0], -0.5, 0.5))
+                _decay_n = np.array([0.95 ** i for i in range(7)])
+                _news_fc = last_price * np.exp(np.cumsum(_pred_ret_nws * _decay_n))
+                log.info(f"    News-Sent 예측 D+1: ret={_pred_ret_nws:+.4f} "
+                         f"→ ${_news_fc[0]:.2f}")
+            except Exception as _ne:
+                log.warning(f"News 예측 실패: {_ne}")
+
         # VAR 예측 생성
         _var_fc = None
         if 'VAR' in _stk_names and 'var' in results:
@@ -3793,6 +3891,8 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                 _pts.append(_lgb_fc[i])
             if _var_fc is not None:
                 _pts.append(float(_var_fc[i]))
+            if _news_fc is not None:
+                _pts.append(_news_fc[i])
             # stack_names 순서에 맞게 패딩 (None 베이스는 center로 대체)
             while len(_pts) < len(_stk_names):
                 _pts.append(_sx_fc[i])
