@@ -130,6 +130,13 @@ except ImportError:
     log.warning("lightgbm 없음 → LGB 베이스 모델 미사용")
 
 try:
+    from catboost import CatBoostRegressor as _CBR
+    _CBT = True
+except ImportError:
+    _CBT = False
+    log.warning("catboost 없음 → CatBoost 베이스 모델 미사용")
+
+try:
     from statsmodels.tsa.statespace.sarimax import SARIMAX
     _SARIMAX = True
 except ImportError:
@@ -1504,6 +1511,11 @@ FEATURE_COLS = [
     'inv_surprise', 'inv_mom4_z',
     # 감성 서프라이즈 (예상 외 뉴스 충격)
     'sent_surprise_z',
+    # 크로스에셋 신호 (Gold/Copper: 위험회피·수요선행)
+    'gold_wti_ratio_z', 'copper_gold_ratio_z', 'gold_mom_5d', 'copper_mom_5d',
+    # 가격·재고 기술신호 (MACD 크로스, 모멘텀가속, 재고방향, 감성변화)
+    'macd_cross', 'mom_accel', 'inv_draw_signal', 'inv_surprise_dir',
+    'supply_demand_gap', 'inv_draw_x_macd', 'sentiment_chg3',
 ]
 
 
@@ -2706,6 +2718,66 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         log.warning(f"    ETS 실패({_ets_e})")
 
     # ─────────────────────────────────────────────────────────────────────
+    # Model B4: Prophet (추세 변동점 + 주간·연간 계절성 — SARIMAX 보완 다양성)
+    # ─────────────────────────────────────────────────────────────────────
+    try:
+        from prophet import Prophet as _Prophet
+        import warnings as _wn
+        log.info("    [B4] Prophet 학습 중...")
+        _cutoff_prph = feature_df.index[-1] - pd.DateOffset(years=SARIMAX_YEARS)
+        _prph_full   = feature_df[feature_df.index >= _cutoff_prph][['WTI']].copy()
+        _n_te_prph   = min(60, int(len(_prph_full) * 0.15))
+        _prph_tr_wti = _prph_full['WTI'].iloc[:-_n_te_prph]
+        _prph_te_wti = _prph_full['WTI'].iloc[-_n_te_prph:]
+
+        # Prophet 형식 (ds=날짜, y=WTI 가격)
+        _prph_idx = _prph_tr_wti.index
+        _ds_tr = pd.DatetimeIndex([d.tz_localize(None) if hasattr(d, 'tz') and d.tzinfo else d
+                                    for d in _prph_idx])
+        _prph_train_df = pd.DataFrame({'ds': _ds_tr, 'y': _prph_tr_wti.values})
+
+        _m_prph = _Prophet(
+            daily_seasonality=False, weekly_seasonality=True, yearly_seasonality=True,
+            changepoint_prior_scale=0.05, seasonality_prior_scale=5.0,
+            n_changepoints=25, interval_width=0.80,
+        )
+        with _wn.catch_warnings():
+            _wn.simplefilter('ignore')
+            _m_prph.fit(_prph_train_df)
+
+        # 실제 인덱스에서 다음 거래일 추출 (bdate_range 날짜 불일치 방지)
+        _prph_next_dates, _prph_next_prices = [], []
+        for _t in _prph_te_wti.index:
+            _loc = _prph_full.index.get_loc(_t)
+            if _loc + 1 < len(_prph_full):
+                _nd = _prph_full.index[_loc + 1]
+                _prph_next_dates.append(_nd.tz_localize(None) if getattr(_nd, 'tzinfo', None) else _nd)
+                _prph_next_prices.append(float(_prph_full['WTI'].iloc[_loc + 1]))
+        _prph_te_df = pd.DataFrame({'ds': _prph_next_dates})
+        with _wn.catch_warnings():
+            _wn.simplefilter('ignore')
+            _prph_fc = _m_prph.predict(_prph_te_df)
+        _prph_pred_arr = _prph_fc['yhat'].values
+        _prph_tp_arr   = np.array(_prph_next_prices[:len(_prph_pred_arr)])
+        _n_pr = min(len(_prph_pred_arr), len(_prph_tp_arr))
+        _prph_pred_arr = _prph_pred_arr[:_n_pr]
+        _prph_tp_arr   = _prph_tp_arr[:_n_pr]
+        _mae_prph  = float(mean_absolute_error(_prph_tp_arr, _prph_pred_arr))
+        _r2_prph   = float(r2_score(_prph_tp_arr, _prph_pred_arr))
+        _rmse_prph = float(np.sqrt(mean_squared_error(_prph_tp_arr, _prph_pred_arr)))
+        log.info(f"    [B4] Prophet → RMSE={_rmse_prph:.4f}  MAE={_mae_prph:.4f}  R²={_r2_prph:.4f}")
+        results['prophet'] = {
+            'model': _m_prph, 'type': 'price', 'features': [],
+            'rmse': _rmse_prph, 'mae': _mae_prph, 'r2': _r2_prph,
+            'name': 'Prophet(추세+계절성)',
+            'pred_price_test': _prph_pred_arr,
+            'actual_price_test': _prph_tp_arr,
+            'n_test': _n_pr,
+        }
+    except Exception as _prph_e:
+        log.warning(f"    Prophet 실패({_prph_e})")
+
+    # ─────────────────────────────────────────────────────────────────────
     # Model D: XGBoost 수익률 예측 (log_return 타깃)
     # vol 시뮬레이션 대체 — 방향성+크기 직접 학습
     # ─────────────────────────────────────────────────────────────────────
@@ -3340,6 +3412,42 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
 
 
     # ─────────────────────────────────────────────────────────────────────
+    # Model D5: CatBoost 수익률 예측 (XGB와 다른 귀납 편향 → 앙상블 다양성)
+    # ─────────────────────────────────────────────────────────────────────
+    if _CBT and _SKL and scaler is not None and 'xgb_return' in results:
+        log.info("    [D5] CatBoost 수익률 예측 학습 중...")
+        try:
+            _sc_cbt   = StandardScaler()
+            _Xtr_cbt  = _sc_cbt.fit_transform(X_tr_all)
+            _Xte_cbt  = _sc_cbt.transform(X_te_all)
+            _fs_cbt   = available_feats
+            _cbt_p = dict(
+                iterations=400, depth=4, learning_rate=0.02,
+                l2_leaf_reg=10.0, subsample=0.8, colsample_bylevel=0.8,
+                loss_function='MAE', eval_metric='MAE',
+                random_seed=42, verbose=0, allow_writing_files=False,
+            )
+            _m_cbt   = _CBR(**_cbt_p)
+            _m_cbt.fit(_Xtr_cbt, y_ret_tr.values, sample_weight=w_ret)
+            _pr_cbt  = np.clip(_m_cbt.predict(_Xte_cbt), -0.5, 0.5)
+            _px_cbt  = test_df['WTI'].values * np.exp(_pr_cbt)
+            _mae_cbt  = float(mean_absolute_error(y_px_te, _px_cbt))
+            _r2_cbt   = float(r2_score(y_px_te, _px_cbt))
+            _rmse_cbt = float(np.sqrt(mean_squared_error(y_px_te, _px_cbt)))
+            _dir_cbt  = float((np.sign(_pr_cbt) == np.sign(y_ret_te.values)).mean())
+            log.info(f"    [D5] CatBoost → R²={_r2_cbt:.4f}  MAE={_mae_cbt:.4f}  dir={_dir_cbt*100:.1f}%")
+            results['cat_return'] = {
+                'model': _m_cbt, 'scaler': _sc_cbt, 'features': _fs_cbt,
+                'pred_price_test': _px_cbt,
+                'rmse': _rmse_cbt, 'mae': _mae_cbt, 'r2': _r2_cbt,
+                'dir_acc': _dir_cbt, 'type': 'price',
+                'name': f'CatBoost-Return (방향성={_dir_cbt*100:.1f}%)',
+            }
+        except Exception as exc:
+            log.warning(f"    CatBoost 수익률 예측 실패({exc})")
+
+
+    # ─────────────────────────────────────────────────────────────────────
     # Model D4: News-Sentiment XGBoost (뉴스/감성/지정학 전용 베이스 모델)
     # ─────────────────────────────────────────────────────────────────────
     if _XGB and _SKL and scaler is not None:
@@ -3503,14 +3611,32 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 if 'lgb_return' in results:
                     _lgbi = results['lgb_return']
                     _xgb_mae_ref = xr_info.get('mae', float('inf'))
-                    if _lgbi.get('mae', float('inf')) <= _xgb_mae_ref * 1.10:
+                    _var_mae_ref = results.get('var', {}).get('mae', float('inf'))
+                    # 트리 모델 상관관계 높음 → VAR(비트리 기준) 이하여야 입장
+                    _lgb_thresh = min(_var_mae_ref, _xgb_mae_ref * 1.04)
+                    if _lgbi.get('mae', float('inf')) <= _lgb_thresh:
                         _fs_l  = [f for f in _lgbi['features'] if f in test_df.columns]
                         _Xte_l = _lgbi['scaler'].transform(test_df[_fs_l])
                         lgb_pred_stack = test_df['WTI'].values * np.exp(_lgbi['model'].predict(_Xte_l))
                         _stack_parts.append(lgb_pred_stack)
                         _stack_names.append('LGB')
                     else:
-                        log.info(f"    LGB MAE({_lgbi.get('mae',0):.4f}) > XGB×1.10({_xgb_mae_ref*1.10:.4f}) → Stacking 제외")
+                        log.info(f"    LGB MAE({_lgbi.get('mae',0):.4f}) > 임계값({_lgb_thresh:.4f}) → Stacking 제외")
+
+                # ② CatBoost (MAE ≤ XGB — 동급 이상만, 상관관계 높아 엄격 기준 적용)
+                if 'cat_return' in results:
+                    _cati = results['cat_return']
+                    _xgb_mae_ref = xr_info.get('mae', float('inf'))
+                    if _cati.get('mae', float('inf')) <= _xgb_mae_ref * 1.00:
+                        _fs_c  = [f for f in _cati['features'] if f in test_df.columns]
+                        _Xte_c = _cati['scaler'].transform(test_df[_fs_c].fillna(0))
+                        cat_pred_stack = test_df['WTI'].values * np.exp(
+                            np.clip(_cati['model'].predict(_Xte_c), -0.5, 0.5))
+                        _stack_parts.append(cat_pred_stack)
+                        _stack_names.append('CAT')
+                        log.info(f"    CatBoost stacking 진입: MAE={_cati['mae']:.4f} ≤ XGB")
+                    else:
+                        log.info(f"    CatBoost 제외: MAE={_cati.get('mae',0):.4f} > XGB({_xgb_mae_ref:.4f}) → 모니터링 전용")
 
                 # ③ VAR 예측이 있으면 스택에 추가 (테스트 길이 맞춰 정렬)
                 if 'var' in results:
@@ -3537,6 +3663,21 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         log.info(f"    News-Sent 제외: MAE={_newsi.get('mae',0):.4f}(vs LGB {_lgb_mae_ref:.4f}) "
                                  f"dir={_newsi.get('dir_acc',0)*100:.1f}%")
 
+                # ⑥ Prophet (MAE ≤ SARIMAX×1.05 → 시계열 추세 다양성)
+                if 'prophet' in results:
+                    _prphi = results['prophet']
+                    _sx_mae_ref = sx_info.get('mae', 999.0)
+                    _n_align_pr = min(len(_prphi.get('pred_price_test', [])),
+                                      len(_stack_parts[0]))
+                    if (_prphi.get('mae', 999.0) <= _sx_mae_ref * 1.05
+                            and _n_align_pr == len(_stack_parts[0])):
+                        _stack_parts.append(_prphi['pred_price_test'][:len(_stack_parts[0])])
+                        _stack_names.append('PROPHET')
+                        log.info(f"    Prophet stacking 진입: MAE={_prphi['mae']:.4f} ≤ SARIMAX×1.05={_sx_mae_ref*1.05:.4f}")
+                    else:
+                        log.info(f"    Prophet 제외: MAE={_prphi.get('mae',999):.4f} "
+                                 f"(SARIMAX×1.05={_sx_mae_ref*1.05:.4f})")
+
                 _stack_X = np.column_stack(_stack_parts)
                 _stack_y = y_px_te
 
@@ -3546,8 +3687,10 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     'ETS':     results.get('ets', {}).get('mae', 999.0),
                     'XGB':     xr_info.get('mae', 999.0),
                     'LGB':     results.get('lgb_return', {}).get('mae', 999.0),
+                    'CAT':     results.get('cat_return', {}).get('mae', 999.0),
                     'VAR':     results.get('var', {}).get('mae', 999.0),
                     'NEWS':    results.get('news_sent', {}).get('mae', 999.0),
+                    'PROPHET': results.get('prophet', {}).get('mae', 999.0),
                 }
                 _inv_mae = np.array([1.0 / max(_mae_lookup.get(n, 999.0), 1e-6)
                                      for n in _stack_names])
@@ -3614,10 +3757,16 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         _stk_info['lgb_feats']  = results['lgb_return']['features']
                         _stk_info['lgb_scaler'] = results['lgb_return']['scaler']
                         _stk_info['lgb_model']  = results['lgb_return']['model']
+                    if 'cat_return' in results and 'CAT' in _stack_names:
+                        _stk_info['cat_feats']  = results['cat_return']['features']
+                        _stk_info['cat_scaler'] = results['cat_return']['scaler']
+                        _stk_info['cat_model']  = results['cat_return']['model']
                     if 'news_sent' in results and 'NEWS' in _stack_names:
                         _stk_info['news_feats']  = results['news_sent']['features']
                         _stk_info['news_scaler'] = results['news_sent']['scaler']
                         _stk_info['news_model']  = results['news_sent']['model']
+                    if 'prophet' in results and 'PROPHET' in _stack_names:
+                        _stk_info['prophet_model'] = results['prophet']['model']
                     results['stacking'] = _stk_info
                     log.info(f"    ✅ Stacking 채택: R²={_r2_stack:.4f}")
 
@@ -3933,8 +4082,23 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         _sx_fc      = forecasts['sarimax']
         _xb_fc      = forecasts['xgb']
         _stk        = results['stacking']
-        _stk_wts    = _stk['stack_weights']
+        _stk_wts    = _stk['stack_weights'].copy()
         _stk_names  = _stk.get('stack_names', ['SARIMAX', 'XGB'])
+
+        # 레짐 조건부 가중치 조정 (ovx_z/gpr_z 기반 실시간 조정)
+        _feat_src_r = full_df if full_df is not None else feature_df
+        _cur_ovx_z  = float(_feat_src_r['ovx_zscore'].iloc[-1]) if 'ovx_zscore' in _feat_src_r.columns else 0.0
+        _cur_gpr_z  = float(_feat_src_r['gpr_zscore'].iloc[-1]) if 'gpr_zscore' in _feat_src_r.columns else 0.0
+        _reg_adj = {n: 1.0 for n in _stk_names}
+        if _cur_gpr_z > 2.0 or _cur_ovx_z > 1.5:
+            _reg_adj.update({'VAR': 1.3, 'NEWS': 1.2, 'XGB': 0.8, 'CAT': 0.85, 'SARIMAX': 0.9, 'LGB': 0.85})
+            log.info(f"    레짐: 위기/고공포 (ovx_z={_cur_ovx_z:.2f} gpr_z={_cur_gpr_z:.2f}) → VAR/NEWS↑ XGB↓")
+        elif _cur_ovx_z > 1.0:
+            _reg_adj.update({'VAR': 1.15, 'NEWS': 1.1, 'XGB': 0.95, 'CAT': 0.95})
+            log.info(f"    레짐: 상승변동성 (ovx_z={_cur_ovx_z:.2f}) → VAR/NEWS 소폭↑")
+        _adj_arr = np.array([_reg_adj.get(n, 1.0) for n in _stk_names]) * _stk_wts
+        if _adj_arr.sum() > 0:
+            _stk_wts = _adj_arr / _adj_arr.sum()
 
         # LGB 예측 생성
         _lgb_fc = None
@@ -3949,6 +4113,22 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                 _lgb_fc = last_price * np.exp(np.cumsum(_pred_ret_lgb * _decay))
             except Exception as _le:
                 log.warning(f"LGB 예측 실패: {_le}")
+
+        # CAT 예측 생성
+        _cat_fc = None
+        if 'CAT' in _stk_names and 'cat_model' in _stk:
+            try:
+                _feat_src_c = full_df if full_df is not None else feature_df
+                _feats_c = [f for f in _stk['cat_feats'] if f in _feat_src_c.columns]
+                _last_c  = _feat_src_c[_feats_c].iloc[-1:].fillna(0).values.copy()
+                _pred_ret_cbt = float(np.clip(
+                    _stk['cat_model'].predict(
+                        _stk['cat_scaler'].transform(_last_c))[0], -0.5, 0.5))
+                _decay_c = np.array([0.95 ** i for i in range(7)])
+                _cat_fc  = last_price * np.exp(np.cumsum(_pred_ret_cbt * _decay_c))
+                log.info(f"    CatBoost 예측 D+1: ret={_pred_ret_cbt:+.4f} → ${_cat_fc[0]:.2f}")
+            except Exception as _ce:
+                log.warning(f"CatBoost 예측 실패: {_ce}")
 
         # NEWS 예측 생성
         _news_fc = None
@@ -3966,6 +4146,23 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                          f"→ ${_news_fc[0]:.2f}")
             except Exception as _ne:
                 log.warning(f"News 예측 실패: {_ne}")
+
+        # PROPHET 예측 생성
+        _prph_fc2 = None
+        if 'PROPHET' in _stk_names and 'prophet_model' in _stk:
+            try:
+                import warnings as _wn2
+                _last_known = (full_df if full_df is not None else feature_df).index[-1]
+                _future_dates = pd.bdate_range(
+                    start=_last_known + pd.offsets.BDay(1), periods=7)
+                _prph_fut_df = pd.DataFrame({'ds': _future_dates})
+                with _wn2.catch_warnings():
+                    _wn2.simplefilter('ignore')
+                    _prph_out = _stk['prophet_model'].predict(_prph_fut_df)
+                _prph_fc2 = _prph_out['yhat'].values
+                log.info(f"    Prophet 예측 D+1: ${_prph_fc2[0]:.2f}")
+            except Exception as _pe2:
+                log.warning(f"Prophet 예측 실패: {_pe2}")
 
         # VAR 예측 생성
         _var_fc = None
@@ -3986,10 +4183,14 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             _pts = [_sx_fc[i], _xb_fc[i]]
             if _lgb_fc is not None:
                 _pts.append(_lgb_fc[i])
+            if _cat_fc is not None:
+                _pts.append(_cat_fc[i])
             if _var_fc is not None:
                 _pts.append(float(_var_fc[i]))
             if _news_fc is not None:
                 _pts.append(_news_fc[i])
+            if _prph_fc2 is not None:
+                _pts.append(float(_prph_fc2[i]))
             # stack_names 순서에 맞게 패딩 (None 베이스는 center로 대체)
             while len(_pts) < len(_stk_names):
                 _pts.append(_sx_fc[i])
