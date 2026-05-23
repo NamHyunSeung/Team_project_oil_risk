@@ -4432,6 +4432,12 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         except Exception as _ece_fc:
             log.warning(f"    오차 보정 적용 실패({_ece_fc})")
 
+    # ── 예측값 sanity check: spot 대비 ±30% 초과 시 경고
+    _dev_d1_pct = (ensemble[0] - last_price) / last_price * 100
+    if abs(_dev_d1_pct) > 30.0:
+        log.warning(f"    ⚠ 예측값 편차 과다: D+1={ensemble[0]:.2f}$ vs spot={last_price:.2f}$ "
+                    f"({_dev_d1_pct:+.1f}%) — 데이터/모델 이상 가능성 점검 필요")
+
     # ── 신뢰구간: 분위 회귀(Q10/Q90) 우선, 없으면 변동성 기반 폴백
     t = np.arange(1, 8)
     _xr = results.get('xgb_return', {})
