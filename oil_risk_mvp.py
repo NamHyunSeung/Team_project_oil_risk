@@ -1643,8 +1643,8 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['return_1d']  = df['WTI'].pct_change()
     df['log_return'] = np.log(df['WTI'] / df['WTI'].shift(1))
 
-    # 통계 산출 기준: 훈련 구간만 사용 (미래 누출 방지, N_TEST=60)
-    _n_tr_stat = max(len(df) - 60, 252)
+    # 통계 산출 기준: 훈련 구간만 사용 (미래 누출 방지, N_TEST=90)
+    _n_tr_stat = max(len(df) - 90, 252)
     # ── 극단 수익률 Winsorization (상하위 0.5% 클리핑, 훈련 분위수 적용)
     lo = df['return_1d'].iloc[:_n_tr_stat].quantile(0.005)
     hi = df['return_1d'].iloc[:_n_tr_stat].quantile(0.995)
@@ -1673,8 +1673,8 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         from PyEMD import CEEMDAN as _CEEMDAN
         import hashlib as _hl
         _n_total  = len(df)
-        _n_tr_cem = max(_n_total - 60, _n_total)  # 60 = N_TEST
-        _n_tr_cem = _n_total - 60 if _n_total > 60 else _n_total
+        _n_tr_cem = max(_n_total - 90, _n_total)  # 90 = N_TEST
+        _n_tr_cem = _n_total - 90 if _n_total > 90 else _n_total
         _wti_full = df['WTI'].ffill().values.astype(float)
         _wti_arr  = _wti_full[:_n_tr_cem]          # 훈련 구간만 사용
         _cem_hash = _hl.md5(_wti_arr.tobytes()).hexdigest()[:16]
@@ -2216,7 +2216,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df.dropna(subset=feat_na_cols + ['target_rv', 'target_rv_log', 'target_price', 'target_return',
                                      'target_rv_delta', 'target_rv_garch'], inplace=True)
 
-    if len(df) < 62:  # 최소 훈련(1행) + 테스트(60행) + 여유(1행)
+    if len(df) < 92:  # 최소 훈련(1행) + 테스트(90행) + 여유(1행)
         raise ValueError(f"피처 행 부족: {len(df)}행 (최소 62 필요). 데이터 수집 실패 또는 dropna 과다.")
 
     log.info(f"    피처 완성: {df.shape[0]:,} rows × {df.shape[1]} cols")
@@ -2238,8 +2238,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
     har_feats = [c for c in HAR_FEATURE_COLS if c in feature_df.columns]
     log.info(f"    HAR 피처: {len(har_feats)}개 / 전체: {len(available_feats)}개")
 
-    # ── 테스트셋: 최근 60 영업일 (원샷 장기예측 오차 제거)
-    n_test   = 60
+    # ── 테스트셋: 최근 90 영업일 (원샷 장기예측 오차 제거)
+    n_test   = 90
     train_df = feature_df.iloc[:-n_test]
     test_df  = feature_df.iloc[-n_test:]
 
@@ -2404,7 +2404,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _intra_df['target_intra'] = _intra_df['rv_intraday'].shift(-1)
                 _intra_df = _intra_df.dropna(subset=['target_intra'])
                 if len(_intra_df) > 120:
-                    _n_te_i    = min(60, int(len(_intra_df) * 0.15))
+                    _n_te_i    = min(90, int(len(_intra_df) * 0.15))
                     _intra_tr  = _intra_df.iloc[:-_n_te_i]
                     _intra_te  = _intra_df.iloc[-_n_te_i:]
                     _avail_i   = [c for c in available_feats if c in _intra_tr.columns]
@@ -2565,7 +2565,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     _sx_base = pd.concat([feature_df, _extra]).sort_index()
             cutoff = _sx_base.index[-1] - pd.DateOffset(years=SARIMAX_YEARS)
             sx_df  = _sx_base[_sx_base.index >= cutoff]
-            n_test_sx = min(60, int(len(sx_df) * 0.15))
+            n_test_sx = min(90, int(len(sx_df) * 0.15))
             sx_train  = sx_df.iloc[:-n_test_sx]
             sx_test   = sx_df.iloc[-n_test_sx:]
 
@@ -2745,7 +2745,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             cutoff_v = feature_df.index[-1] - pd.DateOffset(years=SARIMAX_YEARS)
             _vdf     = feature_df[feature_df.index >= cutoff_v][_var_cols].dropna()
             _vdf     = _vdf.asfreq('B', method='ffill').dropna()
-            _n_te_v  = min(60, int(len(_vdf) * 0.15))
+            _n_te_v  = min(90, int(len(_vdf) * 0.15))
             _v_tr    = _vdf.iloc[:-_n_te_v]
             _v_te    = _vdf.iloc[-_n_te_v:]
             # AIC 기준 최적 lag 선택 (최대 10)
@@ -2787,7 +2787,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         log.info("    [B3] ETS(Holt-Winters 감쇠 트렌드) 학습 중...")
         _cutoff_ets = feature_df.index[-1] - pd.DateOffset(years=SARIMAX_YEARS)
         _ets_df     = feature_df[feature_df.index >= _cutoff_ets]
-        _n_te_ets   = min(60, int(len(_ets_df) * 0.15))
+        _n_te_ets   = min(90, int(len(_ets_df) * 0.15))
         _ets_tr_wti = _ets_df['WTI'].iloc[:-_n_te_ets]
         _ets_te_wti = _ets_df['WTI'].iloc[-_n_te_ets:]
 
@@ -2808,7 +2808,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             _L, _T = _Ln, _Tn
         # target_price[t] = WTI[t+1] → 1스텝 앞당긴 예측 사용 (stacking 타깃 정렬)
         _ets_fc_extra = _L + _phi * _T  # 루프 종료 후 마지막 추가 예측
-        _ets_pred = np.array(_ets_preds_1s[1:] + [_ets_fc_extra])  # 60값, target_price 정렬
+        _ets_pred = np.array(_ets_preds_1s[1:] + [_ets_fc_extra])  # 90값, target_price 정렬
         _actual_tp = _ets_te_wti.values[1:].tolist() + [float(
             _ets_df['WTI'].iloc[-_n_te_ets + len(_ets_te_wti.values)]) if
             _n_te_ets < len(_ets_df) else _ets_te_wti.values[-1]]
@@ -4475,12 +4475,12 @@ PRED_LOG_FILE = OUTPUT_DIR / 'prediction_log.csv'
 def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataFrame,
                         prev_fc_df: pd.DataFrame = None, full_df: pd.DataFrame = None):
     """예측 vs 실제 오차 로그 누적 저장
-    - backtest: 60일 테스트셋 (매 실행마다 재구성)
+    - backtest: 90일 테스트셋 (매 실행마다 재구성)
     - live: 실행일 기준 entry + 미실행일은 직전 7일 예측으로 gap-fill
     """
     log.info("    prediction_log.csv 업데이트 중...")
 
-    # ── 백테스트 구간 (60일 테스트셋) ────────────────────────────────
+    # ── 백테스트 구간 (90일 테스트셋) ────────────────────────────────
     bt_rows = []
     sx = results.get('sarimax', {})
     xg = results.get('xgb_har', {})
