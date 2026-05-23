@@ -103,6 +103,22 @@ ALERT_TO      = os.getenv("ALERT_TO",      "")   # 수신 이메일 주소
 COVID_START = '2020-03-11'   # WHO 팬데믹 선언일
 COVID_END   = '2021-06-30'   # 백신 보급 안정화 시점
 
+# ── OPEC+ 주요 회의 날짜 (생산량 결정 포함)
+_OPEC_MEETING_DATES = pd.to_datetime([
+    '2020-01-06','2020-03-06','2020-04-09',
+    '2021-01-05','2021-03-04','2021-04-01','2021-05-27',
+    '2021-07-01','2021-09-01','2021-10-04','2021-11-03','2021-12-02',
+    '2022-02-02','2022-03-02','2022-04-05','2022-06-02',
+    '2022-08-03','2022-09-05','2022-10-05','2022-11-30','2022-12-04',
+    '2023-02-01','2023-03-22','2023-04-02','2023-06-04',
+    '2023-08-16','2023-09-05','2023-11-26',
+    '2024-02-01','2024-03-03','2024-06-02','2024-11-05','2024-12-05',
+    '2025-01-12','2025-02-03','2025-03-03','2025-04-03',
+    '2025-05-05','2025-06-01','2025-07-06','2025-08-03',
+    '2025-09-07','2025-10-05','2025-11-02','2025-12-07',
+    '2026-01-04','2026-02-01','2026-03-01','2026-04-05','2026-05-03',
+])
+
 try:
     from textblob import TextBlob
     _TB = True
@@ -586,9 +602,36 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
 
         log.info(f"      원유 재고 연결 완료: {len(inv)}주치 + 서프라이즈·모멘텀 피처")
     except Exception as exc:
-        log.warning(f"      원유 재고 수집 실패({exc}) → 0 사용")
-        for _c in ('inv_chg_zscore', 'inv_lvl_zscore', 'inv_surprise', 'inv_mom4_z'):
-            df[_c] = 0.0
+        log.warning(f"      EIA API 실패({exc}) → EIA 공개 CSV 시도...")
+        # EIA API 키 없을 때 EIA 공개 XLS 직접 다운로드 (API 키 불필요)
+        try:
+            import urllib.request as _ur2, io as _io2
+            _eia_url = ("https://www.eia.gov/dnav/pet/hist_xls/WCESTUS1w.xls")
+            _req2 = _ur2.Request(_eia_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with _ur2.urlopen(_req2, timeout=15) as _r2:
+                _raw2 = _r2.read()
+            _inv_xl = pd.read_excel(_io2.BytesIO(_raw2), sheet_name=1, skiprows=2,
+                                    index_col=0, parse_dates=True)
+            inv_raw = _inv_xl.iloc[:, 0].dropna().astype(float)
+            inv_raw.index = pd.to_datetime(inv_raw.index)
+            inv_raw = inv_raw.sort_index()
+            inv_chg = inv_raw.diff()
+            def _zscore2(s, w=252):
+                return ((s - s.rolling(w).mean()) / (s.rolling(w).std() + 1e-8)).fillna(0)
+            inv_chg_b   = inv_chg.resample('B').first().ffill()
+            inv_lvl_b   = inv_raw.resample('B').first().ffill()
+            df['inv_chg_zscore'] = _zscore2(inv_chg_b).reindex(df.index).ffill().bfill().fillna(0)
+            df['inv_lvl_zscore'] = _zscore2(inv_lvl_b).reindex(df.index).ffill().bfill().fillna(0)
+            inv_chg_ma4  = inv_chg.shift(1).rolling(4).mean()
+            inv_surp_b   = (inv_chg - inv_chg_ma4).resample('B').first().ffill()
+            df['inv_surprise'] = _zscore2(inv_surp_b).reindex(df.index).ffill().bfill().fillna(0)
+            inv_mom4 = inv_chg.rolling(4).sum().resample('B').first().ffill()
+            df['inv_mom4_z'] = _zscore2(inv_mom4).reindex(df.index).ffill().bfill().fillna(0)
+            log.info(f"      EIA 공개 CSV 연결 완료: {len(inv_raw)}주치")
+        except Exception as exc2:
+            log.warning(f"      EIA 공개 CSV도 실패({exc2}) → 0 사용")
+            for _c in ('inv_chg_zscore', 'inv_lvl_zscore', 'inv_surprise', 'inv_mom4_z'):
+                df[_c] = 0.0
 
     # ── 지정학 더미: GPR Index (Caldara & Iacoviello) ─────────────────────
     df = _attach_gpr(df)
@@ -1505,6 +1548,8 @@ FEATURE_COLS = [
     'covid_dummy',
     # 계절성 (원유 수요 사이클)
     'month_sin', 'month_cos', 'driving_season', 'heating_season',
+    # OPEC 회의 캘린더
+    'opec_days_to_next', 'opec_pre5d', 'opec_post2d',
     # 천연가스·RBOB (에너지 동조화·크랙 스프레드)
     'ng_mom_5d', 'ng_mom_21d', 'rbob_mom_5d', 'crack_spread_z',
     # EIA 재고 서프라이즈·모멘텀
@@ -1703,6 +1748,24 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['month_cos']       = np.cos(2 * np.pi * _month / 12)
     df['driving_season']  = _month.isin([5,6,7,8,9]).astype(float)   # 5~9월 드라이빙 시즌
     df['heating_season']  = _month.isin([11,12,1,2,3]).astype(float)  # 11~3월 난방유 시즌
+
+    # ── OPEC 회의 캘린더 피처
+    _idx_ts = pd.to_datetime(df.index).tz_localize(None)
+    _opec_ts = pd.DatetimeIndex(_OPEC_MEETING_DATES)
+    _days_to_next   = np.full(len(df), 999, dtype=float)
+    _days_since_last = np.full(len(df), 999, dtype=float)
+    for _i, _d in enumerate(_idx_ts):
+        _fut = (_opec_ts - _d).days
+        _pas = (_d - _opec_ts).days
+        _fut_pos = _fut[_fut >= 0]
+        _pas_pos = _pas[_pas >= 0]
+        if len(_fut_pos): _days_to_next[_i]    = float(_fut_pos.min())
+        if len(_pas_pos): _days_since_last[_i] = float(_pas_pos.min())
+    df['opec_days_to_next']  = np.clip(_days_to_next, 0, 30) / 30.0    # 0(당일)~1(30일이상)
+    df['opec_pre5d']         = (_days_to_next  <= 5).astype(float)     # 회의 5일 전 투기구간
+    df['opec_post2d']        = (_days_since_last <= 2).astype(float)   # 회의 2일 후 반응구간
+    log.info(f"    OPEC 캘린더 피처 생성 (pre5d={df['opec_pre5d'].sum():.0f}일 "
+             f"post2d={df['opec_post2d'].sum():.0f}일)")
 
     # ── 이동평균 & 모멘텀
     df['ma_5d']  = df['WTI'].rolling(5).mean()
