@@ -2582,7 +2582,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             sarimax_seasonal = (1, 0, 1, 5)
             _sx_cache_file = OUTPUT_DIR / 'sarimax_order_cache.json'
             import hashlib as _hl
-            _sx_cache_key  = _hl.md5(wti_train.values.tobytes()).hexdigest()[:16]
+            _exog_key = '|'.join(sorted(exog_cols)).encode()
+            _sx_cache_key  = _hl.md5(wti_train.values.tobytes() + _exog_key).hexdigest()[:16]
             _sx_cached = {}
             if _sx_cache_file.exists():
                 try:
