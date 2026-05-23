@@ -4771,12 +4771,24 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
         except Exception:
             pass
 
+        _entry_lower_ci = _entry_upper_ci = None
+        try:
+            _ci_match = fc_df[fc_df['date'] == entry_date_str]
+            _ci_row   = _ci_match if not _ci_match.empty else fc_df.iloc[:1]
+            if 'lower_80ci' in fc_df.columns:
+                _entry_lower_ci = round(float(_ci_row['lower_80ci'].iloc[0]), 2)
+                _entry_upper_ci = round(float(_ci_row['upper_80ci'].iloc[0]), 2)
+        except Exception:
+            pass
+
         new_entry = {
             'date':            entry_date_str,
             'sarimax_pred':    entry_pred,
             'actual_price':    entry_actual,
             'price_error':     entry_error,
             'price_error_pct': entry_error_pct,
+            'lower_80ci':      _entry_lower_ci,
+            'upper_80ci':      _entry_upper_ci,
             'xgb_pred_vol':    xgb_pred_v,
             'actual_vol_5d':   None,
             'vol_error':       None,
@@ -5651,6 +5663,23 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                 if _ratio > 1.5:
                     log.warning(f"    ⚠ 라이브 성능 열화: 라이브 MAE={_live_mae_val:.4f} > "
                                 f"백테스트×1.5 ({_bt_mae_ref:.4f}×1.5={_bt_mae_ref*1.5:.4f})")
+            # ── C: 80% CI 실제 커버리지 검증
+            if 'lower_80ci' in _pl_check.columns and 'upper_80ci' in _pl_check.columns:
+                _ci_rows = _pl_check[
+                    _pl_check['type'].isin(['live', 'gap']) &
+                    _pl_check['actual_price'].notna() &
+                    _pl_check['lower_80ci'].notna() &
+                    _pl_check['upper_80ci'].notna()
+                ]
+                if len(_ci_rows) >= 20:
+                    _covered = (
+                        (_ci_rows['actual_price'] >= _ci_rows['lower_80ci']) &
+                        (_ci_rows['actual_price'] <= _ci_rows['upper_80ci'])
+                    ).mean()
+                    log.info(f"    80% CI 커버리지: {_covered:.1%} (N={len(_ci_rows)})")
+                    if _covered < 0.65:
+                        log.warning(f"    ⚠ CI 과소추정: 실제 커버리지={_covered:.1%} < 65% "
+                                    f"— CI 폭 확대 검토 필요")
         except Exception as _lme:
             log.warning(f"    라이브 성능 모니터링 실패({_lme})")
 
