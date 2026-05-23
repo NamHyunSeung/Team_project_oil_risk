@@ -3894,6 +3894,14 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _coef_str   = ' '.join(f'{n}={w:.3f}' for n, w in zip(_stack_names, _stack_weights))
                 log.info(f"    [E] Stacking({_meta_type}) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
                          f"weights=[{_coef_str}]")
+                # ── 가중치 이상 감지: 단일 모델 지배 또는 음수 가중치 경고
+                for _wn, _wv in zip(_stack_names, _stack_weights):
+                    if _wv > 0.80:
+                        log.warning(f"    ⚠ 스태킹 가중치 편중: {_wn}={_wv:.3f} > 0.80 "
+                                    f"(모델 다양성 저하 가능)")
+                    elif _wv < 0.05:
+                        log.warning(f"    ⚠ 스태킹 가중치 미미: {_wn}={_wv:.3f} < 0.05 "
+                                    f"(해당 모델 기여 없음)")
 
                 # 기존 최고 단일 모델보다 R²·MAE 모두 나을 때만 채택
                 _r2_curr  = max(sx_info['r2'], xr_info['r2'])
