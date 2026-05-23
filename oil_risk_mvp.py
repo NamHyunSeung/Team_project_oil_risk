@@ -70,7 +70,8 @@ def _atomic_csv(df: "pd.DataFrame", path: "Path", **kwargs) -> None:
 EMBED_CACHE_FILE = OUTPUT_DIR / 'news_embed_cache.pkl'
 COT_CACHE_FILE   = OUTPUT_DIR / 'cot_cache.csv'
 COT_RAW_FILE     = Path('annual.txt')   # CFTC 연간 전체 데이터
-XGB_OPTUNA_CACHE = OUTPUT_DIR / 'xgb_optuna_cache.json'
+XGB_OPTUNA_CACHE    = OUTPUT_DIR / 'xgb_optuna_cache.json'
+STACK_WEIGHTS_EMA   = OUTPUT_DIR / 'stacking_weights_ema.json'
 EMBED_MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
 EMBED_TOP_K      = 15   # WTI 수익률 상관관계 상위 차원 수
 
@@ -3950,6 +3951,32 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         _stk_info['news_model']  = results['news_sent']['model']
                     if 'prophet' in results and 'PROPHET' in _stack_names:
                         _stk_info['prophet_model'] = results['prophet']['model']
+                    # ── B: 가중치 EMA 평활화 (라이브 예측용, α=0.3 — 급격한 가중치 전환 방지)
+                    import json as _json_ema
+                    try:
+                        _ema_prev = {}
+                        if STACK_WEIGHTS_EMA.exists():
+                            _ema_prev = _json_ema.loads(STACK_WEIGHTS_EMA.read_text())
+                        _ema_names = _ema_prev.get('names', [])
+                        _ema_wts   = _ema_prev.get('weights', [])
+                        if _ema_names == list(_stack_names) and len(_ema_wts) == len(_stack_weights):
+                            _alpha = 0.3
+                            _prev_w = np.array(_ema_wts)
+                            _smooth_w = _alpha * _stack_weights + (1 - _alpha) * _prev_w
+                            _smooth_w = np.maximum(_smooth_w, 0)
+                            _smooth_w /= _smooth_w.sum()
+                            _delta = np.abs(_smooth_w - _stack_weights).max()
+                            log.info(f"    EMA 가중치 평활화(α=0.3): "
+                                     f"{dict(zip(_stack_names, _smooth_w.round(3)))} "
+                                     f"(최대변화={_delta:.3f})")
+                            _stk_info['stack_weights'] = _smooth_w
+                        STACK_WEIGHTS_EMA.write_text(_json_ema.dumps({
+                            'names':   list(_stack_names),
+                            'weights': list(_stk_info['stack_weights'].round(6).tolist()),
+                        }))
+                    except Exception as _ema_e:
+                        log.warning(f"    가중치 EMA 실패({_ema_e}) → 원본 가중치 사용")
+
                     results['stacking'] = _stk_info
                     log.info(f"    ✅ Stacking 채택: R²={_r2_stack:.4f}")
 
