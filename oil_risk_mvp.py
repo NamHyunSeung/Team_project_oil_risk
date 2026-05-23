@@ -2382,14 +2382,16 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         r2_ho   = float(r2_score(y_rv_te, pred_rv))
         log.info(f"        Hold-out 60d → RMSE={rmse_ho:.5f}  MAE={mae_ho:.5f}  R²={r2_ho:.4f}")
 
-        # ── 과적합 감지 (훈련 R² vs CV R² 비교)
+        # ── 과적합 감지 (최종 모델 기준: 훈련 R² vs 홀드아웃 테스트 R²)
         r2_train = float(r2_score(y_rv_tr, modelA.predict(X_tr_s)))
-        overfit_gap = r2_train - r2_cv
+        overfit_gap = r2_train - r2_ho  # 동일 모델 train vs test (fold 모델과 혼용 방지)
         if overfit_gap > 0.20:
-            log.warning(f"    ⚠️ 과적합 의심: 훈련R²={r2_train:.4f} vs CV R²={r2_cv:.4f} "
+            log.warning(f"    ⚠️ 과적합 의심: 훈련R²={r2_train:.4f} vs 테스트R²={r2_ho:.4f} "
                         f"(gap={overfit_gap:.3f})")
+        elif overfit_gap < -0.10:
+            log.info(f"        테스트>훈련 (시간가중 훈련 정상): 훈련R²={r2_train:.4f} vs 테스트R²={r2_ho:.4f} (gap={overfit_gap:.3f})")
         else:
-            log.info(f"        훈련R²={r2_train:.4f}  CV R²={r2_cv:.4f}  gap={overfit_gap:.3f} (정상)")
+            log.info(f"        훈련R²={r2_train:.4f}  테스트R²={r2_ho:.4f}  gap={overfit_gap:.3f} (정상)")
 
         # ── HAR-Ridge walk-forward CV 평가 후 XGBoost와 비교, 더 좋으면 채택
         try:
@@ -2748,11 +2750,15 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     corrections = rc_model.predict(rc_scaler.transform(X_te_rc[X_rc.columns]))
 
                     corrected = pred_price + corrections
-                    r2_c = float(r2_score(y_px_te, corrected))
-                    r2_s = results['sarimax']['r2']
+                    _ref = y_px_te_sx
+                    mae_c  = float(mean_absolute_error(_ref, corrected[:len(_ref)]))
+                    mae_s  = results['sarimax']['mae']
+                    r2_c   = float(r2_score(_ref, corrected[:len(_ref)]))
+                    r2_s   = results['sarimax']['r2']
 
-                    if r2_c > r2_s:
-                        log.info(f"        잔차 교정 채택 ✓  R²: {r2_s:.4f} → {r2_c:.4f}")
+                    if mae_c < mae_s:
+                        rmse_c = float(np.sqrt(mean_squared_error(_ref, corrected[:len(_ref)])))
+                        log.info(f"        잔차 교정 채택 ✓  MAE: {mae_s:.4f} → {mae_c:.4f}  R²: {r2_s:.4f} → {r2_c:.4f}")
                         # last_resid는 전체 데이터 기준 최신 잔차 사용
                         full_resid = fit_live.resid.reindex(feature_df.index).dropna()
                         results['resid_corrector'] = {
@@ -2764,9 +2770,11 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                             'rc_feat_cols': rc_feat_cols,
                         }
                         results['sarimax']['r2']             = r2_c
+                        results['sarimax']['mae']            = mae_c
+                        results['sarimax']['rmse']           = rmse_c
                         results['sarimax']['pred_price_test'] = corrected
                     else:
-                        log.info(f"        잔차 교정 미채택 (R²: {r2_s:.4f} ≥ {r2_c:.4f})")
+                        log.info(f"        잔차 교정 미채택 (MAE: {mae_s:.4f} ≤ {mae_c:.4f})")
             except Exception as e:
                 log.warning(f"    잔차 교정 실패({e})")
 
@@ -4207,6 +4215,15 @@ def compute_live_bias_correction(window: int = 10, max_correction: float = 5.0) 
 
         # 지수가중 평균 (최근일수록 더 반영)
         errors = lv['price_error'].values.astype(float)
+
+        # 레짐 전환 감지: 최근 3일 부호 vs 이전 부호가 반전 → 최근 3건만 사용
+        if len(errors) >= 5:
+            recent_sign = np.sign(errors[-3:].mean())
+            older_sign  = np.sign(errors[:-3].mean())
+            if recent_sign != 0 and older_sign != 0 and recent_sign != older_sign:
+                errors = errors[-3:]
+                log.info(f"    레짐 전환 감지 (부호 반전) → 최근 {len(errors)}건만 사용")
+
         weights = np.exp(np.linspace(0, 1, len(errors)))
         weights /= weights.sum()
         bias = float(np.dot(weights, errors))
