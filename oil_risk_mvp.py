@@ -72,6 +72,7 @@ COT_CACHE_FILE   = OUTPUT_DIR / 'cot_cache.csv'
 COT_RAW_FILE     = Path('annual.txt')   # CFTC 연간 전체 데이터
 XGB_OPTUNA_CACHE    = OUTPUT_DIR / 'xgb_optuna_cache.json'
 STACK_WEIGHTS_EMA   = OUTPUT_DIR / 'stacking_weights_ema.json'
+FEAT_TRAIN_STATS    = OUTPUT_DIR / 'feature_train_stats.json'
 EMBED_MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
 EMBED_TOP_K      = 15   # WTI 수익률 상관관계 상위 차원 수
 
@@ -2282,6 +2283,23 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
     X_tr_all = train_df[available_feats]
     X_te_all = test_df[available_feats]
 
+    # ── D: 훈련 피처 분포 저장 (라이브 드리프트 감지용)
+    import json as _json_fds
+    try:
+        _fd_stats = {}
+        for _fc in X_tr_all.columns:
+            _col = X_tr_all[_fc].dropna()
+            if len(_col) > 10:
+                _fd_stats[_fc] = {
+                    'p01':  float(_col.quantile(0.01)),
+                    'p99':  float(_col.quantile(0.99)),
+                    'mean': float(_col.mean()),
+                    'std':  float(_col.std()),
+                }
+        FEAT_TRAIN_STATS.write_text(_json_fds.dumps(_fd_stats))
+    except Exception as _fds_e:
+        log.warning(f"    피처 통계 저장 실패({_fds_e})")
+
     results = {}
     scaler  = None
 
@@ -4153,6 +4171,27 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     fc_dates   = pd.date_range(start=last_date + timedelta(days=1), periods=7, freq='B')
 
     forecasts = {}
+
+    # ── D: 라이브 피처 드리프트 감지 (p01/p99 훈련 범위 이탈 경고)
+    if FEAT_TRAIN_STATS.exists():
+        try:
+            import json as _json_fdc
+            _fd_stats = _json_fdc.loads(FEAT_TRAIN_STATS.read_text())
+            _live_row  = feature_df.iloc[-1]
+            _drift_list = []
+            for _fc, _st in _fd_stats.items():
+                if _fc in feature_df.columns:
+                    _val = float(_live_row.get(_fc, np.nan))
+                    if not np.isnan(_val) and (_val < _st['p01'] or _val > _st['p99']):
+                        _drift_list.append(f"{_fc}={_val:.3f}")
+            if _drift_list:
+                log.warning(f"    ⚠ 피처 드리프트 ({len(_drift_list)}개 훈련 p01-p99 이탈): "
+                            f"{', '.join(_drift_list[:5])}"
+                            + (" ..." if len(_drift_list) > 5 else ""))
+            else:
+                log.info("    피처 분포 정상 (모든 피처 훈련 범위 내)")
+        except Exception as _fdce:
+            log.warning(f"    피처 드리프트 체크 실패({_fdce})")
 
     # ETS는 stacking 훈련 슬롯이 SARIMAX 기반 → live 대체 시 calibration 불일치
     # 모니터링/진단 전용 (model_performance.csv 기록만), SARIMAX를 항상 사용
