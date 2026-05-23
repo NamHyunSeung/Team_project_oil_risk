@@ -3484,6 +3484,47 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             except Exception as _cls_e:
                 log.warning(f"    XGB 분류기 실패({_cls_e})")
 
+            # ── 별도 급등탐지기: 3일 3% 급등 → SURGE_RISK 신호 전용 (스태킹 비관여)
+            try:
+                _SURGE_THRESH = 0.03
+                _wti_px_sg = full_df['WTI'] if 'WTI' in full_df.columns else feature_df['WTI']
+                _fwd3_ret_sg = (_wti_px_sg.shift(-3) / _wti_px_sg - 1)
+                _y_surge_tr = (_fwd3_ret_sg.reindex(train_df.index).fillna(0) > _SURGE_THRESH).astype(int).values
+                _y_surge_te = (_fwd3_ret_sg.reindex(test_df.index).fillna(0) > _SURGE_THRESH).astype(int).values
+                _spw_sg = max(1.0, float((_y_surge_tr == 0).sum()) / max(float((_y_surge_tr == 1).sum()), 1.0))
+                from sklearn.feature_selection import mutual_info_classif as _mic_sg
+                _mi_sg = _mic_sg(train_df[available_feats].fillna(0).values, _y_surge_tr, random_state=42)
+                _mi_sg_ranked = sorted(zip(available_feats, _mi_sg), key=lambda x: x[1], reverse=True)
+                _sg_feats = [f for f, _ in _mi_sg_ranked[:25] if f in train_df.columns]
+                _sc_sg = StandardScaler()
+                _Xtr_sg = _sc_sg.fit_transform(train_df[_sg_feats].fillna(0).values)
+                _Xte_sg = _sc_sg.transform(test_df[_sg_feats].fillna(0).values)
+                _xgb_sg_p = dict(
+                    n_estimators=300, max_depth=3, learning_rate=0.02,
+                    subsample=0.75, colsample_bytree=0.6, colsample_bynode=0.8,
+                    min_child_weight=10, reg_alpha=0.5, reg_lambda=3.0,
+                    scale_pos_weight=_spw_sg,
+                    n_jobs=-1, random_state=42, verbosity=0
+                )
+                _sg_mdl = xgb.XGBClassifier(**_xgb_sg_p)
+                _sg_mdl.fit(_Xtr_sg, _y_surge_tr,
+                            sample_weight=np.exp(0.002 * np.arange(len(_y_surge_tr))))
+                _sg_prob_te = _sg_mdl.predict_proba(_Xte_sg)[:, 1]
+                _sg_pred_te = (_sg_prob_te > 0.5).astype(int)
+                _sg_recall = float(_sg_pred_te[_y_surge_te == 1].mean()) if _y_surge_te.sum() > 0 else 0.0
+                _sg_prec   = float(_y_surge_te[_sg_pred_te == 1].mean()) if _sg_pred_te.sum() > 0 else 0.0
+                _sg_f1     = 2 * _sg_recall * _sg_prec / max(_sg_recall + _sg_prec, 1e-9)
+                log.info(f"    [급등탐지기] recall={_sg_recall*100:.1f}%  prec={_sg_prec*100:.1f}%  "
+                         f"F1={_sg_f1*100:.1f}%  spw={_spw_sg:.1f}  surge_days={_y_surge_te.sum()}")
+                results['surge_detector'] = {
+                    'model': _sg_mdl, 'scaler': _sc_sg, 'features': _sg_feats,
+                    'surge_recall': _sg_recall, 'surge_precision': _sg_prec,
+                    'surge_f1': _sg_f1, 'surge_thresh': _SURGE_THRESH,
+                    'name': f'SurgeDetect-XGB (recall={_sg_recall*100:.1f}%)',
+                }
+            except Exception as _sge:
+                log.warning(f"    급등탐지기 실패({_sge})")
+
             # 후보 모델: MAE 기준 선택피처 vs 전체피처, + Quantile
             _candidates = [
                 (_mae_f, _dir_f, _mD_full, _sc_full, _pr_f, _px_f, _r2_f, available_feats, 'MSE-전체'),
@@ -5201,7 +5242,7 @@ OVX 급변  : {'⚠ 감지됨' if ovx_alert else '정상'}
     return result
 
 
-def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir: int = 0) -> dict:
+def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir: int = 0, surge_prob: float = 0.0) -> dict:
     """실시간 리스크 신호등: 정상 / 주의 / 급등위험 / 급락위험"""
     log.info("[6/9] 리스크 분류 중...")
 
@@ -5258,6 +5299,10 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
             else:
                 directional *= 0.75   # 모델·모멘텀 반대 방향 → 신호 약화
 
+    # 3일 급등탐지기 확률 반영: surge_prob > 0.55이면 directional 상향
+    if surge_prob > 0.55:
+        directional += (surge_prob - 0.50) * 0.4
+
     # 분류 규칙 (threshold 0.025 → 0.05: 과잉 신호 방지)
     if   risk_score >= 2.2 and directional >  0.05:  level = 'SURGE_RISK'
     elif risk_score >= 2.2 and directional < -0.05:  level = 'DROP_RISK'
@@ -5298,6 +5343,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
         'risk_score':        round(risk_score, 4),
         'directional_bias':  round(directional, 5),
         'ci_multiplier':     ci_multiplier,
+        'surge_prob_3d':     round(surge_prob, 3),
     }
 
     _atomic_csv(pd.DataFrame([signal]), OUTPUT_DIR / 'latest_risk_signal.csv', index=False)
@@ -5847,7 +5893,20 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     fc_df                = forecast_next_7days(model_results, feature_df, full_df, aux=aux_models)
     _last_wti = float(feature_df['WTI'].iloc[-1]) if 'WTI' in feature_df.columns else 0.0
     _fc_dir   = int(np.sign(float(fc_df['forecast_price'].iloc[0]) - _last_wti)) if _last_wti > 0 else 0
-    risk_signal          = classify_risk(feature_df, full_df, forecast_dir=_fc_dir)
+    _surge_p = 0.0
+    _sg_info = model_results.get('surge_detector')
+    if _sg_info is not None:
+        try:
+            _sg_m  = _sg_info['model']
+            _sg_fs = _sg_info['features']
+            _sg_sc = _sg_info['scaler']
+            _sgf_ok = [f for f in _sg_fs if f in feature_df.columns]
+            _sg_in  = _sg_sc.transform(feature_df[_sgf_ok].iloc[-1:].fillna(0).values)
+            _surge_p = float(_sg_m.predict_proba(_sg_in)[0, 1])
+            log.info(f"    3일급등확률: {_surge_p*100:.1f}%")
+        except Exception as _spe:
+            log.warning(f"    급등확률 계산 실패({_spe})")
+    risk_signal = classify_risk(feature_df, full_df, forecast_dir=_fc_dir, surge_prob=_surge_p)
 
     # Shock CI 확대: classify_risk에서 반환된 ci_multiplier 적용
     _ci_mult = risk_signal.get('ci_multiplier', 1.0)
