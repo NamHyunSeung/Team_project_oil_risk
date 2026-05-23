@@ -737,6 +737,15 @@ def fetch_data(start_date=None, end_date=None):
         df = _patch_wti_with_fred(df, start_date, end_date)
 
         log.info(f"    yfinance 성공: {len(df):,} rows")
+        # ── 데이터 신선도 체크: WTI 최신 날짜 기준 영업일 경과 확인
+        for _sc, _col in [('WTI', 'WTI'), ('Brent', 'Brent'), ('DXY', 'DXY')]:
+            if _col in df.columns:
+                _last = df[_col].dropna().index.max()
+                if pd.notna(_last):
+                    _bdays_lag = len(pd.bdate_range(_last, datetime.today())) - 1
+                    if _bdays_lag > 2:
+                        log.warning(f"    ⚠ {_sc} 데이터 스테일: 최신={_last.date()}, "
+                                    f"영업일 경과={_bdays_lag}일 (yfinance 지연 의심)")
         return df
 
     except Exception as e:
