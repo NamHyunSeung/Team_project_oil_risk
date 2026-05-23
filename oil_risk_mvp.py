@@ -3827,7 +3827,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 if _n_meta >= 40 and _SKL:
                     try:
                         from sklearn.linear_model import RidgeCV as _RCV
-                        _split_m = _n_meta // 2
+                        _split_m = _n_meta // 3
                         _rm = _RCV(alphas=[0.1, 1.0, 10.0, 100.0], cv=3,
                                    fit_intercept=False)
                         _rm.fit(_stack_X[:_split_m], _stack_y[:_split_m])
