@@ -5842,9 +5842,15 @@ if __name__ == '__main__':
                         help='자동 실행 시각 0~23 (기본: 6)')
     parser.add_argument('--minute', type=int, default=0,
                         help='자동 실행 분  0~59 (기본: 0)')
+    parser.add_argument('--rss-alerts', action='store_true',
+                        help='RSS 긴급 이벤트 스캔 + 이메일 경보만 실행 (파이프라인 생략)')
     args = parser.parse_args()
 
     if args.schedule:
         schedule_daily(args.hour, args.minute)
+    elif args.rss_alerts:
+        import json as _json
+        result = monitor_rss_alerts()
+        print(_json.dumps(result, ensure_ascii=False, indent=2))
     else:
         run_pipeline()
