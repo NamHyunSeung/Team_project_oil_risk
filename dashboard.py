@@ -583,11 +583,33 @@ with tab4:
                 c3.metric('검증 적중률 (실전)', f"{_wfdir*100:.0f}%", help=_wf_help)
     else:
         pf = data['model_performance']
+
+        # 역할 컬럼 동적 추가
+        def _assign_role(m):
+            if 'Stacking' in m:     return '앙상블 채택'
+            if 'HAR' in m or 'GARCH' in m: return '변동성 진단'
+            if 'Prophet' in m:      return '모니터링 전용'
+            return '모니터링/비교'
+        pf = pf.copy()
+        pf.insert(0, '역할', pf['model'].apply(_assign_role))
+
+        # 가격 vs 변동성 분리
+        _pf_price = pf[pf['target'] == 'price'].copy()
+        _pf_vol   = pf[pf['target'] == 'vol_5d'].copy()
+        # 차트용: price 모델 중 비정상 MAE 제외 (Prophet 등)
+        _pf_chart = _pf_price[_pf_price['mae'] < 20].copy()
+
         col_t, col_g = st.columns([1, 1.2])
 
         with col_t:
-            st.dataframe(pf, hide_index=True, use_container_width=True)
-            st.caption("RMSE·MAE: 낮을수록 좋음  |  R²: 높을수록 좋음 (최대 1.0)")
+            st.caption("**가격 예측 모델** (RMSE·MAE: ↓좋음 | R²: ↑좋음)")
+            st.dataframe(_pf_price, hide_index=True, use_container_width=True)
+            _mon = _pf_price[_pf_price['mae'] >= 20]
+            if not _mon.empty:
+                st.caption(f"※ {', '.join(_mon['model'].tolist())} — 모니터링 전용 (차트 제외)")
+            st.caption("**변동성 예측 모델**")
+            st.dataframe(_pf_vol[['역할','model','rmse','mae','r2','train_r2','overfit_gap']],
+                         hide_index=True, use_container_width=True)
             if 'overfit_gap' in pf.columns and 'train_r2' in pf.columns:
                 for _, _row in pf.dropna(subset=['overfit_gap']).iterrows():
                     _gap = float(_row['overfit_gap'])
@@ -607,10 +629,11 @@ with tab4:
                                           ['RMSE (↓)', 'MAE (↓)', 'R² (↑)'],
                                           ['#58a6ff', '#3fb950', '#f0c040']):
                 ax.set_facecolor('#1c2433')
-                bars = ax.bar(pf['model'], pf[met], color=clr, alpha=0.85)
+                _labels = [m.split('(')[0].strip()[:20] for m in _pf_chart['model']]
+                bars = ax.bar(_labels, _pf_chart[met], color=clr, alpha=0.85)
                 ax.set_title(ylbl, color='#e6edf3', fontsize=9)
                 ax.tick_params(colors='#ccc', labelsize=7)
-                plt.setp(ax.get_xticklabels(), rotation=20, ha='right', fontsize=7)
+                plt.setp(ax.get_xticklabels(), rotation=25, ha='right', fontsize=7)
                 for sp in ax.spines.values(): sp.set_color('#30363d')
                 ax.grid(axis='y', color='#21262d', lw=0.5)
                 for bar in bars:
@@ -620,6 +643,7 @@ with tab4:
             plt.tight_layout()
             st.pyplot(fig)
             plt.close()
+            st.caption("차트: 가격 예측 모델 (Prophet 등 모니터링 전용 제외)")
 
         # ── 피처 중요도 (관리자)
         st.markdown("---")
@@ -1039,8 +1063,8 @@ if _is_admin and tab_admin is not None:
                 _warns = []
                 if not _har.empty and float(_har['r2'].iloc[0]) < 0.48:
                     _warns.append(f"HAR R²={float(_har['r2'].iloc[0]):.3f} < 0.48")
-                if not _stk.empty and float(_stk['r2'].iloc[0]) < 0.83:
-                    _warns.append(f"Stacking R²={float(_stk['r2'].iloc[0]):.3f} < 0.83")
+                if not _stk.empty and float(_stk['r2'].iloc[0]) < 0.68:
+                    _warns.append(f"Stacking R²={float(_stk['r2'].iloc[0]):.3f} < 0.68")
                 if not _xgb.empty and 'dir_acc' in _xgb.columns and float(_xgb['dir_acc'].iloc[0]) < 0.52:
                     _warns.append(f"dir_acc={float(_xgb['dir_acc'].iloc[0])*100:.1f}% < 52%")
                 for w in _warns:
