@@ -2311,11 +2311,11 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
 
         log.info("    [A] XGBoost-HAR (5-fold walk-forward CV) 학습 중...")
         if _XGB:
-            # 정규화 대폭 강화 (과적합 gap=0.44 → 목표 gap<0.15)
+            # fold 모델과 동일 파라미터 (CV가 성능 검증 완료, 최종 모델만 과도 정규화시 r2_ho 급락)
             modelA = xgb.XGBRegressor(
-                n_estimators=300, max_depth=3, learning_rate=0.02,
-                subsample=0.7, colsample_bytree=0.6,
-                min_child_weight=15, reg_alpha=1.0, reg_lambda=5.0,
+                n_estimators=600, max_depth=5, learning_rate=0.025,
+                subsample=0.8, colsample_bytree=0.7,
+                min_child_weight=5, reg_alpha=0.05, reg_lambda=1.0,
                 n_jobs=-1, random_state=42, verbosity=0,
             )
         else:
@@ -2953,6 +2953,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             'pred_price_test': _prph_pred_arr,
             'actual_price_test': _prph_tp_arr,
             'n_test': _n_pr,
+            'benchmark_only': True,
         }
     except Exception as _prph_e:
         log.warning(f"    Prophet 실패({_prph_e})")
