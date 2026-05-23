@@ -3931,6 +3931,18 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _coef_str   = ' '.join(f'{n}={w:.3f}' for n, w in zip(_stack_names, _stack_weights))
                 log.info(f"    [E] Stacking({_meta_type}) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
                          f"weights=[{_coef_str}]")
+                # ── E: 다구간 성능 평가 (레짐 의존성 측정, 재훈련 없이 서브윈도우)
+                _n_te = len(_stack_y)
+                _win_maes = {n: float(mean_absolute_error(_stack_y[-w:], _stack_pred[-w:]))
+                             for n, w in [('전체', _n_te), ('후반60', 60), ('후반45', 45)]
+                             if w <= _n_te}
+                if len(_win_maes) >= 2:
+                    _mae_sigma = float(np.std(list(_win_maes.values())))
+                    _wstr = '  '.join(f'{k}={v:.4f}' for k, v in _win_maes.items())
+                    log.info(f"    다구간 MAE: {_wstr}  (σ={_mae_sigma:.4f})")
+                    if _mae_sigma > 0.5:
+                        log.warning(f"    ⚠ 성능 분산 과다(σ={_mae_sigma:.4f}) "
+                                    f"— 특정 기간 레짐 의존 가능성")
                 # ── 가중치 이상 감지: 단일 모델 지배 또는 음수 가중치 경고
                 for _wn, _wv in zip(_stack_names, _stack_weights):
                     if _wv > 0.80:
