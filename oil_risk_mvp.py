@@ -1487,6 +1487,9 @@ NEWS_FEATS = [
     'fear_composite', 'vix_amplified',
     'regime',
     'sent_surprise', 'sent_surprise_z',
+    # 시장 맥락 (뉴스 신호 증폭/감쇠)
+    'opec_days_to_next', 'opec_pre5d',   # OPEC 회의 근접 시 뉴스 신뢰도 상승
+    'inv_mom4_z', 'inv_surprise',          # 재고 추세 → 뉴스 방향성 검증
 ]
 
 FEATURE_COLS = [
