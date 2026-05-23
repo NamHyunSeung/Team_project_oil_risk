@@ -2541,6 +2541,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         'dxy_change', 'demand_shock', 'supply_shock', 'vix_change',
         'brent_wti_spread', 'ovx_change', 'futures_spread',
         'oil_event_score_smooth', 'news_sentiment_smooth7',
+        'inv_mom4_z',
     ] if c in feature_df.columns]
     log.info("    [B] SARIMAX 학습 + 1-step ahead 평가 중...")
 
@@ -3846,8 +3847,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         _wt_fh  = _inv_fh / _inv_fh.sum()
                         _adapt_half = _stack_X[_split_m:] @ _wt_fh
                         _mae_ah = float(mean_absolute_error(_stack_y[_split_m:], _adapt_half))
-                        log.info(f"    Ridge 메타러너 MAE(후반)={_mae_rh:.4f}  "
-                                 f"InvMAE(후반)={_mae_ih:.4f}  WF-Adapt(후반)={_mae_ah:.4f}")
+                        log.info(f"    Ridge(후반)={_mae_rh:.4f}  InvMAE(후반)={_mae_ih:.4f}  "
+                                 f"WF-Adapt(후반)={_mae_ah:.4f}")
 
                         best_half_mae = min(_mae_rh, _mae_ih, _mae_ah)
                         if best_half_mae == _mae_ah and _mae_ah < _mae_ih:
