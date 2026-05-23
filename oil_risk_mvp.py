@@ -3484,9 +3484,9 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             except Exception as _cls_e:
                 log.warning(f"    XGB 분류기 실패({_cls_e})")
 
-            # ── 별도 급등탐지기: 3일 3% 급등 → SURGE_RISK 신호 전용 (스태킹 비관여)
+            # ── 별도 급등탐지기: 3일 5% 급등 → SURGE_RISK 신호 전용 (스태킹 비관여)
             try:
-                _SURGE_THRESH = 0.03
+                _SURGE_THRESH = 0.05
                 _wti_px_sg = full_df['WTI'] if 'WTI' in full_df.columns else feature_df['WTI']
                 _fwd3_ret_sg = (_wti_px_sg.shift(-3) / _wti_px_sg - 1)
                 _y_surge_tr = (_fwd3_ret_sg.reindex(train_df.index).fillna(0) > _SURGE_THRESH).astype(int).values
@@ -3510,7 +3510,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _sg_mdl.fit(_Xtr_sg, _y_surge_tr,
                             sample_weight=np.exp(0.002 * np.arange(len(_y_surge_tr))))
                 _sg_prob_te = _sg_mdl.predict_proba(_Xte_sg)[:, 1]
-                _sg_pred_te = (_sg_prob_te > 0.5).astype(int)
+                _sg_pred_te = (_sg_prob_te > 0.30).astype(int)
                 _sg_recall = float(_sg_pred_te[_y_surge_te == 1].mean()) if _y_surge_te.sum() > 0 else 0.0
                 _sg_prec   = float(_y_surge_te[_sg_pred_te == 1].mean()) if _sg_pred_te.sum() > 0 else 0.0
                 _sg_f1     = 2 * _sg_recall * _sg_prec / max(_sg_recall + _sg_prec, 1e-9)
@@ -5299,8 +5299,8 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
             else:
                 directional *= 0.75   # 모델·모멘텀 반대 방향 → 신호 약화
 
-    # 3일 급등탐지기 확률 반영: surge_prob > 0.55이면 directional 상향
-    if surge_prob > 0.55:
+    # 3일 급등탐지기 확률 반영: surge_prob > 0.45이면 directional 상향 (5% 타깃 기준 확률 낮아짐)
+    if surge_prob > 0.45:
         directional += (surge_prob - 0.50) * 0.4
 
     # 분류 규칙 (threshold 0.025 → 0.05: 과잉 신호 방지)
