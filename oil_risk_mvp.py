@@ -599,9 +599,9 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
         # 주간 변화량 (천 배럴, 음수=감소=강세)
         inv_chg = inv.diff()
 
-        # 주간 → 영업일 ffill
-        inv_chg_bday   = inv_chg.resample('B').first().ffill()
-        inv_level_bday = inv.resample('B').first().ffill()
+        # 주간 → 영업일 ffill (EIA 발표 지연 +3영업일: 금요일 기준, 다음 수요일 발표)
+        inv_chg_bday   = inv_chg.resample('B').first().shift(3).ffill()
+        inv_level_bday = inv.resample('B').first().shift(3).ffill()
 
         # z-score 정규화
         def _zscore(s, w=252):
@@ -612,11 +612,11 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
 
         # 서프라이즈: 실제 변화량 vs 직전 4주 이동평균 대비 이탈 (shift(1)로 당주 자기참조 방지)
         inv_chg_ma4 = inv_chg.shift(1).rolling(4).mean()
-        inv_surprise_raw = (inv_chg - inv_chg_ma4).resample('B').first().ffill()
+        inv_surprise_raw = (inv_chg - inv_chg_ma4).resample('B').first().shift(3).ffill()
         df['inv_surprise'] = _zscore(inv_surprise_raw).reindex(df.index).ffill().bfill().fillna(0)
 
         # 4주 연속 방향성 모멘텀 (증가/감소 추세)
-        inv_mom4 = inv_chg.rolling(4).sum().resample('B').first().ffill()
+        inv_mom4 = inv_chg.rolling(4).sum().resample('B').first().shift(3).ffill()
         df['inv_mom4_z'] = _zscore(inv_mom4).reindex(df.index).ffill().bfill().fillna(0)
 
         log.info(f"      원유 재고 연결 완료: {len(inv)}주치 + 서프라이즈·모멘텀 피처")
@@ -637,14 +637,14 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
             inv_chg = inv_raw.diff()
             def _zscore2(s, w=252):
                 return ((s - s.rolling(w).mean()) / (s.rolling(w).std() + 1e-8)).fillna(0)
-            inv_chg_b   = inv_chg.resample('B').first().ffill()
-            inv_lvl_b   = inv_raw.resample('B').first().ffill()
+            inv_chg_b   = inv_chg.resample('B').first().shift(3).ffill()
+            inv_lvl_b   = inv_raw.resample('B').first().shift(3).ffill()
             df['inv_chg_zscore'] = _zscore2(inv_chg_b).reindex(df.index).ffill().bfill().fillna(0)
             df['inv_lvl_zscore'] = _zscore2(inv_lvl_b).reindex(df.index).ffill().bfill().fillna(0)
             inv_chg_ma4  = inv_chg.shift(1).rolling(4).mean()
-            inv_surp_b   = (inv_chg - inv_chg_ma4).resample('B').first().ffill()
+            inv_surp_b   = (inv_chg - inv_chg_ma4).resample('B').first().shift(3).ffill()
             df['inv_surprise'] = _zscore2(inv_surp_b).reindex(df.index).ffill().bfill().fillna(0)
-            inv_mom4 = inv_chg.rolling(4).sum().resample('B').first().ffill()
+            inv_mom4 = inv_chg.rolling(4).sum().resample('B').first().shift(3).ffill()
             df['inv_mom4_z'] = _zscore2(inv_mom4).reindex(df.index).ffill().bfill().fillna(0)
             log.info(f"      EIA 공개 CSV 연결 완료: {len(inv_raw)}주치")
         except Exception as exc2:
@@ -4172,6 +4172,27 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
     perf_df = pd.DataFrame(perf_rows)
     _atomic_csv(perf_df, OUTPUT_DIR / 'model_performance.csv', index=False)
     log.info("    model_performance.csv 저장")
+
+    # ── Look-ahead 감사: 주요 피처 당일/익일 가격 상관 점검
+    try:
+        _audit_cols = [
+            ('news_sentiment',        '당일 뉴스 (OK: T뉴스→T+1가격)'),
+            ('news_sentiment_smooth', '당일 뉴스 EWM (OK: T뉴스→T+1가격)'),
+            ('inv_chg_zscore',        'EIA 재고 (fix: +3영업일 발표지연 적용)'),
+            ('inv_surprise',          'EIA 서프라이즈 (fix: +3영업일)'),
+            ('cot_net_pct',           'COT 포지션 (OK: shift(3) 적용)'),
+            ('news_sentiment_lag1',   '뉴스 lag1 (OK: 명시 lag)'),
+        ]
+        log.info("    [Audit] 피처 look-ahead 점검 (corr with WTI_t vs target_price_t+1):")
+        for _ac, _desc in _audit_cols:
+            if _ac not in feature_df.columns or 'target_price' not in feature_df.columns:
+                continue
+            _cs = round(float(feature_df[_ac].corr(feature_df['WTI'])), 3)
+            _cn = round(float(feature_df[_ac].corr(feature_df['target_price'])), 3)
+            _flag = '⚠ SUSPECT' if abs(_cs) > 0.9 and abs(_cs) > abs(_cn) * 1.3 else '✓'
+            log.info(f"        {_flag} {_ac}: same={_cs:+.3f}  next={_cn:+.3f}  | {_desc}")
+    except Exception as _ae:
+        log.debug(f"    감사 실패({_ae})")
 
     return results, test_df
 
