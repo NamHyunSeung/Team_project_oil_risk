@@ -5564,6 +5564,30 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
         log.info(f"    Shock CI 적용: ×{_ci_mult:.1f} → forecast_7days.csv 갱신")
 
     save_prediction_log(model_results, feature_df, fc_df, prev_fc_df, full_df)
+
+    # ── A: 라이브 성능 모니터링 (최근 30건 MAE vs 백테스트 MAE)
+    _live_mae_val = None
+    if PRED_LOG_FILE.exists():
+        try:
+            _pl_check = pd.read_csv(PRED_LOG_FILE)
+            _live_known = _pl_check[
+                _pl_check['type'].isin(['live', 'gap']) &
+                _pl_check['price_error'].notna()
+            ]
+            if len(_live_known) >= 10:
+                _live30 = _live_known.tail(30)
+                _live_mae_val = float(_live30['price_error'].abs().mean())
+                _stk_m = model_results.get('stacking') or model_results.get('sarimax', {})
+                _bt_mae_ref = _stk_m.get('mae', float('inf'))
+                _ratio = _live_mae_val / max(_bt_mae_ref, 1e-6)
+                log.info(f"    라이브 성능: 최근 {len(_live30)}건 MAE={_live_mae_val:.4f} "
+                         f"(백테스트 대비 {_ratio:.2f}×)")
+                if _ratio > 1.5:
+                    log.warning(f"    ⚠ 라이브 성능 열화: 라이브 MAE={_live_mae_val:.4f} > "
+                                f"백테스트×1.5 ({_bt_mae_ref:.4f}×1.5={_bt_mae_ref*1.5:.4f})")
+        except Exception as _lme:
+            log.warning(f"    라이브 성능 모니터링 실패({_lme})")
+
     send_risk_alert(risk_signal, fc_df)
     kw_df                = extract_crisis_keywords(news_df)
     generate_wordcloud(kw_df)
@@ -5575,6 +5599,7 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
         'last_run':    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'data_through': full_df.index[-1].strftime('%Y-%m-%d'),
         'n_live':      int((pd.read_csv(PRED_LOG_FILE)['type'] == 'live').sum()) if PRED_LOG_FILE.exists() else 0,
+        'live_mae':    round(_live_mae_val, 4) if _live_mae_val is not None else None,
         'api_status':  api_status,
     }
     with open(OUTPUT_DIR / 'run_meta.json', 'w') as _f:
