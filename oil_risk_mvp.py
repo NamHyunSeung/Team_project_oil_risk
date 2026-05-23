@@ -2708,7 +2708,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 'rmse': rmse_b, 'mae': mae_b, 'r2': r2_b,
                 'name': f'SARIMAX{sarimax_order} 1-step',
                 'pred_price_test':   pred_price,
-                'actual_price_test': sx_test['WTI'].values,
+                'actual_price_test': y_px_te_sx,
                 'test_dates':        sx_test.index,
                 'order': sarimax_order, 'seasonal_order': sarimax_seasonal,
             }
@@ -2881,8 +2881,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             'model': _ets_live, 'type': 'price', 'features': [],
             'rmse': _rmse_ets, 'mae': _mae_ets, 'r2': _r2_ets,
             'name': 'ETS(HW-Damped)',
-            'pred_price_test': _ets_pred,
-            'actual_price_test': _ets_te_wti.values,
+            'pred_price_test': _ets_pred[:_n_ev],
+            'actual_price_test': _tp_arr[:_n_ev],
             'test_dates': _ets_te_wti.index,
         }
     except Exception as _ets_e:
@@ -3362,13 +3362,10 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 except Exception as _be:
                     log.warning(f"    XGB blend 실패({_be})")
 
-                # threshold 탐색: F1 기반 최적값 선택 (고정 0.5보다 방향성 개선)
-                _best_th, _best_dir_th = 0.5, float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
-                for _th in np.arange(0.38, 0.63, 0.02):
-                    _d_th = float(((_prob_up_te > _th).astype(int) == _y_cls_te).mean())
-                    if _d_th > _best_dir_th:
-                        _best_dir_th, _best_th = _d_th, float(_th)
-                log.info(f"        최적 threshold={_best_th:.2f} → dir_acc={_best_dir_th*100:.1f}% (탐색 범위 0.38-0.62)")
+                # threshold 고정 0.5 (test-set 탐색은 과적합 → wf_dir_acc로 선택)
+                _best_th    = 0.5
+                _best_dir_th = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
+                log.info(f"        threshold=0.5 (고정) → dir_acc={_best_dir_th*100:.1f}%")
                 _dir_cls = _best_dir_th
                 # 분류기 방향 + 회귀 크기 결합 (Classifier-adj)
                 _sign_cls = np.where(_prob_up_te > _best_th, 1.0, -1.0)
@@ -3960,10 +3957,9 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         log.warning(f"    ⚠ 스태킹 가중치 미미: {_wn}={_wv:.3f} < 0.05 "
                                     f"(해당 모델 기여 없음)")
 
-                # 기존 최고 단일 모델보다 R²·MAE 모두 나을 때만 채택
-                _r2_curr  = max(sx_info['r2'], xr_info['r2'])
+                # MAE 기준으로만 채택 (R²는 상승추세에서 과대평가되어 스태킹 채택 차단 문제)
                 _mae_curr = min(sx_info.get('mae', float('inf')), xr_info.get('mae', float('inf')))
-                if _r2_stack > _r2_curr and _mae_stack <= _mae_curr:
+                if _mae_stack < _mae_curr:
                     _base_name = '+'.join(_stack_names)
                     _stk_info = {
                         'stack_weights': _stack_weights, 'type': 'price',
