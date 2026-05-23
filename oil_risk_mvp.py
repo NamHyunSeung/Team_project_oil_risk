@@ -3837,9 +3837,31 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                             _stack_y[_split_m:], _ridge_half))
                         _mae_ih = float(mean_absolute_error(
                             _stack_y[_split_m:], _invmae_half))
+
+                        # ── Walk-forward 적응 InvMAE: 전반 오차로 후반 가중치 calibrate
+                        _mae_fh = {_stack_names[_i]: float(mean_absolute_error(
+                            _stack_y[:_split_m], _stack_X[:_split_m, _i]))
+                            for _i in range(len(_stack_names))}
+                        _inv_fh = np.array([1.0 / max(_mae_fh[n], 1e-6) for n in _stack_names])
+                        _wt_fh  = _inv_fh / _inv_fh.sum()
+                        _adapt_half = _stack_X[_split_m:] @ _wt_fh
+                        _mae_ah = float(mean_absolute_error(_stack_y[_split_m:], _adapt_half))
                         log.info(f"    Ridge 메타러너 MAE(후반)={_mae_rh:.4f}  "
-                                 f"InvMAE(후반)={_mae_ih:.4f}")
-                        if _mae_rh < _mae_ih:
+                                 f"InvMAE(후반)={_mae_ih:.4f}  WF-Adapt(후반)={_mae_ah:.4f}")
+
+                        best_half_mae = min(_mae_rh, _mae_ih, _mae_ah)
+                        if best_half_mae == _mae_ah and _mae_ah < _mae_ih:
+                            # Walk-forward 적응 InvMAE: 전반=원본가중치, 후반=calibrated
+                            _adapt_pred = np.concatenate([
+                                _stack_X[:_split_m] @ _stack_weights,
+                                _adapt_half
+                            ])
+                            _stack_pred    = _adapt_pred
+                            _stack_weights = _wt_fh  # 최종 가중치 = calibrated (라이브 예측용)
+                            _meta_type     = 'WF-Adapt'
+                            log.info(f"    ✅ Walk-forward 적응 InvMAE 채택 "
+                                     f"(전반={_stack_weights.round(3)} → 후반={_wt_fh.round(3)})")
+                        elif _mae_rh < _mae_ih:
                             _rm_full = _RCV(alphas=[0.1, 1.0, 10.0, 100.0], cv=3,
                                             fit_intercept=False)
                             _rm_full.fit(_stack_X, _stack_y)
@@ -3859,7 +3881,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _r2_stack   = float(r2_score(_stack_y, _stack_pred))
                 _rmse_stack = float(np.sqrt(mean_squared_error(_stack_y, _stack_pred)))
                 _coef_str   = ' '.join(f'{n}={w:.3f}' for n, w in zip(_stack_names, _stack_weights))
-                log.info(f"    [E] Stacking(InvMAE-WA) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
+                log.info(f"    [E] Stacking({_meta_type}) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
                          f"weights=[{_coef_str}]")
 
                 # 기존 최고 단일 모델보다 R²·MAE 모두 나을 때만 채택
