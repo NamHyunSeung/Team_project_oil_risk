@@ -916,6 +916,62 @@ def fetch_cot() -> pd.DataFrame:
         except Exception as _ce:
             log.warning(f"    COT annual.txt 파싱 실패({_ce})")
 
+    # ── CFTC 자동 다운로드 (캐시 8일 이상 stale이면 갱신)
+    _today = pd.Timestamp.today().normalize()
+    _stale  = cache.empty or (_today - cache.index[-1]).days >= 8
+    if _stale:
+        try:
+            import urllib.request as _ur3, zipfile as _zf, io as _io3
+            _year = _today.year
+            for _yr in [_year, _year - 1]:   # 연초 전환 대비 전년도도 시도
+                _url = f"https://www.cftc.gov/files/dea/history/fut_disagg_txt_{_yr}.zip"
+                try:
+                    _req = _ur3.Request(_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    _raw = _ur3.urlopen(_req, timeout=20).read()
+                    _z   = _zf.ZipFile(_io3.BytesIO(_raw))
+                    _txt = _z.read(_z.namelist()[0]).decode('utf-8', errors='ignore')
+                    _rows2 = []
+                    for _line in _txt.split('\n'):
+                        if '067651' not in _line:
+                            continue
+                        _p = [x.strip().strip('"') for x in _line.split(',')]
+                        if len(_p) < 20:
+                            continue
+                        try:
+                            _oi = float(_p[7])
+                            _ml = float(_p[12]); _ms = float(_p[13])
+                            if _oi <= 0:
+                                continue
+                            _rows2.append({
+                                'date':             pd.Timestamp(_p[2]),
+                                'cot_net_pct':      round((_ml - _ms) / _oi * 100, 4),
+                                'cot_mm_long_pct':  round(_ml / _oi * 100, 4),
+                                'cot_mm_short_pct': round(_ms / _oi * 100, 4),
+                            })
+                        except (ValueError, IndexError):
+                            continue
+                    if _rows2:
+                        _new = pd.DataFrame(_rows2).set_index('date')
+                        _new.index = pd.to_datetime(_new.index).normalize()
+                        _new = _new[~_new.index.duplicated(keep='last')]
+                        if cache.empty:
+                            cache = _new
+                        else:
+                            _add = _new[~_new.index.isin(cache.index)]
+                            if not _add.empty:
+                                cache = pd.concat([cache, _add]).sort_index()
+                        try:
+                            cache.reset_index().rename(columns={'index': 'date'}).to_csv(
+                                COT_CACHE_FILE, index=False)
+                        except Exception:
+                            pass
+                        log.info(f"    COT CFTC {_yr}년 자동 갱신: {len(_rows2)}주 추가")
+                        break
+                except Exception as _de:
+                    log.warning(f"    COT CFTC {_yr}년 다운로드 실패({_de})")
+        except Exception as _cftc_e:
+            log.warning(f"    COT 자동 갱신 실패({_cftc_e})")
+
     if cache.empty:
         log.warning("    COT 데이터 없음 → 0으로 대체")
     else:
