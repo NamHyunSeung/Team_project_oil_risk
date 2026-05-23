@@ -1495,7 +1495,7 @@ FEATURE_COLS = [
     # 모멘텀
     'return_1d', 'mom_5d', 'mom_21d',
     # 외생 거시변수
-    'dxy_change', 'dxy_5d', 'demand_shock', 'supply_shock',
+    'dxy_change', 'dxy_5d', 'dxy_21d', 'dxy_vs_ma50', 'demand_shock', 'supply_shock',
     'geo_dummy', 'gpr_zscore',              # GPR 더미 + 연속형
     # 뉴스 (현재 + 시차 1·2)
     'news_sentiment_smooth', 'news_count',
@@ -1776,9 +1776,11 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['mom_21d']   = df['WTI'].pct_change(21)
     df['mom_accel']     = df['mom_5d'].diff(5).fillna(0)
 
-    # ── DXY 변화율
+    # ── DXY 변화율 + 장기 모멘텀
     df['dxy_change'] = df['DXY'].pct_change()
     df['dxy_5d']     = df['DXY'].pct_change(5)
+    df['dxy_21d']    = df['DXY'].pct_change(21)
+    df['dxy_vs_ma50']= (df['DXY'] / (df['DXY'].rolling(50).mean() + 1e-8) - 1).fillna(0)
 
     # ── Brent-WTI 스프레드
     df['brent_wti_spread'] = (df['Brent'] - df['WTI']) if 'Brent' in df.columns else 0.0
