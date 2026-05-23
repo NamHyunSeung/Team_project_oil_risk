@@ -4603,6 +4603,14 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                  if c in fc_df.columns]
     if len(pred_cols) >= 2:
         fc_df['model_std'] = fc_df[pred_cols].std(axis=1).round(2)
+        # ── F: 모델 불일치 시 CI 자동 확대 (D+1 std > 2$ → CI ×1.2)
+        _d1_std = float(fc_df['model_std'].iloc[0]) if not fc_df['model_std'].isna().iloc[0] else 0.0
+        if _d1_std > 2.0:
+            _ci_expand = 1.2
+            _fp = fc_df['forecast_price']
+            fc_df['lower_80ci'] = (_fp - (_fp - fc_df['lower_80ci']) * _ci_expand).round(2)
+            fc_df['upper_80ci'] = (_fp + (fc_df['upper_80ci'] - _fp) * _ci_expand).round(2)
+            log.warning(f"    ⚠ 모델 불일치 과다(D+1 std={_d1_std:.2f}$) → CI ×{_ci_expand}")
 
     _atomic_csv(fc_df, OUTPUT_DIR / 'forecast_7days.csv', index=False)
     log.info("    forecast_7days.csv 저장")
