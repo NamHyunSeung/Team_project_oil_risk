@@ -2367,7 +2367,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         X_te_s = scaler.transform(X_te)
 
         _n = len(y_rv_tr)
-        _time_w = np.exp(np.log(2) / 252 * np.arange(_n))  # 반감기 1년
+        _time_w = np.exp(np.log(2) / 180 * np.arange(_n))  # 반감기 ~9개월 (라이브 레짐 적응 강화)
         _time_w = _time_w / _time_w.mean()
         covid_w_full = (np.where(train_df['covid_dummy'].values == 1, 0.35, 1.0)
                         if 'covid_dummy' in train_df.columns else np.ones(_n))
@@ -3051,7 +3051,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                           objective='reg:quantileerror', quantile_alpha=0.45)
 
             _n_ret  = len(y_ret_tr)
-            _tw_ret = np.exp(np.log(2) / 126 * np.arange(_n_ret)) ; _tw_ret /= _tw_ret.mean()  # 반감기 6개월 (XGB_YEARS 슬라이딩 효과)
+            _tw_ret = np.exp(np.log(2) / 90 * np.arange(_n_ret)) ; _tw_ret /= _tw_ret.mean()  # 반감기 ~4개월 (라이브 레짐 적응 강화)
             covid_w_ret = (np.where(train_df['covid_dummy'].values == 1, 0.35, 1.0)
                            if 'covid_dummy' in train_df.columns else np.ones(_n_ret))
             w_ret = covid_w_ret * _tw_ret
