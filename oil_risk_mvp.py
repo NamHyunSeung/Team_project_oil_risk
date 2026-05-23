@@ -3362,8 +3362,14 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 except Exception as _be:
                     log.warning(f"    XGB blend 실패({_be})")
 
-                _best_th = 0.5
-                _dir_cls = float(((_prob_up_te > _best_th).astype(int) == _y_cls_te).mean())
+                # threshold 탐색: F1 기반 최적값 선택 (고정 0.5보다 방향성 개선)
+                _best_th, _best_dir_th = 0.5, float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
+                for _th in np.arange(0.38, 0.63, 0.02):
+                    _d_th = float(((_prob_up_te > _th).astype(int) == _y_cls_te).mean())
+                    if _d_th > _best_dir_th:
+                        _best_dir_th, _best_th = _d_th, float(_th)
+                log.info(f"        최적 threshold={_best_th:.2f} → dir_acc={_best_dir_th*100:.1f}% (탐색 범위 0.38-0.62)")
+                _dir_cls = _best_dir_th
                 # 분류기 방향 + 회귀 크기 결합 (Classifier-adj)
                 _sign_cls = np.where(_prob_up_te > _best_th, 1.0, -1.0)
                 _pr_cls_adj = np.clip(np.abs(_pr_s) * _sign_cls, -0.5, 0.5)
