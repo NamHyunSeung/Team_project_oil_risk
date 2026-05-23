@@ -50,6 +50,23 @@ from collections import Counter
 # ── Output directory ──────────────────────────────────────────────────────────
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+def _atomic_csv(df: "pd.DataFrame", path: "Path", **kwargs) -> None:
+    """Write CSV atomically via temp file + os.replace to avoid partial reads."""
+    import os as _os, tempfile as _tf
+    _dir = Path(path).parent
+    with _tf.NamedTemporaryFile(mode='w', dir=_dir, suffix='.tmp', delete=False,
+                                encoding='utf-8', newline='') as _fh:
+        _tmp = _fh.name
+    try:
+        df.to_csv(_tmp, **kwargs)
+        _os.replace(_tmp, path)
+    except Exception:
+        try:
+            _os.unlink(_tmp)
+        except Exception:
+            pass
+        raise
 EMBED_CACHE_FILE = OUTPUT_DIR / 'news_embed_cache.pkl'
 COT_CACHE_FILE   = OUTPUT_DIR / 'cot_cache.csv'
 COT_RAW_FILE     = Path('annual.txt')   # CFTC 연간 전체 데이터
@@ -3985,7 +4002,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         if 'overfit_gap' in v: row['overfit_gap'] = round(v['overfit_gap'], 4)
         perf_rows.append(row)
     perf_df = pd.DataFrame(perf_rows)
-    perf_df.to_csv(OUTPUT_DIR / 'model_performance.csv', index=False)
+    _atomic_csv(perf_df, OUTPUT_DIR / 'model_performance.csv', index=False)
     log.info("    model_performance.csv 저장")
 
     return results, test_df
@@ -4509,7 +4526,7 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     if len(pred_cols) >= 2:
         fc_df['model_std'] = fc_df[pred_cols].std(axis=1).round(2)
 
-    fc_df.to_csv(OUTPUT_DIR / 'forecast_7days.csv', index=False)
+    _atomic_csv(fc_df, OUTPUT_DIR / 'forecast_7days.csv', index=False)
     log.info("    forecast_7days.csv 저장")
     return fc_df
 
@@ -4711,7 +4728,7 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
 
     # ── 합치기 & 저장 ────────────────────────────────────────────────
     combined = pd.concat([bt_df, live_df], ignore_index=True) if not live_df.empty else bt_df
-    combined.to_csv(PRED_LOG_FILE, index=False)
+    _atomic_csv(combined, PRED_LOG_FILE, index=False)
     n_live = len(live_df)
     n_filled = int(live_df['actual_price'].notna().sum()) if not live_df.empty else 0
     log.info(f"    prediction_log.csv 저장 "
@@ -4990,7 +5007,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
         'ci_multiplier':     ci_multiplier,
     }
 
-    pd.DataFrame([signal]).to_csv(OUTPUT_DIR / 'latest_risk_signal.csv', index=False)
+    _atomic_csv(pd.DataFrame([signal]), OUTPUT_DIR / 'latest_risk_signal.csv', index=False)
 
     # 리스크 히스토리 누적 저장
     _hist_path = OUTPUT_DIR / 'risk_history.csv'
@@ -5007,7 +5024,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
         _hist = _hist.drop_duplicates(subset=['date'], keep='last').sort_values('date').tail(365)
     else:
         _hist = _hist_row
-    _hist.to_csv(_hist_path, index=False)
+    _atomic_csv(_hist, _hist_path, index=False)
     r = RISK_LEVELS[level]
     log.info(f"    {r['emoji']} {level} ({r['label']})  "
              f"WTI=${current_wti:.2f}  Vol={vol:.2%}  Score={risk_score:.3f}")
@@ -5543,7 +5560,7 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
         _fp = fc_df['forecast_price']
         fc_df['lower_80ci'] = (_fp - (_fp - fc_df['lower_80ci']) * _ci_mult).round(2)
         fc_df['upper_80ci'] = (_fp + (fc_df['upper_80ci'] - _fp) * _ci_mult).round(2)
-        fc_df.to_csv(OUTPUT_DIR / 'forecast_7days.csv', index=False)
+        _atomic_csv(fc_df, OUTPUT_DIR / 'forecast_7days.csv', index=False)
         log.info(f"    Shock CI 적용: ×{_ci_mult:.1f} → forecast_7days.csv 갱신")
 
     save_prediction_log(model_results, feature_df, fc_df, prev_fc_df, full_df)
