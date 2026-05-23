@@ -3153,10 +3153,26 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     min_child_weight=10, reg_alpha=0.5, reg_lambda=3.0,
                     n_jobs=-1, random_state=42, verbosity=0
                 )
+                # MI 기반 분류 전용 피처 선택 (회귀 F-score sel_feats와 독립)
+                try:
+                    from sklearn.feature_selection import mutual_info_classif as _mic2
+                    _mi2_sc = _mic2(train_df[available_feats].fillna(0).values,
+                                    _y_cls_tr, random_state=42)
+                    _mi2_ranked = sorted(zip(available_feats, _mi2_sc),
+                                         key=lambda x: x[1], reverse=True)
+                    _cls_feats = [f for f, _ in _mi2_ranked[:25] if f in train_df.columns]
+                    _sc_cls = StandardScaler()
+                    _Xtr_cls = _sc_cls.fit_transform(train_df[_cls_feats].fillna(0).values)
+                    _Xte_cls = _sc_cls.transform(test_df[_cls_feats].fillna(0).values)
+                    log.info(f"        MI 분류피처 top5: {[f for f,_ in _mi2_ranked[:5]]}")
+                except Exception as _mi2_e:
+                    log.warning(f"    MI 분류피처 실패({_mi2_e}), sel_feats 사용")
+                    _cls_feats, _sc_cls = _sel_feats, _sc_sel
+                    _Xtr_cls, _Xte_cls = _Xtr_sel, _Xte_sel
                 _mD_cls_dir = xgb.XGBClassifier(**_xgb_cls_p)
-                _mD_cls_dir.fit(_Xtr_sel, _y_cls_tr, sample_weight=w_ret)
+                _mD_cls_dir.fit(_Xtr_cls, _y_cls_tr, sample_weight=w_ret)
                 _xgb_cls_saved = _mD_cls_dir          # SVM 교체 전 XGB 모델 보존
-                _prob_xgb_orig = _mD_cls_dir.predict_proba(_Xte_sel)[:, 1]
+                _prob_xgb_orig = _mD_cls_dir.predict_proba(_Xte_cls)[:, 1]
                 _prob_up_te = _prob_xgb_orig
                 _xgb_blend_w_best = 0.0               # 채택된 블렌드 가중치
 
@@ -3417,14 +3433,14 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _wf_xgb_acc = 0.0
                 try:
                     _wf_xgb_dirs = []
-                    for _wti, _wvi in TimeSeriesSplit(n_splits=3).split(_Xtr_sel):
+                    for _wti, _wvi in TimeSeriesSplit(n_splits=3).split(_Xtr_cls):
                         if len(_wti) < 100 or len(_wvi) < 15:
                             continue
                         _wf_sw2 = np.exp(0.002 * np.arange(len(_wti)))
                         _wxgb = xgb.XGBClassifier(**_xgb_cls_p)
-                        _wxgb.fit(_Xtr_sel[_wti], _y_cls_tr[_wti],
+                        _wxgb.fit(_Xtr_cls[_wti], _y_cls_tr[_wti],
                                   sample_weight=_wf_sw2)
-                        _wxp = _wxgb.predict_proba(_Xtr_sel[_wvi])[:, 1]
+                        _wxp = _wxgb.predict_proba(_Xtr_cls[_wvi])[:, 1]
                         _wf_xgb_dirs.append(
                             float(((_wxp > 0.5).astype(int) == _y_cls_tr[_wvi]).mean()))
                     _wf_xgb_acc = float(np.mean(_wf_xgb_dirs)) if _wf_xgb_dirs else 0.0
@@ -3458,6 +3474,9 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     'name': f'XGBoost-Classifier (방향성={_dir_cls*100:.1f}%)',
                     'pred_price_test': _px_cls_adj,
                     'threshold': _best_th,
+                    # 분류기 전용 MI 피처/스케일러 (라이브 예측용)
+                    'cls_features': _cls_feats,
+                    'cls_scaler':   _sc_cls,
                     # 라이브 예측용: XGB-Cls 블렌드 정보 (백테스트와 라이브 일관성)
                     'xgb_cls_model':   _xgb_cls_saved,
                     'xgb_cls_blend_w': _xgb_blend_w_best,
@@ -4399,13 +4418,25 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             if hasattr(model, 'predict_proba'):
                 _reg_m = info.get('_reg_model')
                 _mag_ret = float(_reg_m.predict(last_s)[0]) if _reg_m is not None else 0.001
-                _prob_up_fc = float(model.predict_proba(last_s)[0, 1])
+                # 분류기 전용 MI 피처가 있으면 별도 스케일링
+                _cls_feats_fc = info.get('cls_features')
+                _cls_sc_fc    = info.get('cls_scaler')
+                if _cls_feats_fc is not None and _cls_sc_fc is not None:
+                    try:
+                        _cf_avail = [f for f in _cls_feats_fc if f in _feat_src.columns]
+                        _cls_ls   = _cls_sc_fc.transform(
+                            _feat_src[_cf_avail].iloc[-1:].fillna(0).values)
+                    except Exception:
+                        _cls_ls = last_s
+                else:
+                    _cls_ls = last_s
+                _prob_up_fc = float(model.predict_proba(_cls_ls)[0, 1])
                 # XGB-Cls 블렌드 (백테스트와 동일 방식으로 라이브 예측에 반영)
                 _xcls_live = info.get('xgb_cls_model')
                 _xcls_bw   = info.get('xgb_cls_blend_w', 0.0)
                 if _xcls_live is not None and _xcls_bw > 0:
                     try:
-                        _prob_xcls_fc = float(_xcls_live.predict_proba(last_s)[0, 1])
+                        _prob_xcls_fc = float(_xcls_live.predict_proba(_cls_ls)[0, 1])
                         _prob_up_fc = (1 - _xcls_bw) * _prob_up_fc + _xcls_bw * _prob_xcls_fc
                         log.info(f"    XGB-Cls blend 적용 (w={_xcls_bw})")
                     except Exception:
