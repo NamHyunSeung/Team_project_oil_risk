@@ -3835,7 +3835,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
 
                 # ── Ridge 메타러너 (전반/후반 50:50 분할로 leakage 최소화)
                 _n_meta = len(_stack_y)
-                if _n_meta >= 40 and _SKL:
+                if _n_meta >= 60 and _SKL:
                     try:
                         from sklearn.linear_model import RidgeCV as _RCV
                         _split_m = _n_meta // 3
