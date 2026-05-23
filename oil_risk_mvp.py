@@ -2924,7 +2924,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             if _OPTUNA or XGB_OPTUNA_CACHE.exists():
                 try:
                     import hashlib as _hl_xgb, json as _json_opt
-                    _opt_key = _hl_xgb.md5(X_tr_all.values.tobytes()[:8192]).hexdigest()[:16]
+                    _feat_key = '|'.join(sorted(X_tr_all.columns.tolist())).encode()
+                    _opt_key = _hl_xgb.md5(X_tr_all.values.tobytes()[:8192] + _feat_key).hexdigest()[:16]
                     _opt_cached = {}
                     if XGB_OPTUNA_CACHE.exists():
                         try:
