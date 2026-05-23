@@ -2541,7 +2541,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         'dxy_change', 'demand_shock', 'supply_shock', 'vix_change',
         'brent_wti_spread', 'ovx_change', 'futures_spread',
         'oil_event_score_smooth', 'news_sentiment_smooth7',
-        'inv_mom4_z',
+        'inv_mom4_z', 'gold_wti_ratio_z', 'copper_gold_ratio_z',
     ] if c in feature_df.columns]
     log.info("    [B] SARIMAX 학습 + 1-step ahead 평가 중...")
 
