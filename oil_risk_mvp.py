@@ -3496,6 +3496,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 'wf_cv_mae': round(_wf_sel, 4),
                 'name': f'XGBoost-Return (방향성={dir_acc*100:.1f}%)',
                 'model_q10': _mD_q10, 'model_q90': _mD_q90,
+                'pred_price_test': pred_px_d,
+                'actual_price_test': y_px_te.values,
             }
             # Classifier-adj 채택 시: 회귀 모델 + XGB-Cls 블렌드 정보 보관 (라이브 예측 반영)
             if _cname == 'Classifier-adj' and _mD_sel is not None:
@@ -3966,6 +3968,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         'xr_scaler':   xr_info['scaler'],
                         'stack_names': _stack_names,
                         'meta_type':   _meta_type,
+                        'pred_price_test':   _stack_pred.copy(),
+                        'actual_price_test': _stack_y.copy(),
                     }
                     if 'lgb_return' in results:
                         _stk_info['lgb_feats']  = results['lgb_return']['features']
@@ -4046,6 +4050,26 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         except Exception as _se:
             log.warning(f"    Stacking 실패({_se})")
 
+    # ── 나이브 퍼시스턴스 기준선 (MASE 계산용, Skill Score 비교)
+    _naive_mae_px = _naive_mae_rv = None
+    _naive_rmse_px = _naive_rmse_rv = _naive_r2_px = _naive_r2_rv = None
+    try:
+        _y_px_naive_a = test_df['target_price'].dropna().values
+        _y_px_naive_p = test_df['WTI'].values[:len(_y_px_naive_a)]
+        _naive_mae_px  = float(mean_absolute_error(_y_px_naive_a, _y_px_naive_p))
+        _naive_rmse_px = float(np.sqrt(mean_squared_error(_y_px_naive_a, _y_px_naive_p)))
+        _naive_r2_px   = float(r2_score(_y_px_naive_a, _y_px_naive_p))
+        _y_rv_naive_a  = test_df['target_rv'].dropna().values
+        _y_rv_naive_p  = test_df['RV_5d'].values[:len(_y_rv_naive_a)]
+        _naive_mae_rv  = float(mean_absolute_error(_y_rv_naive_a, _y_rv_naive_p))
+        _naive_rmse_rv = float(np.sqrt(mean_squared_error(_y_rv_naive_a, _y_rv_naive_p)))
+        _naive_r2_rv   = float(r2_score(_y_rv_naive_a, _y_rv_naive_p))
+        log.info(f"    기준선(나이브 퍼시스턴스): "
+                 f"가격 MAE={_naive_mae_px:.4f} R²={_naive_r2_px:.4f}  "
+                 f"변동성 MAE={_naive_mae_rv:.6f} R²={_naive_r2_rv:.4f}")
+    except Exception as _nbe:
+        log.warning(f"    나이브 기준선 계산 실패({_nbe})")
+
     # ── 성능 저장
     perf_rows = []
     for v in results.values():
@@ -4057,7 +4081,29 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         if 'wf_dir_acc'  in v: row['wf_dir_acc']  = round(v['wf_dir_acc'], 4)
         if 'train_r2'    in v: row['train_r2']    = round(v['train_r2'], 4)
         if 'overfit_gap' in v: row['overfit_gap'] = round(v['overfit_gap'], 4)
+        # MASE (1.0보다 작아야 기준선 대비 개선)
+        try:
+            _nm = (_naive_mae_px if v['type'] == 'price' else _naive_mae_rv)
+            if _nm and _nm > 0:
+                row['mase'] = round(v['mae'] / _nm, 4)
+        except Exception:
+            pass
+        # MaxError (꼬리 오차 관리)
+        if 'pred_price_test' in v and 'actual_price_test' in v:
+            try:
+                _errs = np.abs(np.array(v['actual_price_test']) - np.array(v['pred_price_test']))
+                row['max_error'] = round(float(_errs.max()), 4)
+            except Exception:
+                pass
         perf_rows.append(row)
+    # 나이브 퍼시스턴스 기준선 행 추가
+    if _naive_mae_px is not None:
+        perf_rows.append({'model': 'Persistence (D+1=D+0)', 'target': 'price',
+                          'rmse': round(_naive_rmse_px, 5), 'mae': round(_naive_mae_px, 5),
+                          'r2': round(_naive_r2_px, 4), 'mase': 1.0})
+        perf_rows.append({'model': 'Persistence-Vol (RV lag-1)', 'target': 'vol_5d',
+                          'rmse': round(_naive_rmse_rv, 5), 'mae': round(_naive_mae_rv, 5),
+                          'r2': round(_naive_r2_rv, 4), 'mase': 1.0})
     perf_df = pd.DataFrame(perf_rows)
     _atomic_csv(perf_df, OUTPUT_DIR / 'model_performance.csv', index=False)
     log.info("    model_performance.csv 저장")
