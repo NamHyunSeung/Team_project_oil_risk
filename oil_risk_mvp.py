@@ -705,8 +705,8 @@ def fetch_data(start_date=None, end_date=None):
             futures_spread = (cl2 - wti).rename("futures_spread")
             log.info(f"    WTI 선물 커브 스프레드 수집 완료 (μ={futures_spread.mean():.3f})")
         except Exception:
-            futures_spread = pd.Series(dtype=float, name="futures_spread")
-            log.warning("    WTI 2번째 월물 수집 실패 → futures_spread=0")
+            futures_spread = (wti.rolling(63, min_periods=20).mean() - wti).rename("futures_spread")
+            log.warning("    CL2=F 실패 → 63일 이평 proxy 사용 (term structure 근사)")
 
         # 나머지 8개 티커 병렬 다운로드
         from concurrent.futures import ThreadPoolExecutor as _TPE
@@ -3553,6 +3553,35 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 results['xgb_return']['multistep_models'] = _ms_models
                 results['xgb_return']['multistep_scalers'] = _ms_scalers
                 log.info("    ✅ Multi-step Direct 완료 (h=2..7)")
+                # ── Multi-step 테스트셋 성능 평가 (h=2..7 horizon별 MAE/MASE)
+                _ms_perf = []
+                for _h in range(2, 8):
+                    _tgt_h = f'target_return_h{_h}'
+                    if _h not in _ms_models or _tgt_h not in test_df.columns:
+                        continue
+                    _ms_te = test_df.dropna(subset=[_tgt_h])
+                    if len(_ms_te) < 5:
+                        continue
+                    _avail_ms_te = [f for f in _ms_feats if f in _ms_te.columns]
+                    if not _avail_ms_te:
+                        continue
+                    _X_ms_te = _ms_scalers[_h].transform(_ms_te[_avail_ms_te].fillna(0).values)
+                    _pred_ret_h = _ms_models[_h].predict(_X_ms_te)
+                    _px_te = _ms_te['WTI'].values
+                    _act_px_h = _px_te * np.exp(np.clip(_ms_te[_tgt_h].values, -0.5, 0.5))
+                    _pred_px_h = _px_te * np.exp(np.clip(_pred_ret_h, -0.5, 0.5))
+                    _mae_h = float(mean_absolute_error(_act_px_h, _pred_px_h))
+                    _naive_h = float(mean_absolute_error(_act_px_h, _px_te))
+                    _mase_h = _mae_h / max(_naive_h, 1e-6)
+                    _ms_perf.append({'horizon': _h, 'mae': round(_mae_h, 4),
+                                     'mase': round(_mase_h, 4), 'n': len(_ms_te)})
+                    log.info(f"        h={_h}: MAE={_mae_h:.4f}  MASE={_mase_h:.4f}")
+                if _ms_perf:
+                    try:
+                        pd.DataFrame(_ms_perf).to_csv(OUTPUT_DIR / 'multistep_performance.csv', index=False)
+                    except Exception:
+                        pass
+                    results['xgb_return']['multistep_performance'] = _ms_perf
             else:
                 log.warning(f"    Multi-step 일부 미완성: {len(_ms_models)}/6 모델")
 
@@ -3940,9 +3969,30 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     except Exception as _re:
                         log.warning(f"    Ridge 메타러너 실패({_re})")
 
+                # ── Rolling-30d 재보정: 최근 30일 성능 기반, look-ahead 없는 앞부분으로 검증
+                if _n_meta >= 40:
+                    _n30 = min(30, _n_meta // 3)
+                    _inv_r30 = np.array([1.0 / max(float(mean_absolute_error(
+                        _stack_y[-_n30:], _stack_X[-_n30:, _i])), 1e-6)
+                        for _i in range(len(_stack_names))])
+                    _wt_r30 = _inv_r30 / _inv_r30.sum()
+                    _eval_end = _n_meta - _n30
+                    _mae_base_eval = float(mean_absolute_error(
+                        _stack_y[:_eval_end], _stack_X[:_eval_end] @ _stack_weights))
+                    _mae_r30_eval  = float(mean_absolute_error(
+                        _stack_y[:_eval_end], _stack_X[:_eval_end] @ _wt_r30))
+                    log.info(f"    Roll30 검증(앞{_eval_end}d): 기존={_mae_base_eval:.4f}  "
+                             f"Roll30={_mae_r30_eval:.4f}")
+                    if _mae_r30_eval < _mae_base_eval:
+                        _stack_pred    = _stack_X @ _wt_r30
+                        _stack_weights = _wt_r30
+                        _meta_type     = _meta_type + '+Roll30'
+                        log.info(f"    ✅ Rolling-30d 재보정 채택")
+
                 _mae_stack  = float(mean_absolute_error(_stack_y, _stack_pred))
                 _r2_stack   = float(r2_score(_stack_y, _stack_pred))
                 _rmse_stack = float(np.sqrt(mean_squared_error(_stack_y, _stack_pred)))
+                _ci_q80_stk = float(np.percentile(np.abs(_stack_y - _stack_pred), 80))
                 _coef_str   = ' '.join(f'{n}={w:.3f}' for n, w in zip(_stack_names, _stack_weights))
                 log.info(f"    [E] Stacking({_meta_type}) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
                          f"weights=[{_coef_str}]")
@@ -3974,6 +4024,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     _stk_info = {
                         'stack_weights': _stack_weights, 'type': 'price',
                         'rmse': _rmse_stack, 'mae': _mae_stack, 'r2': _r2_stack,
+                        'ci_calib_q80': _ci_q80_stk,
                         'name': f'Stacking ({_base_name},InvMAE-WA)',
                         'sx_feats':    sx_info.get('features', []),
                         'xr_feats':    xr_info['features'],
@@ -4657,6 +4708,19 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             lower_80ci = ensemble - ci_half
             upper_80ci = ensemble + ci_half
 
+    # CI 경험적 보정: 백테스트 stacking 오차 Q80 기준 (실제 80% 커버리지 근사)
+    _ci_q80 = (results.get('stacking') or {}).get('ci_calib_q80')
+    if _ci_q80 is not None and lower_80ci is not None:
+        _d1_half = (float(upper_80ci[0]) - float(lower_80ci[0])) / 2
+        if _d1_half > 0.1:
+            _calib = float(np.clip(_ci_q80 / _d1_half, 0.5, 2.5))
+            if abs(_calib - 1.0) > 0.05:
+                _mid     = (lower_80ci + upper_80ci) / 2
+                _half_ci = (upper_80ci - lower_80ci) / 2
+                lower_80ci = _mid - _half_ci * _calib
+                upper_80ci = _mid + _half_ci * _calib
+                log.info(f"    CI 경험적 보정 ×{_calib:.2f} (Q80={_ci_q80:.2f}$)")
+
     fc_df = pd.DataFrame({
         'date':            fc_dates.strftime('%Y-%m-%d'),
         'forecast_price':  np.round(ensemble,    2),
@@ -5085,7 +5149,7 @@ OVX 급변  : {'⚠ 감지됨' if ovx_alert else '정상'}
     return result
 
 
-def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
+def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir: int = 0) -> dict:
     """실시간 리스크 신호등: 정상 / 주의 / 급등위험 / 급락위험"""
     log.info("[6/9] 리스크 분류 중...")
 
@@ -5132,6 +5196,15 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame) -> dict:
         directional -= 0.01
     elif price_z < -1.5:
         directional += 0.01
+
+    # 모델 예측 방향 합의 확인 (forecast_dir: +1=상승, -1=하락)
+    if forecast_dir != 0:
+        _mom_dir = 1 if directional > 0.01 else (-1 if directional < -0.01 else 0)
+        if _mom_dir != 0:
+            if _mom_dir == forecast_dir:
+                directional *= 1.20   # 모델·모멘텀 동일 방향 → 신호 강화
+            else:
+                directional *= 0.75   # 모델·모멘텀 반대 방향 → 신호 약화
 
     # 분류 규칙 (threshold 0.025 → 0.05: 과잉 신호 방지)
     if   risk_score >= 2.2 and directional >  0.05:  level = 'SURGE_RISK'
@@ -5720,7 +5793,9 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
             log.warning(f"    이전 forecast 로드 실패({_pfe}) → gap-fill 생략")
 
     fc_df                = forecast_next_7days(model_results, feature_df, full_df, aux=aux_models)
-    risk_signal          = classify_risk(feature_df, full_df)
+    _last_wti = float(feature_df['WTI'].iloc[-1]) if 'WTI' in feature_df.columns else 0.0
+    _fc_dir   = int(np.sign(float(fc_df['forecast_price'].iloc[0]) - _last_wti)) if _last_wti > 0 else 0
+    risk_signal          = classify_risk(feature_df, full_df, forecast_dir=_fc_dir)
 
     # Shock CI 확대: classify_risk에서 반환된 ci_multiplier 적용
     _ci_mult = risk_signal.get('ci_multiplier', 1.0)
