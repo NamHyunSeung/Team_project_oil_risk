@@ -2570,6 +2570,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 'rmse': _garch_rmse, 'mae': float(mean_absolute_error(_garch_vol_actual, _garch_vol_pred)),
                 'r2': _garch_r2,
                 'beats_xgb': _garch_r2 > _xgb_r2,
+                'benchmark_only': True,
             }
             if _garch_r2 > _xgb_r2:
                 log.info("    ✅ GARCH 1-step > XGB-HAR → vol 예측에 GARCH 사용")
@@ -3462,7 +3463,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             ]
             if _mD_q is not None:
                 _candidates.append((_mae_q, _dir_q, _mD_q, _sc_sel, _pr_q, _px_q, _r2_q, _sel_feats, 'Quantile'))
-            if _mD_cls_dir is not None and _wf_dir_acc >= 0.51:
+            if _mD_cls_dir is not None and _wf_dir_acc >= 0.55:
                 # 모델 선택 기준은 신뢰도 높은 wf_dir_acc 사용 (test-set 단일 평가 과대평가 방지)
                 _sel_dir_cls = _wf_dir_acc if _wf_dir_acc > 0 else _dir_cls
                 _candidates.append((_mae_cls, _sel_dir_cls, _mD_cls_dir, _sc_sel, _pr_cls_adj, _px_cls_adj, _r2_cls, _sel_feats, 'Classifier-adj'))
@@ -4077,6 +4078,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
     for v in results.values():
         if 'name' not in v or 'type' not in v:
             continue
+        if v.get('benchmark_only', False):
+            continue
         row = {'model': v['name'], 'target': v['type'],
                'rmse': round(v['rmse'], 5), 'mae': round(v['mae'], 5), 'r2': round(v['r2'], 4)}
         if 'dir_acc'     in v: row['dir_acc']     = round(v['dir_acc'], 4)
@@ -4549,10 +4552,11 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         trend = feature_df['WTI'].diff().tail(5).mean()
         ensemble = np.array([last_price + trend * (i + 1) for i in range(7)])
 
-    # ── A: live bias correction (실측 오차 피드백) ───────────────────
+    # ── A: live bias correction (실측 오차 피드백, 지평선별 감쇠)
     bias = compute_live_bias_correction()
     if bias != 0.0:
-        ensemble = ensemble + bias
+        _bias_decay = np.array([1.0, 0.85, 0.70, 0.55, 0.40, 0.25, 0.15])[:len(ensemble)]
+        ensemble = ensemble + bias * _bias_decay
 
     # ── A2: 적응형 오차 보정 (Adaptive Error Correction)
     # ec_last_feat는 훈련 시점 test_df 마지막 행으로 고정됨 → 현재 시장 상태로 재구성
