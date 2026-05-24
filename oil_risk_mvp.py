@@ -4672,6 +4672,16 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             except Exception as _ve:
                 log.warning(f"VAR 예측 실패: {_ve}")
 
+        # D+2-7: SARIMAX 가중치 제거 (flat forecast 영향 배제), VAR 있을 때만 적용
+        _sx_idx = None
+        if _var_fc is not None and 'SARIMAX' in list(_stk_names):
+            _sx_idx = list(_stk_names).index('SARIMAX')
+            _wts_multistep = _stk_wts.copy()
+            _wts_multistep[_sx_idx] = 0.0
+            _rest = _wts_multistep.sum()
+            if _rest > 0:
+                _wts_multistep = _wts_multistep / _rest
+
         ensemble = np.zeros(7)
         for i in range(7):
             _pts = [_sx_fc[i], _xb_fc[i]]
@@ -4688,8 +4698,11 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             # stack_names 순서에 맞게 패딩 (None 베이스는 center로 대체)
             while len(_pts) < len(_stk_names):
                 _pts.append(_sx_fc[i])
-            ensemble[i] = float(np.dot(_pts[:len(_stk_names)], _stk_wts))
-        log.info(f"    ✅ Stacking 앙상블 적용: D+1={ensemble[0]:.2f}")
+            # D+1: 원래 stacking 가중치, D+2-7: SARIMAX 제외 후 재정규화
+            _w = _wts_multistep if (i >= 1 and _sx_idx is not None) else _stk_wts
+            ensemble[i] = float(np.dot(_pts[:len(_stk_names)], _w))
+        log.info(f"    ✅ Stacking 앙상블 적용: D+1={ensemble[0]:.2f} "
+                 f"(D+2-7: {'SARIMAX 제외' if _sx_idx is not None else '전체 가중치'})")
     elif 'sarimax' in forecasts and 'xgb' in forecasts:
         # VAR가 있으면 3모델 역MAE 가중 앙상블, 없으면 2모델
         if 'var' in results:
