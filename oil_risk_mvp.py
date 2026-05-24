@@ -3585,8 +3585,10 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             log.info("    [D3] Multi-step Direct (h=2..7) 학습 중...")
             _ms_models, _ms_scalers = {}, {}
             _ms_feats = results['xgb_return']['features']
-            _xgb_ms_p = {k: v for k, v in _xgb_p.items()}
-            _xgb_ms_p['n_estimators'] = min(_xgb_ms_p.get('n_estimators', 300), 300)
+            # 지평선별 n_estimators/정규화 — 장기일수록 과적합 방지 강화
+            _ms_nest  = {2: 250, 3: 200, 4: 150, 5: 120, 6: 100, 7: 80}
+            _ms_reg_a = {2: 1.0, 3: 1.2, 4: 1.5, 5: 1.8, 6: 2.0, 7: 2.5}  # reg_alpha 배수
+            _ms_reg_l = {2: 1.0, 3: 1.3, 4: 1.7, 5: 2.0, 6: 2.3, 7: 2.8}  # reg_lambda 배수
             for _h in range(2, 8):
                 _tgt_h = f'target_return_h{_h}'
                 if _tgt_h not in feature_df.columns:
@@ -3604,11 +3606,15 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _tw_ms /= _tw_ms.mean()
                 _cw_ms = (np.where(_ms_tr['covid_dummy'].values == 1, 0.35, 1.0)
                           if 'covid_dummy' in _ms_tr.columns else np.ones(_nw_ms))
+                _xgb_ms_p = {k: v for k, v in _xgb_p.items()}
+                _xgb_ms_p['n_estimators'] = _ms_nest[_h]
+                _xgb_ms_p['reg_alpha']    = _xgb_p.get('reg_alpha', 0.3)  * _ms_reg_a[_h]
+                _xgb_ms_p['reg_lambda']   = _xgb_p.get('reg_lambda', 3.0) * _ms_reg_l[_h]
                 _m_ms = xgb.XGBRegressor(**_xgb_ms_p)
                 _m_ms.fit(_Xms, _ms_tr[_tgt_h], sample_weight=_cw_ms * _tw_ms)
                 _ms_models[_h] = _m_ms
                 _ms_scalers[_h] = _sc_ms
-                log.info(f"        h={_h}: {len(_ms_tr)}행 학습 완료")
+                log.info(f"        h={_h}: n_est={_ms_nest[_h]} reg_a×{_ms_reg_a[_h]} {len(_ms_tr)}행")
             if len(_ms_models) == 6:
                 results['xgb_return']['multistep_models'] = _ms_models
                 results['xgb_return']['multistep_scalers'] = _ms_scalers
@@ -4369,6 +4375,31 @@ def compute_live_bias_correction(window: int = 10, max_correction: float = 5.0) 
         return 0.0
 
 
+def compute_error_spike_blend(
+    consecutive: int = 3, threshold: float = 5.0, max_blend: float = 0.35
+) -> float:
+    """연속 대형 오류(|error| > threshold) consecutive일 이상 시 persistence 블렌딩 비율 반환.
+    조건 미충족 시 0.0 반환. MASE에 영향 없음(live 데이터만 사용).
+    """
+    if not PRED_LOG_FILE.exists():
+        return 0.0
+    try:
+        pl = pd.read_csv(PRED_LOG_FILE)
+        lv = pl[(pl['type'] == 'live') & pl['price_error'].notna()].tail(consecutive)
+        if len(lv) < consecutive:
+            return 0.0
+        last_abs = lv['price_error'].abs().values
+        if (last_abs > threshold).all():
+            log.info(
+                f"    오류 급증 감지: 최근 {consecutive}일 |MAE|={last_abs.mean():.2f}$ "
+                f"> ${threshold} → persistence 블렌딩 {max_blend:.0%}"
+            )
+            return max_blend
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6.  forecast_next_7days()
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4741,6 +4772,19 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             log.info(f"    적응형 오차 보정 적용: D+1 {_ec_pred:+.3f}$")
         except Exception as _ece_fc:
             log.warning(f"    오차 보정 적용 실패({_ece_fc})")
+
+    # ── A3: 오류 급증 시 persistence 블렌딩 (3일 연속 |error|>$5)
+    _spike_blend = compute_error_spike_blend()
+    if _spike_blend > 0.0:
+        _persist_fc = np.full(len(ensemble), last_price)
+        ensemble = (1 - _spike_blend) * ensemble + _spike_blend * _persist_fc
+
+    # ── A4: D+2-7 구조적 persistence 블렌딩 (h>1 MASE>1.0 구조적 보완)
+    # D+1(index 0)은 0%이므로 기존 MASE(0.8132) 불변. D+2-7만 적용.
+    _ms_blend = np.array([0.0, 0.15, 0.30, 0.45, 0.55, 0.60, 0.65])[:len(ensemble)]
+    _persist_base = np.full(len(ensemble), last_price)
+    ensemble = ensemble * (1 - _ms_blend) + _persist_base * _ms_blend
+    log.info(f"    D+2-7 Persistence 블렌딩: D+2={_ms_blend[1]:.0%} ~ D+7={_ms_blend[min(6,len(_ms_blend)-1)]:.0%}")
 
     # ── 예측값 sanity check: spot 대비 ±30% 초과 시 경고
     _dev_d1_pct = (ensemble[0] - last_price) / last_price * 100
@@ -5309,9 +5353,12 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
                 _prev_surge_p = float(_ps_df['surge_prob_3d'].iloc[0])
     except Exception:
         pass
-    # 고확률(>0.65): 즉시 적용 / 중간확률: OVX>0.5 AND 전일도 0.35 초과 필요
+    # 펀더멘탈 확인: EIA 재고 감소(bullish) OR 중기 모멘텀 상승
+    _inv_surp  = float(row.get('inv_surprise', 0.0))
+    _has_fund  = (_inv_surp < -0.5) or (mom_21 > 0.02)
+    # 고확률(>0.65): 즉시 적용 / 중간확률: OVX+시계열확인+펀더멘탈 3중 게이트
     _surge_fire = surge_prob > 0.65 or (
-        surge_prob > 0.45 and ovx_z > 0.5 and _prev_surge_p > 0.35
+        surge_prob > 0.45 and ovx_z > 0.5 and _prev_surge_p > 0.35 and _has_fund
     )
     if _surge_fire:
         directional += (surge_prob - 0.50) * 0.4
@@ -5325,8 +5372,13 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     # 분류 규칙 (threshold 0.025 → 0.05: 과잉 신호 방지)
     if   risk_score >= 2.2 and directional >  _dir_thresh: level = 'SURGE_RISK'
     elif risk_score >= 2.2 and directional < -_dir_thresh: level = 'DROP_RISK'
-    elif risk_score >= 1.4 or abs(directional) > 0.04:    level = 'CAUTION'
+    elif risk_score >= 1.4 or abs(directional) > 0.06:    level = 'CAUTION'
     else:                                                  level = 'NORMAL'
+
+    # DROP_RISK + 높은 surge_prob → 방향 불확실 → CAUTION
+    if level == 'DROP_RISK' and surge_prob > 0.40:
+        log.info(f"    ⚖ DROP_RISK + surge_prob={surge_prob:.2f}>0.40 → CAUTION 조정")
+        level = 'CAUTION'
 
     # ── CI 멀티플라이어: Shock 이진 + 뉴스 감성 서프라이즈 연속 조정
     _gpr_z      = float(row.get('gpr_zscore', 0.0))
@@ -5370,6 +5422,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
         'geopolitical_alert': bool(geo > 0.5),
         'risk_score':        round(risk_score, 4),
         'directional_bias':  round(directional, 5),
+        'direction_confidence': 'HIGH' if abs(directional) > 0.12 else ('MEDIUM' if abs(directional) > 0.06 else 'LOW'),
         'ci_multiplier':     ci_multiplier,
         'surge_prob_3d':     round(surge_prob, 3),
         'hedge_ratio':       hedge_ratio,

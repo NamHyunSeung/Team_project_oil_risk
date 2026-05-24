@@ -445,6 +445,7 @@ with tab2:
                     "뉴스 기사 수": int(sig['news_count']),
                     "지정학 경보":  bool(sig['geopolitical_alert']),
                     "방향성 편향":  float(sig['directional_bias']),
+                    "방향 신뢰도":  sig.get('direction_confidence', 'N/A'),
                 })
 
     if _is_admin:
