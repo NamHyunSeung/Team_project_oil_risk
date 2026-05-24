@@ -309,7 +309,7 @@ if _alert_path.exists():
         pass
 
 # ── 리스크 신호 배너 ───────────────────────────────────────────────────────────
-if 'latest_risk_signal' in data:
+if 'latest_risk_signal' in data and not data['latest_risk_signal'].empty:
     sig   = data['latest_risk_signal'].iloc[0]
     level = sig['risk_level']
     col   = RISK_COLOR.get(level, '#888')
@@ -478,7 +478,7 @@ with tab1:
             st.dataframe(show_fc, hide_index=True, use_container_width=True)
 
             # 합의도 낮으면 경고
-            if 'model_std' in fc.columns and float(fc['model_std'].iloc[0]) >= 5:
+            if 'model_std' in fc.columns and not fc.empty and float(fc['model_std'].iloc[0]) >= 5:
                 st.warning(f"⚠️ 모델 간 예측 편차 ${fc['model_std'].iloc[0]:.1f} — 불확실성 높음")
             if 'reliable_forecast' in fc.columns and not fc['reliable_forecast'].astype(str).eq('True').all():
                 st.warning("⚠️ 일부 예측일의 신뢰도가 낮습니다. 예측 결과 해석 시 주의하세요.")

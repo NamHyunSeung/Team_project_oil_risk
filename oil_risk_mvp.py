@@ -2780,7 +2780,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     # 테스트셋 교정값 계산 (마지막 훈련 잔차 사용)
                     X_te_rc = test_df[rc_feat_cols].fillna(0).copy()
                     X_te_rc['resid_lag1'] = float(resid_s.iloc[-1])
-                    X_te_rc['resid_lag2'] = float(resid_s.iloc[-2])
+                    X_te_rc['resid_lag2'] = float(resid_s.iloc[-2] if len(resid_s) >= 2 else resid_s.iloc[-1])
                     corrections = rc_model.predict(rc_scaler.transform(X_te_rc[X_rc.columns]))
 
                     corrected = pred_price + corrections
@@ -2800,7 +2800,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                             'scaler':      rc_scaler,
                             'features':    list(X_rc.columns),
                             'last_resid1': float(full_resid.iloc[-1]),
-                            'last_resid2': float(full_resid.iloc[-2]),
+                            'last_resid2': float(full_resid.iloc[-2] if len(full_resid) >= 2 else full_resid.iloc[-1]),
                             'rc_feat_cols': rc_feat_cols,
                         }
                         results['sarimax']['r2']             = r2_c
@@ -4554,7 +4554,7 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     _t_var = np.arange(1, 8)
     fc_df['var_5pct']  = (fc_df['forecast_price'] - last_price * _vol5d_now * 1.645 * np.sqrt(_t_var)).round(2)
     fc_df['var_95pct'] = (fc_df['forecast_price'] + last_price * _vol5d_now * 1.645 * np.sqrt(_t_var)).round(2)
-    log.info(f"    VaR(5%) D+1={fc_df['var_5pct'].iloc[0]:.2f}$  D+7={fc_df['var_5pct'].iloc[6]:.2f}$")
+    log.info(f"    VaR(5%) D+1={fc_df['var_5pct'].iloc[0]:.2f}$  D+7={fc_df['var_5pct'].iloc[min(6, len(fc_df)-1)]:.2f}$")
 
     _atomic_csv(fc_df, OUTPUT_DIR / 'forecast_7days.csv', index=False)
     log.info("    forecast_7days.csv 저장")
@@ -4929,7 +4929,7 @@ def monitor_rss_alerts() -> dict:  # noqa: dead — 향후 독립 스케줄러�
         _ovx = _yf.download('^OVX', period='5d', progress=False, auto_adjust=True)['Close']
         if hasattr(_ovx, 'columns'): _ovx = _ovx.iloc[:, 0]
         _ovx = _ovx.dropna()
-        if len(_ovx) >= 2:
+        if len(_ovx) >= 2 and _ovx.iloc[-2] != 0:
             ovx_chg = (_ovx.iloc[-1] - _ovx.iloc[-2]) / _ovx.iloc[-2] * 100
             if abs(ovx_chg) >= 8:
                 ovx_alert = True
