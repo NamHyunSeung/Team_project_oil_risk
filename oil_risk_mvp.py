@@ -4766,6 +4766,11 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     elif _mom_bias < -0.05:
         bias -= 2.0
         log.info(f"    모멘텀 하락({_mom_bias*100:.1f}%) 추가 보정: -2.0$")
+    # 모멘텀 방향 vs bias 방향 불일치 시 반감 (방향 전환 후 과소/과대 예측 방지)
+    if bias != 0.0 and _mom_bias != 0.0:
+        if (bias < 0 and _mom_bias > 0.02) or (bias > 0 and _mom_bias < -0.02):
+            log.info(f"    bias-모멘텀 방향 불일치: bias={bias:.2f}x0.5 (mom={_mom_bias*100:.1f}%)")
+            bias *= 0.5
     if bias != 0.0:
         _bias_decay = np.array([1.0, 0.85, 0.70, 0.55, 0.40, 0.25, 0.15])[:len(ensemble)]
         ensemble = ensemble + bias * _bias_decay
@@ -5460,7 +5465,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     current_wti = float(full_df['WTI'].dropna().iloc[-1])
 
     # 헤지 비율: 리스크 레벨 + surge_prob 기반 (유가 사용 기업 기준)
-    _base_hedge = {'SURGE_RISK': 0.65, 'CAUTION': 0.30, 'DROP_RISK': 0.05, 'NORMAL': 0.0}[level]
+    _base_hedge = {'SURGE_RISK': 0.65, 'CAUTION': 0.30, 'DROP_RISK': 0.20, 'NORMAL': 0.0}[level]
     _surge_adj  = max((surge_prob - 0.45) * 0.6, 0.0) if level == 'SURGE_RISK' else 0.0
     _geo_adj    = 0.10 if geo > 0.5 else 0.0
     _mom_adj    = 0.10 if mom_5 < -0.05 else 0.0
@@ -6083,8 +6088,10 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     _ci_mult = risk_signal.get('ci_multiplier', 1.0)
     if abs(_ci_mult - 1.0) > 0.01 and 'lower_80ci' in fc_df.columns and 'upper_80ci' in fc_df.columns:
         _fp = fc_df['forecast_price']
-        fc_df['lower_80ci'] = (_fp - (_fp - fc_df['lower_80ci']) * _ci_mult).round(2)
-        fc_df['upper_80ci'] = (_fp + (fc_df['upper_80ci'] - _fp) * _ci_mult).round(2)
+        # D+1: x(1+(mult-1)*0.5) ~ D+7: x mult — 단기 CI 과도 확대 방지
+        _mult_arr = 1.0 + (_ci_mult - 1.0) * np.linspace(0.5, 1.0, len(fc_df))
+        fc_df['lower_80ci'] = (_fp - (_fp - fc_df['lower_80ci']) * _mult_arr).round(2)
+        fc_df['upper_80ci'] = (_fp + (fc_df['upper_80ci'] - _fp) * _mult_arr).round(2)
         _atomic_csv(fc_df, OUTPUT_DIR / 'forecast_7days.csv', index=False)
         log.info(f"    Shock CI 적용: ×{_ci_mult:.1f} → forecast_7days.csv 갱신")
 
