@@ -4757,6 +4757,15 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
 
     # ── A: live bias correction (실측 오차 피드백, 지평선별 감쇠)
     bias = compute_live_bias_correction()
+    # 모멘텀 조건부 추가 보정: 강한 하락 추세 구간 과대 예측 패턴 완화
+    _mom_src_bias = full_df if full_df is not None else feature_df
+    _mom_bias = float(_mom_src_bias['mom_5d'].dropna().iloc[-1]) if 'mom_5d' in _mom_src_bias.columns else 0.0
+    if _mom_bias < -0.08:
+        bias -= 3.0
+        log.info(f"    모멘텀 하락({_mom_bias*100:.1f}%) 추가 보정: -3.0$")
+    elif _mom_bias < -0.05:
+        bias -= 2.0
+        log.info(f"    모멘텀 하락({_mom_bias*100:.1f}%) 추가 보정: -2.0$")
     if bias != 0.0:
         _bias_decay = np.array([1.0, 0.85, 0.70, 0.55, 0.40, 0.25, 0.15])[:len(ensemble)]
         ensemble = ensemble + bias * _bias_decay
@@ -5430,8 +5439,10 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
         ci_multiplier = 1.0
 
     # OVX 절대값 기반 CI 추가 확대 (내재변동성 선행 신호 — z-score와 독립 적용)
-    if ovx_level >= 45:
-        _ovx_abs_mult = 2.0
+    if ovx_level >= 60:
+        _ovx_abs_mult = 3.0
+    elif ovx_level >= 45:
+        _ovx_abs_mult = 2.5
     elif ovx_level >= 35:
         _ovx_abs_mult = 1.5
     elif ovx_level >= 25:
@@ -5447,7 +5458,10 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     # 헤지 비율: 리스크 레벨 + surge_prob 기반 (유가 사용 기업 기준)
     _base_hedge = {'SURGE_RISK': 0.65, 'CAUTION': 0.30, 'DROP_RISK': 0.05, 'NORMAL': 0.0}[level]
     _surge_adj  = max((surge_prob - 0.45) * 0.6, 0.0) if level == 'SURGE_RISK' else 0.0
-    hedge_ratio = round(float(np.clip(_base_hedge + _surge_adj, 0.0, 1.0)), 2)
+    _geo_adj    = 0.10 if geo > 0.5 else 0.0
+    _mom_adj    = 0.10 if mom_5 < -0.05 else 0.0
+    _ovx_adj    = 0.05 if ovx_level >= 60 else 0.0
+    hedge_ratio = round(float(np.clip(_base_hedge + _surge_adj + _geo_adj + _mom_adj + _ovx_adj, 0.0, 0.75)), 2)
 
     # EIA 발표일(수요일) + 반응일(목요일): CI 확대 + hedge 증가
     _eia_dow = pd.Timestamp.today().dayofweek  # 0=Mon, 2=Wed, 3=Thu
