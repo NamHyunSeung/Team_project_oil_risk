@@ -1681,7 +1681,7 @@ FEATURE_COLS = [
     'gold_wti_ratio_z', 'copper_gold_ratio_z', 'gold_mom_5d', 'copper_mom_5d',
     # 가격·재고 기술신호 (MACD 크로스, 모멘텀가속, 재고방향, 감성변화)
     'macd_cross', 'mom_accel', 'inv_draw_signal', 'inv_surprise_dir',
-    'supply_demand_gap', 'inv_draw_x_macd', 'sentiment_chg3',
+    'supply_demand_gap', 'demand_event_score', 'inv_draw_x_macd', 'sentiment_chg3',
 ]
 
 
@@ -5717,10 +5717,13 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
         news_df = fetch_news()
         api_status['Guardian'] = '❌ 오류'
 
-    # EIA
-    api_status['EIA'] = '✅ 정상' if EIA_API_KEY else '❌ 미설정'
-
     feature_df, full_df, aux_models = build_features(price_df, news_df)
+    # EIA: build_features 이후 실제 데이터 존재 여부로 검증
+    _eia_ok = ('inv_surprise' in feature_df.columns
+               and feature_df['inv_surprise'].abs().sum() > 0)
+    api_status['EIA'] = ('✅ 정상' if _eia_ok
+                         else '⚠️ 수집 실패' if EIA_API_KEY
+                         else '❌ 미설정')
     _model_age_days = _check_refit_staleness()
     model_results, _     = train_models(feature_df, full_df, aux=aux_models)
     _save_retrain_record()
@@ -5884,6 +5887,11 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
         mark = "✓" if p.exists() else "✗"
         print(f"    {mark}  output/{fname}")
     print("─" * 65 + "\n")
+
+    try:
+        monitor_rss_alerts()
+    except Exception as _rss_e:
+        log.warning(f"    RSS 갱신 실패({_rss_e})")
 
     return {
         'risk_signal':    risk_signal,
