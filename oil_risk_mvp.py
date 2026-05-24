@@ -110,6 +110,7 @@ DATA_YEARS       = 10                             # 데이터 수집 기간 (XGB
 SARIMAX_YEARS    = 5                              # SARIMAX 학습 기간 (최근 가격 패턴 집중)
 SARIMAX_WINDOW_YEARS = 3                          # SARIMAX 전용 훈련 window (최근 레짐 집중, VAR/ETS 불변)
 XGB_YEARS        = 3                              # XGBoost 슬라이딩 윈도우 (최근 레짐 집중)
+EIA_SHIFT        = 1                              # EIA 재고 발표 지연 (영업일): 1=목요일 반영, 원래값=3
 
 # ── 이메일 알림 설정 (.env 또는 환경변수)
 # Gmail 사용 시: Google 계정 → 보안 → 앱 비밀번호 생성 후 SMTP_PASSWORD에 입력
@@ -600,9 +601,9 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
         # 주간 변화량 (천 배럴, 음수=감소=강세)
         inv_chg = inv.diff()
 
-        # 주간 → 영업일 ffill (EIA 발표 지연 +3영업일: 금요일 기준, 다음 수요일 발표)
-        inv_chg_bday   = inv_chg.resample('B').first().shift(3).ffill()
-        inv_level_bday = inv.resample('B').first().shift(3).ffill()
+        # 주간 → 영업일 ffill (EIA_SHIFT 영업일 지연: 라이브=1, 백테스트 엄밀=3)
+        inv_chg_bday   = inv_chg.resample('B').first().shift(EIA_SHIFT).ffill()
+        inv_level_bday = inv.resample('B').first().shift(EIA_SHIFT).ffill()
 
         # z-score 정규화
         def _zscore(s, w=252):
@@ -613,11 +614,11 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
 
         # 서프라이즈: 실제 변화량 vs 직전 4주 이동평균 대비 이탈 (shift(1)로 당주 자기참조 방지)
         inv_chg_ma4 = inv_chg.shift(1).rolling(4).mean()
-        inv_surprise_raw = (inv_chg - inv_chg_ma4).resample('B').first().shift(3).ffill()
+        inv_surprise_raw = (inv_chg - inv_chg_ma4).resample('B').first().shift(EIA_SHIFT).ffill()
         df['inv_surprise'] = _zscore(inv_surprise_raw).reindex(df.index).ffill().bfill().fillna(0)
 
         # 4주 연속 방향성 모멘텀 (증가/감소 추세)
-        inv_mom4 = inv_chg.rolling(4).sum().resample('B').first().shift(3).ffill()
+        inv_mom4 = inv_chg.rolling(4).sum().resample('B').first().shift(EIA_SHIFT).ffill()
         df['inv_mom4_z'] = _zscore(inv_mom4).reindex(df.index).ffill().bfill().fillna(0)
 
         log.info(f"      원유 재고 연결 완료: {len(inv)}주치 + 서프라이즈·모멘텀 피처")
@@ -638,14 +639,14 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
             inv_chg = inv_raw.diff()
             def _zscore2(s, w=252):
                 return ((s - s.rolling(w).mean()) / (s.rolling(w).std() + 1e-8)).fillna(0)
-            inv_chg_b   = inv_chg.resample('B').first().shift(3).ffill()
-            inv_lvl_b   = inv_raw.resample('B').first().shift(3).ffill()
+            inv_chg_b   = inv_chg.resample('B').first().shift(EIA_SHIFT).ffill()
+            inv_lvl_b   = inv_raw.resample('B').first().shift(EIA_SHIFT).ffill()
             df['inv_chg_zscore'] = _zscore2(inv_chg_b).reindex(df.index).ffill().bfill().fillna(0)
             df['inv_lvl_zscore'] = _zscore2(inv_lvl_b).reindex(df.index).ffill().bfill().fillna(0)
             inv_chg_ma4  = inv_chg.shift(1).rolling(4).mean()
-            inv_surp_b   = (inv_chg - inv_chg_ma4).resample('B').first().shift(3).ffill()
+            inv_surp_b   = (inv_chg - inv_chg_ma4).resample('B').first().shift(EIA_SHIFT).ffill()
             df['inv_surprise'] = _zscore2(inv_surp_b).reindex(df.index).ffill().bfill().fillna(0)
-            inv_mom4 = inv_chg.rolling(4).sum().resample('B').first().shift(3).ffill()
+            inv_mom4 = inv_chg.rolling(4).sum().resample('B').first().shift(EIA_SHIFT).ffill()
             df['inv_mom4_z'] = _zscore2(inv_mom4).reindex(df.index).ffill().bfill().fillna(0)
             log.info(f"      EIA 공개 CSV 연결 완료: {len(inv_raw)}주치")
         except Exception as exc2:
@@ -5410,6 +5411,15 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     _base_hedge = {'SURGE_RISK': 0.65, 'CAUTION': 0.30, 'DROP_RISK': 0.05, 'NORMAL': 0.0}[level]
     _surge_adj  = max((surge_prob - 0.45) * 0.6, 0.0) if level == 'SURGE_RISK' else 0.0
     hedge_ratio = round(float(np.clip(_base_hedge + _surge_adj, 0.0, 1.0)), 2)
+
+    # EIA 발표일(수요일) + 반응일(목요일): CI 확대 + hedge 증가
+    _eia_dow = pd.Timestamp.today().dayofweek  # 0=Mon, 2=Wed, 3=Thu
+    if _eia_dow in (2, 3):
+        _eia_ci_boost = 1.3 if _eia_dow == 2 else 1.2
+        ci_multiplier = float(np.clip(ci_multiplier * _eia_ci_boost, ci_multiplier, 2.5))
+        hedge_ratio   = round(float(np.clip(hedge_ratio + 0.10, 0.0, 1.0)), 2)
+        log.info(f"    📊 EIA {'발표일' if _eia_dow == 2 else '반응일'} 불확실성 확대: "
+                 f"CI×{ci_multiplier:.2f} hedge={hedge_ratio:.2f}")
 
     signal = {
         'date':              pd.Timestamp.today().normalize().strftime('%Y-%m-%d'),
