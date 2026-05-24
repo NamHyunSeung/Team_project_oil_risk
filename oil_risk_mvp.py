@@ -5316,11 +5316,17 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     if _surge_fire:
         directional += (surge_prob - 0.50) * 0.4
 
+    # 촉매 감지: geo이벤트/OVX급등/GPR급등/EIA서프라이즈 없으면 방향 임계값 강화
+    _catalyst = (geo > 0.5 or ovx_z > 1.5
+                 or float(row.get('gpr_zscore', 0.0)) > 1.5
+                 or abs(float(row.get('inv_surprise', 0.0))) > 1.0)
+    _dir_thresh = 0.05 if _catalyst else 0.08  # 촉매 없을 때 60% 더 강한 방향 신호 요구
+
     # 분류 규칙 (threshold 0.025 → 0.05: 과잉 신호 방지)
-    if   risk_score >= 2.2 and directional >  0.05:  level = 'SURGE_RISK'
-    elif risk_score >= 2.2 and directional < -0.05:  level = 'DROP_RISK'
-    elif risk_score >= 1.4 or abs(directional) > 0.04: level = 'CAUTION'
-    else:                                              level = 'NORMAL'
+    if   risk_score >= 2.2 and directional >  _dir_thresh: level = 'SURGE_RISK'
+    elif risk_score >= 2.2 and directional < -_dir_thresh: level = 'DROP_RISK'
+    elif risk_score >= 1.4 or abs(directional) > 0.04:    level = 'CAUTION'
+    else:                                                  level = 'NORMAL'
 
     # ── CI 멀티플라이어: Shock 이진 + 뉴스 감성 서프라이즈 연속 조정
     _gpr_z      = float(row.get('gpr_zscore', 0.0))
