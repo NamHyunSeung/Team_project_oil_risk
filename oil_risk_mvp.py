@@ -4340,10 +4340,10 @@ def compute_ensemble_weights(window: int = 30):
 
 
 def compute_live_bias_correction(window: int = 10, max_correction: float = 5.0) -> float:
-    """최근 live 실측 오차의 지수가중 평균으로 bias correction 값 반환.
+    """최근 live 실측 오차의 중앙값으로 bias correction 값 반환.
 
-    예측이 지속적으로 한쪽으로 치우칠 때 다음 예측에 보정값을 더함.
-    max_correction으로 과보정 방지. live 데이터 3건 미만이면 0 반환.
+    median 사용으로 실행 누락 등 이상치에 robust.
+    live 데이터 3건 미만이면 0 반환.
     price_error = actual - predicted 이므로 양수면 과소예측 → 더해야 함.
     """
     if not PRED_LOG_FILE.exists():
@@ -4351,27 +4351,14 @@ def compute_live_bias_correction(window: int = 10, max_correction: float = 5.0) 
     try:
         pl = pd.read_csv(PRED_LOG_FILE)
         lv = pl[(pl['type'] == 'live') & pl['price_error'].notna()].tail(window)
-        if len(lv) < 2:
+        if len(lv) < 3:
             return 0.0
 
-        # 지수가중 평균 (최근일수록 더 반영)
         errors = lv['price_error'].values.astype(float)
+        bias = float(np.median(errors))
 
-        # 레짐 전환 감지: 최근 3일 부호 vs 이전 부호가 반전 → 최근 3건만 사용
-        if len(errors) >= 5:
-            recent_sign = np.sign(errors[-3:].mean())
-            older_sign  = np.sign(errors[:-3].mean())
-            if recent_sign != 0 and older_sign != 0 and recent_sign != older_sign:
-                errors = errors[-3:]
-                log.info(f"    레짐 전환 감지 (부호 반전) → 최근 {len(errors)}건만 사용")
-
-        weights = np.exp(np.linspace(0, 1, len(errors)))
-        weights /= weights.sum()
-        bias = float(np.dot(weights, errors))
-
-        # 과보정 방지
         bias = max(-max_correction, min(max_correction, bias))
-        log.info(f"    Live bias correction: {bias:+.3f}$ (최근 {len(lv)}건 지수가중)")
+        log.info(f"    Live bias correction: {bias:+.3f}$ (최근 {len(lv)}건 중앙값)")
         return bias
     except Exception:
         return 0.0
