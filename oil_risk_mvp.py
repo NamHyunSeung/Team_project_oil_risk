@@ -108,6 +108,7 @@ EIA_API_KEY      = os.getenv("EIA_API_KEY",      "")
 GPR_FILE         = "data_gpr_daily_recent.xls"   # 프로젝트 폴더에 위치
 DATA_YEARS       = 10                             # 데이터 수집 기간 (XGBoost 학습용)
 SARIMAX_YEARS    = 5                              # SARIMAX 학습 기간 (최근 가격 패턴 집중)
+SARIMAX_WINDOW_YEARS = 3                          # SARIMAX 전용 훈련 window (최근 레짐 집중, VAR/ETS 불변)
 XGB_YEARS        = 3                              # XGBoost 슬라이딩 윈도우 (최근 레짐 집중)
 
 # ── 이메일 알림 설정 (.env 또는 환경변수)
@@ -2612,7 +2613,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 if not _missing.empty:
                     _extra = full_df.loc[_missing, _avail_cols].ffill()
                     _sx_base = pd.concat([feature_df, _extra]).sort_index()
-            cutoff = _sx_base.index[-1] - pd.DateOffset(years=SARIMAX_YEARS)
+            cutoff = _sx_base.index[-1] - pd.DateOffset(years=SARIMAX_WINDOW_YEARS)
             sx_df  = _sx_base[_sx_base.index >= cutoff]
             n_test_sx = min(90, int(len(sx_df) * 0.15))
             sx_train  = sx_df.iloc[:-n_test_sx]
@@ -4779,9 +4780,9 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         _persist_fc = np.full(len(ensemble), last_price)
         ensemble = (1 - _spike_blend) * ensemble + _spike_blend * _persist_fc
 
-    # ── A4: D+2-7 구조적 persistence 블렌딩 (h>1 MASE>1.0 구조적 보완)
+    # ── A4: D+2-7 구조적 persistence 블렌딩 (multi-step MASE>1.0, 방향정확도<40% → 거의 pure persistence)
     # D+1(index 0)은 0%이므로 기존 MASE(0.8132) 불변. D+2-7만 적용.
-    _ms_blend = np.array([0.0, 0.15, 0.30, 0.45, 0.55, 0.60, 0.65])[:len(ensemble)]
+    _ms_blend = np.array([0.0, 0.85, 0.90, 0.93, 0.95, 0.97, 0.98])[:len(ensemble)]
     _persist_base = np.full(len(ensemble), last_price)
     ensemble = ensemble * (1 - _ms_blend) + _persist_base * _ms_blend
     log.info(f"    D+2-7 Persistence 블렌딩: D+2={_ms_blend[1]:.0%} ~ D+7={_ms_blend[min(6,len(_ms_blend)-1)]:.0%}")
@@ -5422,7 +5423,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
         'geopolitical_alert': bool(geo > 0.5),
         'risk_score':        round(risk_score, 4),
         'directional_bias':  round(directional, 5),
-        'direction_confidence': 'HIGH' if abs(directional) > 0.12 else ('MEDIUM' if abs(directional) > 0.06 else 'LOW'),
+        'direction_confidence': 'HIGH' if abs(directional) > 0.20 else ('MEDIUM' if abs(directional) > 0.06 else 'LOW'),
         'ci_multiplier':     ci_multiplier,
         'surge_prob_3d':     round(surge_prob, 3),
         'hedge_ratio':       hedge_ratio,
