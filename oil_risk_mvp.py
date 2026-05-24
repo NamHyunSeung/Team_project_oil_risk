@@ -4788,6 +4788,14 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         _bias_decay = np.array([1.0, 0.85, 0.70, 0.55, 0.40, 0.25, 0.15])[:len(ensemble)]
         ensemble = ensemble + bias * _bias_decay
 
+    # ── B: D+2-7 모멘텀 드리프트 (추세 국면 예측 경로 방향성 반영, D+1 제외)
+    if abs(_mom_bias) > 0.03 and len(ensemble) > 1:
+        _drift_w = np.array([0.0, 0.30, 0.25, 0.18, 0.12, 0.08, 0.05])[:len(ensemble)]
+        _drift = np.clip(_mom_bias * last_price * _drift_w, -4.0, 4.0)
+        ensemble = ensemble + _drift
+        log.info(f"    모멘텀 드리프트(D+2-7): mom={_mom_bias*100:.1f}% "
+                 f"→ D+2 {_drift[1]:+.2f}, D+7 {_drift[-1]:+.2f}")
+
     # ── A2: 적응형 오차 보정 (Adaptive Error Correction)
     # ec_last_feat는 훈련 시점 test_df 마지막 행으로 고정됨 → 현재 시장 상태로 재구성
     _stk_ec = results.get('stacking', {})
@@ -5020,6 +5028,19 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
                         old_live.at[idx, 'actual_vol_5d'] = round(av, 5)
                     if not (np.isnan(av) or np.isnan(pv)):
                         old_live.at[idx, 'vol_error'] = round(av - pv, 5)
+                    # 방향성 추적 (actual 확정 시 계산)
+                    _prev_bday_dir = dt - pd.tseries.offsets.BDay(1)
+                    if _prev_bday_dir in price_src.index:
+                        try:
+                            _pc = float(price_src.loc[_prev_bday_dir, 'WTI'])
+                            _pd_dir = 'UP' if pp > _pc else ('DOWN' if pp < _pc else 'FLAT')
+                            _ad_dir = 'UP' if ap > _pc else ('DOWN' if ap < _pc else 'FLAT')
+                            if pd.isna(row.get('pred_direction', np.nan)):
+                                old_live.at[idx, 'pred_direction'] = _pd_dir
+                            old_live.at[idx, 'actual_direction'] = _ad_dir
+                            old_live.at[idx, 'dir_correct'] = 1 if _pd_dir == _ad_dir else 0
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -5124,6 +5145,21 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
         except Exception:
             pass
 
+        # 방향성 예측 (pred - 전일종가 부호)
+        _pred_dir_e = _actual_dir_e = _dir_correct_e = None
+        try:
+            _entry_ts_dt = pd.Timestamp(entry_date_str)
+            _wti_hist = price_src['WTI'].dropna() if 'WTI' in price_src.columns else pd.Series(dtype=float)
+            _wti_hist = _wti_hist[_wti_hist.index < _entry_ts_dt]
+            if len(_wti_hist) > 0:
+                _prev_c = float(_wti_hist.iloc[-1])
+                _pred_dir_e = 'UP' if entry_pred > _prev_c else ('DOWN' if entry_pred < _prev_c else 'FLAT')
+                if entry_actual is not None:
+                    _actual_dir_e = 'UP' if entry_actual > _prev_c else ('DOWN' if entry_actual < _prev_c else 'FLAT')
+                    _dir_correct_e = 1 if _pred_dir_e == _actual_dir_e else 0
+        except Exception:
+            pass
+
         new_entry = {
             'date':            entry_date_str,
             'sarimax_pred':    entry_pred,
@@ -5137,6 +5173,9 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
             'vol_error':       None,
             'type':            'live',
             'model_version':   MODEL_VERSION,
+            'pred_direction':  _pred_dir_e,
+            'actual_direction': _actual_dir_e,
+            'dir_correct':     _dir_correct_e,
         }
 
         # 같은 날짜 entry가 있으면 최신 실행값으로 덮어쓰기
@@ -6113,6 +6152,7 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
 
     # ── A: 라이브 성능 모니터링 (최근 30건 MAE vs 백테스트 MAE)
     _live_mae_val = None
+    _forecast_reliability = 'UNKNOWN'
     if PRED_LOG_FILE.exists():
         try:
             _pl_check = pd.read_csv(PRED_LOG_FILE)
@@ -6152,6 +6192,10 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                              f"(naive_mae={_naive_mae_live:.4f})")
                     if _live_mase > 0.95:
                         log.warning(f"    ⚠ 라이브 MASE={_live_mase:.3f} → naive 근접, 재훈련 검토")
+                    _forecast_reliability = (
+                        'HIGH' if _live_mase < 1.0 else
+                        'MEDIUM' if _live_mase < 1.5 else 'LOW'
+                    )
             # ── C: 80% CI 실제 커버리지 검증
             if 'lower_80ci' in _pl_check.columns and 'upper_80ci' in _pl_check.columns:
                 _ci_rows = _pl_check[
@@ -6171,6 +6215,17 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                                     f"— CI 폭 확대 검토 필요")
         except Exception as _lme:
             log.warning(f"    라이브 성능 모니터링 실패({_lme})")
+
+    # 신뢰도 플래그 → latest_risk_signal.csv 패치
+    _sig_path = OUTPUT_DIR / 'latest_risk_signal.csv'
+    if _sig_path.exists():
+        try:
+            _sig_df = pd.read_csv(_sig_path)
+            _sig_df['forecast_reliability'] = _forecast_reliability
+            _atomic_csv(_sig_df, _sig_path, index=False)
+            log.info(f"    forecast_reliability: {_forecast_reliability}")
+        except Exception:
+            pass
 
     send_risk_alert(risk_signal, fc_df)
     kw_df                = extract_crisis_keywords(news_df)
