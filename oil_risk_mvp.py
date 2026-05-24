@@ -4792,9 +4792,16 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     # ── A4: D+2-7 구조적 persistence 블렌딩 (multi-step MASE>1.0, 방향정확도<40% → 거의 pure persistence)
     # D+1(index 0)은 0%이므로 기존 MASE(0.8132) 불변. D+2-7만 적용.
     _ms_blend = np.array([0.0, 0.85, 0.90, 0.93, 0.95, 0.97, 0.98])[:len(ensemble)]
-    _persist_base = np.full(len(ensemble), last_price)
+    # 모멘텀 바이어스: persistence 기준점을 최근 추세로 보정 (리스크 방향성 정보 제공)
+    _mom_src      = full_df if full_df is not None else feature_df
+    _mom_val      = float(_mom_src['mom_5d'].dropna().iloc[-1]) if 'mom_5d' in _mom_src.columns else 0.0
+    _daily_mom    = np.clip(_mom_val / 5, -0.02, 0.02)   # 일일 환산, 과도한 외삽 방지
+    _mom_days     = np.arange(len(ensemble))               # [0,1,2,...,6]
+    _persist_base = last_price * (1 + _daily_mom * _mom_days * 0.3)
     ensemble = ensemble * (1 - _ms_blend) + _persist_base * _ms_blend
-    log.info(f"    D+2-7 Persistence 블렌딩: D+2={_ms_blend[1]:.0%} ~ D+7={_ms_blend[min(6,len(_ms_blend)-1)]:.0%}")
+    _d7_adj = float(_persist_base[-1] - last_price) if len(_persist_base) > 1 else 0.0
+    log.info(f"    D+2-7 Persistence 블렌딩: D+2={_ms_blend[1]:.0%} ~ D+7={_ms_blend[min(6,len(_ms_blend)-1)]:.0%} "
+             f"(모멘텀: {_daily_mom*100:+.2f}%/일, D+7기준점 {_d7_adj:+.2f}$)")
 
     # ── 예측값 sanity check: spot 대비 ±30% 초과 시 경고
     _dev_d1_pct = (ensemble[0] - last_price) / last_price * 100
