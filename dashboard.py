@@ -873,7 +873,8 @@ with tab5:
                                      'price_error_pct':'오차(%)'}.get(c, c)
                                     for c in _lv_show.columns]
                 st.dataframe(_lv_show, hide_index=True, use_container_width=True)
-            st.stop()  # 일반 사용자는 여기까지
+            st.info("ℹ️ 상세 분석 (드리프트 감지, 오차 추이, 방향성 정확도)은 관리자 전용입니다.")
+            st.stop()
 
         # ── 드리프트 경고 (live MAPE > backtest MAPE × 2)
         if (not bt.empty and 'price_error_pct' in bt.columns and bt['price_error_pct'].notna().any()
