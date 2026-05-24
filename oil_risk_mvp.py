@@ -4893,6 +4893,14 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             fc_df['upper_80ci'] = (_fp + (fc_df['upper_80ci'] - _fp) * _ci_expand).round(2)
             log.warning(f"    ⚠ 모델 불일치 과다(D+1 std={_d1_std:.2f}$) → CI ×{_ci_expand}")
 
+    # VaR: 정규분포 5%/95% 분위수 (헤지 기준선 — 단방향 꼬리 리스크)
+    _var_src_v = full_df if full_df is not None else feature_df
+    _vol5d_now = float(_var_src_v['vol_5d'].dropna().iloc[-1]) if 'vol_5d' in _var_src_v.columns else 0.015
+    _t_var = np.arange(1, 8)
+    fc_df['var_5pct']  = (fc_df['forecast_price'] - last_price * _vol5d_now * 1.645 * np.sqrt(_t_var)).round(2)
+    fc_df['var_95pct'] = (fc_df['forecast_price'] + last_price * _vol5d_now * 1.645 * np.sqrt(_t_var)).round(2)
+    log.info(f"    VaR(5%) D+1={fc_df['var_5pct'].iloc[0]:.2f}$  D+7={fc_df['var_5pct'].iloc[6]:.2f}$")
+
     _atomic_csv(fc_df, OUTPUT_DIR / 'forecast_7days.csv', index=False)
     log.info("    forecast_7days.csv 저장")
     return fc_df
@@ -5310,6 +5318,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     bb        = float(row.get('bb_position',           0.0))
     geo       = float(row.get('geo_dummy',             0.0))
     ovx_z     = float(row.get('ovx_zscore',            0.0))
+    ovx_level = float(row.get('OVX',                  0.0))
     ovx_chg   = float(row.get('ovx_change',            0.0))
     price_z   = float(row.get('price_zscore',          0.0))
     n_neg     = float(row.get('news_count_neg',        0.0))
@@ -5413,6 +5422,19 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     else:
         ci_multiplier = 1.0
 
+    # OVX 절대값 기반 CI 추가 확대 (내재변동성 선행 신호 — z-score와 독립 적용)
+    if ovx_level >= 45:
+        _ovx_abs_mult = 2.0
+    elif ovx_level >= 35:
+        _ovx_abs_mult = 1.5
+    elif ovx_level >= 25:
+        _ovx_abs_mult = 1.2
+    else:
+        _ovx_abs_mult = 1.0
+    if _ovx_abs_mult > ci_multiplier:
+        log.info(f"    🔥 OVX 절대값 CI 확대: OVX={ovx_level:.1f} → CI×{_ovx_abs_mult:.1f}")
+        ci_multiplier = _ovx_abs_mult
+
     current_wti = float(full_df['WTI'].dropna().iloc[-1])
 
     # 헤지 비율: 리스크 레벨 + surge_prob 기반 (유가 사용 기업 기준)
@@ -5428,6 +5450,25 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
         hedge_ratio   = round(float(np.clip(hedge_ratio + 0.10, 0.0, 1.0)), 2)
         log.info(f"    📊 EIA {'발표일' if _eia_dow == 2 else '반응일'} 불확실성 확대: "
                  f"CI×{ci_multiplier:.2f} hedge={hedge_ratio:.2f}")
+
+    # 비대칭 리스크 비율: 최근 라이브 오차 분포 기반 (하방 vs 상방 기대손실)
+    _down_risk_pct = 50.0
+    try:
+        if PRED_LOG_FILE.exists():
+            _pl_ar = pd.read_csv(PRED_LOG_FILE)
+            _lv_ar = _pl_ar[(_pl_ar['type'] == 'live') & _pl_ar['price_error'].notna()].tail(15)
+            if len(_lv_ar) >= 5:
+                _errs = _lv_ar['price_error'].values.astype(float)
+                _neg  = _errs[_errs < 0]
+                _pos  = _errs[_errs > 0]
+                if len(_neg) > 0 and len(_pos) > 0:
+                    _neg_risk = len(_neg) / len(_errs) * abs(_neg.mean())
+                    _pos_risk = len(_pos) / len(_errs) * abs(_pos.mean())
+                    _tot = _neg_risk + _pos_risk
+                    if _tot > 0:
+                        _down_risk_pct = round(float(_neg_risk / _tot * 100), 1)
+    except Exception:
+        pass
 
     signal = {
         'date':              pd.Timestamp.today().normalize().strftime('%Y-%m-%d'),
@@ -5445,6 +5486,10 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
         'ci_multiplier':     ci_multiplier,
         'surge_prob_3d':     round(surge_prob, 3),
         'hedge_ratio':       hedge_ratio,
+        'ovx_level':         round(ovx_level, 1),
+        'ovx_alarm':         'HIGH' if ovx_level >= 45 else ('ELEVATED' if ovx_level >= 35 else 'NORMAL'),
+        'downside_risk_pct': _down_risk_pct,
+        'upside_risk_pct':   round(100.0 - _down_risk_pct, 1),
     }
 
     _atomic_csv(pd.DataFrame([signal]), OUTPUT_DIR / 'latest_risk_signal.csv', index=False)
@@ -6096,6 +6141,13 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     print(f"  뉴스 감성   : {risk_signal['news_sentiment']:+.4f}")
     print(f"  지정학 경보 : {'활성 ⚠' if risk_signal['geopolitical_alert'] else '없음 —'}")
     print(f"  리스크 점수 : {risk_signal['risk_score']:.4f}")
+    _ovx_lvl = risk_signal.get('ovx_level', 0.0)
+    _ovx_alm = risk_signal.get('ovx_alarm', 'NORMAL')
+    print(f"  OVX 수준    : {_ovx_lvl:.1f} ({_ovx_alm})")
+    _dn = risk_signal.get('downside_risk_pct', 50.0)
+    _up = risk_signal.get('upside_risk_pct',   50.0)
+    print(f"  비대칭 리스크: 하방 {_dn:.0f}% / 상방 {_up:.0f}%")
+    print(f"  D+1 VaR(5%) : ${fc_df['var_5pct'].iloc[0]:.2f}  VaR(95%)=${fc_df['var_95pct'].iloc[0]:.2f}")
     print("\n  📁 저장된 파일:")
     for fname in ['model_performance.csv', 'forecast_7days.csv', 'latest_risk_signal.csv',
                   'crisis_keywords.csv', 'oil_forecast_plot.png', 'wordcloud.png']:
