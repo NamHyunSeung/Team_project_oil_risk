@@ -77,6 +77,19 @@ EMBED_MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
 EMBED_TOP_K      = 15   # WTI 수익률 상관관계 상위 차원 수
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
+
+def _get_model_version() -> str:
+    try:
+        import subprocess
+        return subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            cwd=str(Path(__file__).parent),
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        return datetime.now().strftime('%Y%m%d')
+
+MODEL_VERSION = _get_model_version()
 log = logging.getLogger(__name__)
 
 # ── Optional dependency flags ─────────────────────────────────────────────────
@@ -5123,6 +5136,7 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
             'actual_vol_5d':   None,
             'vol_error':       None,
             'type':            'live',
+            'model_version':   MODEL_VERSION,
         }
 
         # 같은 날짜 entry가 있으면 최신 실행값으로 덮어쓰기
@@ -5514,7 +5528,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
         'directional_bias':  round(directional, 5),
         'direction_confidence': 'HIGH' if abs(directional) > 0.20 else ('MEDIUM' if abs(directional) > 0.06 else 'LOW'),
         'ci_multiplier':     ci_multiplier,
-        'surge_prob_3d':     round(surge_prob, 3),
+        'surge_prob_3d':     round(_surge_p_adj, 3),
         'hedge_ratio':       hedge_ratio,
         'ovx_level':         round(ovx_level, 1),
         'ovx_alarm':         'HIGH' if ovx_level >= 45 else ('ELEVATED' if ovx_level >= 35 else 'NORMAL'),
@@ -6106,6 +6120,18 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                 _pl_check['type'].isin(['live', 'gap']) &
                 _pl_check['price_error'].notna()
             ]
+            # 현재 버전 샘플이 충분하면 버전 필터링, 아니면 전체 사용
+            if 'model_version' in _pl_check.columns:
+                _curr_ver_rows = _pl_check[
+                    (_pl_check['type'] == 'live') &
+                    (_pl_check['model_version'] == MODEL_VERSION) &
+                    _pl_check['price_error'].notna()
+                ]
+                if len(_curr_ver_rows) >= 5:
+                    _live_known = _curr_ver_rows
+                    log.info(f"    성능 평가: v{MODEL_VERSION} 기준 {len(_curr_ver_rows)}건")
+                else:
+                    log.info(f"    성능 평가: v{MODEL_VERSION} 샘플 부족({len(_curr_ver_rows)}건) → 전체 사용")
             if len(_live_known) >= 10:
                 _live30 = _live_known.tail(30)
                 _live_mae_val = float(_live30['price_error'].abs().mean())
