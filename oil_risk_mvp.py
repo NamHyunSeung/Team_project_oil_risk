@@ -5299,9 +5299,21 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
             else:
                 directional *= 0.75   # 모델·모멘텀 반대 방향 → 신호 약화
 
-    # 3일 급등탐지기 확률 반영: OVX 상승 국면 확인 or 고확률(>0.65)이면 directional 상향
-    # ovx_z > 0.5 조건: 시장 공포 없을 때 false surge 억제 (precision 개선)
-    if surge_prob > 0.65 or (surge_prob > 0.45 and ovx_z > 0.5):
+    # 3일 급등탐지기 확률 반영: 2일 연속 확인 + OVX 게이트 (단발 오경보 억제)
+    _prev_surge_p = 0.0
+    try:
+        _ps_path = OUTPUT_DIR / 'latest_risk_signal.csv'
+        if _ps_path.exists():
+            _ps_df = pd.read_csv(_ps_path)
+            if 'surge_prob_3d' in _ps_df.columns:
+                _prev_surge_p = float(_ps_df['surge_prob_3d'].iloc[0])
+    except Exception:
+        pass
+    # 고확률(>0.65): 즉시 적용 / 중간확률: OVX>0.5 AND 전일도 0.35 초과 필요
+    _surge_fire = surge_prob > 0.65 or (
+        surge_prob > 0.45 and ovx_z > 0.5 and _prev_surge_p > 0.35
+    )
+    if _surge_fire:
         directional += (surge_prob - 0.50) * 0.4
 
     # 분류 규칙 (threshold 0.025 → 0.05: 과잉 신호 방지)
@@ -5326,6 +5338,10 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
         ci_multiplier = float(np.clip(_cont_mult, 1.0, 2.0))
         log.info(f"    📰 뉴스 서프라이즈 CI 조정: surp_z={_sent_surp:.2f} "
                  f"mag={_news_smag:.2f} → CI×{ci_multiplier:.2f}")
+    elif ovx_z < -0.3:
+        # OVX 평온 구간 → CI 축소 (calm market, narrow band)
+        ci_multiplier = 0.75
+        log.info(f"    📉 평온 구간 CI 축소: ovx_z={ovx_z:.2f} → CI×{ci_multiplier:.2f}")
     else:
         ci_multiplier = 1.0
 
@@ -5917,7 +5933,7 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
 
     # Shock CI 확대: classify_risk에서 반환된 ci_multiplier 적용
     _ci_mult = risk_signal.get('ci_multiplier', 1.0)
-    if _ci_mult != 1.0 and 'lower_80ci' in fc_df.columns and 'upper_80ci' in fc_df.columns:
+    if abs(_ci_mult - 1.0) > 0.01 and 'lower_80ci' in fc_df.columns and 'upper_80ci' in fc_df.columns:
         _fp = fc_df['forecast_price']
         fc_df['lower_80ci'] = (_fp - (_fp - fc_df['lower_80ci']) * _ci_mult).round(2)
         fc_df['upper_80ci'] = (_fp + (fc_df['upper_80ci'] - _fp) * _ci_mult).round(2)
