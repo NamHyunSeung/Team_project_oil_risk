@@ -4583,13 +4583,21 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         _feat_src_r = full_df if full_df is not None else feature_df
         _cur_ovx_z  = float(_feat_src_r['ovx_zscore'].iloc[-1]) if 'ovx_zscore' in _feat_src_r.columns else 0.0
         _cur_gpr_z  = float(_feat_src_r['gpr_zscore'].iloc[-1]) if 'gpr_zscore' in _feat_src_r.columns else 0.0
+        # 실현변동성 백분위수 (최근 252일 기준)
+        _rv_src = full_df if full_df is not None else feature_df
+        _rv_hist = _rv_src['vol_5d'].dropna().tail(252) if 'vol_5d' in _rv_src.columns else pd.Series(dtype=float)
+        _vol_pct = float((_rv_hist < _rv_hist.iloc[-1]).mean()) if len(_rv_hist) > 20 else 0.5
+
         _reg_adj = {n: 1.0 for n in _stk_names}
         if _cur_gpr_z > 2.0 or _cur_ovx_z > 1.5:
-            _reg_adj.update({'VAR': 1.3, 'NEWS': 1.2, 'XGB': 0.8, 'CAT': 0.85, 'SARIMAX': 0.9, 'LGB': 0.85})
-            log.info(f"    레짐: 위기/고공포 (ovx_z={_cur_ovx_z:.2f} gpr_z={_cur_gpr_z:.2f}) → VAR/NEWS↑ XGB↓")
-        elif _cur_ovx_z > 1.0:
-            _reg_adj.update({'VAR': 1.15, 'NEWS': 1.1, 'XGB': 0.95, 'CAT': 0.95})
-            log.info(f"    레짐: 상승변동성 (ovx_z={_cur_ovx_z:.2f}) → VAR/NEWS 소폭↑")
+            # 위기/충격: SARIMAX 대폭 축소 (lag 모델 무력화), VAR 확대 (다변수 동적 반응)
+            _reg_adj.update({'VAR': 1.6, 'NEWS': 1.2, 'XGB': 1.0, 'CAT': 0.9, 'SARIMAX': 0.5, 'LGB': 0.9})
+            log.info(f"    레짐: 위기/고공포 (ovx_z={_cur_ovx_z:.2f} gpr_z={_cur_gpr_z:.2f} "
+                     f"vol_pct={_vol_pct:.0%}) → SARIMAX↓↓ VAR↑↑")
+        elif _cur_ovx_z > 1.0 or _vol_pct > 0.80:
+            # 상승변동성: 중간 강도 SARIMAX 축소
+            _reg_adj.update({'VAR': 1.3, 'NEWS': 1.1, 'XGB': 1.0, 'CAT': 0.95, 'SARIMAX': 0.7, 'LGB': 0.95})
+            log.info(f"    레짐: 상승변동성 (ovx_z={_cur_ovx_z:.2f} vol_pct={_vol_pct:.0%}) → SARIMAX↓ VAR↑")
         _adj_arr = np.array([_reg_adj.get(n, 1.0) for n in _stk_names]) * _stk_wts
         if _adj_arr.sum() > 0:
             _stk_wts = _adj_arr / _adj_arr.sum()
