@@ -304,6 +304,14 @@ if 'latest_risk_signal' in data:
     if _ci_mult and float(_ci_mult) > 1.0:
         st.warning(f"⚡ **Shock 감지** — CI 구간 ×{float(_ci_mult):.1f} 확대 적용 중 (GPR 급등 또는 지정학 이벤트)")
 
+    _hedge = float(sig.get('hedge_ratio', 0.0))
+    _surge_p = float(sig.get('surge_prob_3d', 0.0))
+    if _hedge > 0.0:
+        _hedge_clr = {'SURGE_RISK': '🔴', 'CAUTION': '🟡', 'DROP_RISK': '🟢', 'NORMAL': '⚪'}.get(level, '⚪')
+        st.info(f"{_hedge_clr} **권장 헤지 비율: {_hedge*100:.0f}%** — "
+                f"3일 급등확률 {_surge_p*100:.0f}% · {RISK_LABEL.get(level, ('',''))[1]} 신호 기반 "
+                f"(유가 사용 기업: 항공·해운·제조)")
+
 st.markdown("---")
 
 # ── 탭 ───────────────────────────────────────────────────────────────────────

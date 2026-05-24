@@ -5299,8 +5299,9 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
             else:
                 directional *= 0.75   # 모델·모멘텀 반대 방향 → 신호 약화
 
-    # 3일 급등탐지기 확률 반영: surge_prob > 0.45이면 directional 상향 (5% 타깃 기준 확률 낮아짐)
-    if surge_prob > 0.45:
+    # 3일 급등탐지기 확률 반영: OVX 상승 국면 확인 or 고확률(>0.65)이면 directional 상향
+    # ovx_z > 0.5 조건: 시장 공포 없을 때 false surge 억제 (precision 개선)
+    if surge_prob > 0.65 or (surge_prob > 0.45 and ovx_z > 0.5):
         directional += (surge_prob - 0.50) * 0.4
 
     # 분류 규칙 (threshold 0.025 → 0.05: 과잉 신호 방지)
@@ -5330,6 +5331,11 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
 
     current_wti = float(full_df['WTI'].dropna().iloc[-1])
 
+    # 헤지 비율: 리스크 레벨 + surge_prob 기반 (유가 사용 기업 기준)
+    _base_hedge = {'SURGE_RISK': 0.65, 'CAUTION': 0.30, 'DROP_RISK': 0.05, 'NORMAL': 0.0}[level]
+    _surge_adj  = max((surge_prob - 0.45) * 0.6, 0.0) if level == 'SURGE_RISK' else 0.0
+    hedge_ratio = round(float(np.clip(_base_hedge + _surge_adj, 0.0, 1.0)), 2)
+
     signal = {
         'date':              pd.Timestamp.today().normalize().strftime('%Y-%m-%d'),
         'risk_level':        level,
@@ -5344,6 +5350,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
         'directional_bias':  round(directional, 5),
         'ci_multiplier':     ci_multiplier,
         'surge_prob_3d':     round(surge_prob, 3),
+        'hedge_ratio':       hedge_ratio,
     }
 
     _atomic_csv(pd.DataFrame([signal]), OUTPUT_DIR / 'latest_risk_signal.csv', index=False)
