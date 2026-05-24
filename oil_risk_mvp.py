@@ -4836,8 +4836,8 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             # D+1 절대 스프레드 계산 후 sqrt(t)로 다단계 확장
             _spread_lo = last_price * np.exp(_ret_q10) - last_price   # 음수
             _spread_hi = last_price * np.exp(_ret_q90) - last_price   # 양수
-            lower_80ci = ensemble + _spread_lo * np.sqrt(t)
-            upper_80ci = ensemble + _spread_hi * np.sqrt(t)
+            lower_80ci = ensemble + _spread_lo * np.power(t, 0.4)
+            upper_80ci = ensemble + _spread_hi * np.power(t, 0.4)
             lower_80ci = np.clip(lower_80ci, last_price * 0.80, last_price * 1.20)
             upper_80ci = np.clip(upper_80ci, last_price * 0.80, last_price * 1.20)
             log.info(f"    신뢰구간 Q10/Q90 적용: D+1 [{lower_80ci[0]:.2f}, {upper_80ci[0]:.2f}]")
@@ -4864,10 +4864,10 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             _src_vol = full_df if full_df is not None else feature_df
             if 'garch_vol' in _src_vol.columns:
                 _garch_v = float(_src_vol['garch_vol'].dropna().iloc[-1])
-                ci_half  = last_price * max(_garch_v, 1e-4) * 1.28 * np.sqrt(t)
+                ci_half  = last_price * max(_garch_v, 1e-4) * 1.28 * np.power(t, 0.4)
             else:
                 recent_vol = float(_src_vol['vol_5d'].dropna().iloc[-1]) if 'vol_5d' in _src_vol.columns else 0.015
-                ci_half    = ensemble * recent_vol * 1.28 * np.sqrt(t)
+                ci_half    = ensemble * recent_vol * 1.28 * np.power(t, 0.4)
             lower_80ci = ensemble - ci_half
             upper_80ci = ensemble + ci_half
 
@@ -5410,9 +5410,13 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     elif risk_score >= 1.4 or abs(directional) > 0.06:    level = 'CAUTION'
     else:                                                  level = 'NORMAL'
 
-    # DROP_RISK + 높은 surge_prob → 방향 불확실 → CAUTION
-    if level == 'DROP_RISK' and surge_prob > 0.40:
-        log.info(f"    ⚖ DROP_RISK + surge_prob={surge_prob:.2f}>0.40 → CAUTION 조정")
+    # 모멘텀 하락 시 surge_prob 할인 (하락 국면 급등 확률 과대평가 억제)
+    _surge_p_adj = surge_prob * max(0.0, 1.0 + mom_5 * 3.0) if mom_5 < -0.03 else surge_prob
+    if _surge_p_adj != surge_prob:
+        log.info(f"    📉 surge_prob 모멘텀 할인: {surge_prob:.3f}→{_surge_p_adj:.3f} (mom={mom_5*100:.1f}%)")
+    # DROP_RISK + 높은 surge_prob → 방향 불확실 → CAUTION (모멘텀 할인 후 기준)
+    if level == 'DROP_RISK' and _surge_p_adj > 0.50:
+        log.info(f"    ⚖ DROP_RISK + surge_prob_adj={_surge_p_adj:.2f}>0.50 → CAUTION 조정")
         level = 'CAUTION'
 
     # ── CI 멀티플라이어: Shock 이진 + 뉴스 감성 서프라이즈 연속 조정
