@@ -5968,6 +5968,15 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                 if _ratio > 1.5:
                     log.warning(f"    ⚠ 라이브 성능 열화: 라이브 MAE={_live_mae_val:.4f} > "
                                 f"백테스트×1.5 ({_bt_mae_ref:.4f}×1.5={_bt_mae_ref*1.5:.4f})")
+                # Rolling MASE: naive persistence 대비 비율 (>0.95 → 재훈련 시점)
+                _naive_diffs = _live30['actual_price'].diff().abs().dropna()
+                if len(_naive_diffs) >= 5:
+                    _naive_mae_live = float(_naive_diffs.mean())
+                    _live_mase = _live_mae_val / max(_naive_mae_live, 1e-6)
+                    log.info(f"    라이브 MASE(30d): {_live_mase:.3f} "
+                             f"(naive_mae={_naive_mae_live:.4f})")
+                    if _live_mase > 0.95:
+                        log.warning(f"    ⚠ 라이브 MASE={_live_mase:.3f} → naive 근접, 재훈련 검토")
             # ── C: 80% CI 실제 커버리지 검증
             if 'lower_80ci' in _pl_check.columns and 'upper_80ci' in _pl_check.columns:
                 _ci_rows = _pl_check[
