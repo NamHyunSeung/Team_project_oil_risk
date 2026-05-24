@@ -18,6 +18,7 @@ feedparser>=6.0.8
 # 대시보드
 streamlit>=1.28.0
 streamlit-autorefresh>=1.0.1
+plotly>=5.18.0
 
 # 보안 / 스케줄링
 python-dotenv>=1.0.0

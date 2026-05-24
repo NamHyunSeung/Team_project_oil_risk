@@ -6,14 +6,20 @@
 import streamlit as st
 import yaml
 import streamlit_authenticator as stauth
-from pathlib import Path as _Path
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.font_manager as fm
 from pathlib import Path
-from datetime import datetime
+import datetime
+import json
+import os
+import subprocess
+import sys
+import importlib.util as _ilu
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # ── 한글 폰트 설정 (Windows 맑은 고딕 우선, 없으면 AppleGothic, NanumGothic)
 def _set_korean_font():
@@ -44,7 +50,7 @@ st.set_page_config(
 )
 
 # ── 로그인 ────────────────────────────────────────────────────────────────────
-_AUTH_CFG = _Path(__file__).parent / "auth_config.yaml"
+_AUTH_CFG = Path(__file__).parent / "auth_config.yaml"
 
 def _load_authenticator():
     with open(_AUTH_CFG, encoding="utf-8") as f:
@@ -106,16 +112,14 @@ _username = st.session_state.get("username", "")
 _is_admin = (_username == "admin")
 
 # ── 구독 만료일 체크
-import datetime as _dt2
 try:
-    import yaml as _yaml2
-    with open(_Path(__file__).parent / 'auth_config.yaml', encoding='utf-8') as _f2:
-        _cfg2 = _yaml2.safe_load(_f2)
+    with open(Path(__file__).parent / 'auth_config.yaml', encoding='utf-8') as _f2:
+        _cfg2 = yaml.safe_load(_f2)
     _expiry_str = (_cfg2.get('credentials', {}).get('usernames', {})
                        .get(_username, {}).get('subscription_expiry', ''))
     if _expiry_str:
-        _expiry    = _dt2.datetime.strptime(_expiry_str, '%Y-%m-%d').date()
-        _days_left = (_expiry - _dt2.date.today()).days
+        _expiry    = datetime.datetime.strptime(_expiry_str, '%Y-%m-%d').date()
+        _days_left = (_expiry - datetime.date.today()).days
         if _days_left < 0:
             st.error(f'구독이 만료됐습니다 ({_expiry_str}). 관리자에게 문의하세요.')
             _authenticator.logout('로그아웃', location='sidebar')
@@ -154,6 +158,33 @@ st.markdown("""
 }
 h1, h2, h3, p, label, .stMarkdown { color: #e6edf3 !important; }
 
+/* ── 메트릭 카드 ── */
+[data-testid="metric-container"] {
+    background: linear-gradient(135deg, #1c2433, #161b22);
+    border-radius: 10px;
+    padding: 12px 16px;
+    border: 1px solid #30363d;
+    transition: border-color 0.2s;
+}
+
+/* ── 탭 스타일 ── */
+button[data-baseweb="tab"] {
+    color: #8b949e !important;
+    border-radius: 6px 6px 0 0 !important;
+    transition: color 0.15s, background 0.15s !important;
+    font-size: 0.88rem !important;
+}
+button[data-baseweb="tab"]:hover {
+    color: #e6edf3 !important;
+    background: rgba(255,255,255,0.05) !important;
+}
+button[data-baseweb="tab"][aria-selected="true"] {
+    color: #58a6ff !important;
+    border-bottom: 2px solid #58a6ff !important;
+    background: rgba(88,166,255,0.07) !important;
+    font-weight: 600 !important;
+}
+
 /* ── 모바일 반응형 ── */
 @media (max-width: 768px) {
     .block-container { padding: 0.5rem 0.8rem !important; }
@@ -180,13 +211,18 @@ RISK_LABEL = {
 
 
 # ── 데이터 로드 ───────────────────────────────────────────────────────────────
-@st.cache_data(ttl=180)
+_LOG_LIMIT = 1000
+
+@st.cache_data(ttl=600)
 def load_all():
     out = {}
-    for name in ['model_performance', 'forecast_7days', 'latest_risk_signal', 'crisis_keywords', 'prediction_log', 'feature_importance', 'risk_history']:
+    for name in ['model_performance', 'forecast_7days', 'latest_risk_signal', 'crisis_keywords', 'feature_importance', 'risk_history']:
         p = OUTPUT_DIR / f'{name}.csv'
         if p.exists():
             out[name] = pd.read_csv(p)
+    p_log = OUTPUT_DIR / 'prediction_log.csv'
+    if p_log.exists():
+        out['prediction_log'] = pd.read_csv(p_log).tail(_LOG_LIMIT).reset_index(drop=True)
     return out
 
 
@@ -211,11 +247,10 @@ with st.sidebar:
     st.markdown("---")
 
     # 마지막 실행 시간
-    import json as _json
     _meta_path = OUTPUT_DIR / 'run_meta.json'
     if _meta_path.exists():
         try:
-            _meta = _json.loads(_meta_path.read_text())
+            _meta = json.loads(_meta_path.read_text(encoding='utf-8'))
             st.markdown("**마지막 파이프라인 실행**")
             st.markdown(f"🕐 `{_meta.get('last_run', '—')}`")
             st.markdown(f"📅 데이터: `~ {_meta.get('data_through', '—')}`")
@@ -224,8 +259,8 @@ with st.sidebar:
             _api = _meta.get('api_status', {})
             if _api:
                 st.markdown("**API 수집 상태**")
-                for _name, _stat in _api.items():
-                    st.markdown(f"{_stat} `{_name}`")
+                for _api_name, _stat in _api.items():
+                    st.markdown(f"{_stat} `{_api_name}`")
         except Exception:
             pass
     else:
@@ -240,7 +275,7 @@ with st.sidebar:
         st.markdown(f"{'✅' if exists else '❌'} `{fname}`")
 
     st.markdown("---")
-    st.caption(f"대시보드 로드: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    st.caption(f"대시보드 로드: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 
 # ── 메인 ─────────────────────────────────────────────────────────────────────
@@ -253,11 +288,10 @@ if not (OUTPUT_DIR / 'latest_risk_signal.csv').exists():
 data = load_all()
 
 # ── 실시간 RSS 이벤트 경보 배너 ───────────────────────────────────────────────
-import json as _json
 _alert_path = OUTPUT_DIR / 'latest_alerts.json'
 if _alert_path.exists():
     try:
-        _al = _json.loads(_alert_path.read_text(encoding='utf-8'))
+        _al = json.loads(_alert_path.read_text(encoding='utf-8'))
         if _al.get('alert_level') in ('WARNING', 'CRITICAL'):
             _ac = '#e74c3c' if _al['alert_level'] == 'CRITICAL' else '#f39c12'
             _trigs = _al.get('triggers', [])[:3]
@@ -290,7 +324,8 @@ if 'latest_risk_signal' in data:
     </div>
     """, unsafe_allow_html=True)
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    _surge_p = float(sig.get('surge_prob_3d', 0.0))
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("WTI 가격",   f"${sig['wti_price']:.2f}",
               f"{sig['momentum_5d']*100:+.1f}% (5일)")
     c2.metric("5일 변동성", f"{sig['volatility_5d']*100:.2f}%")
@@ -298,14 +333,15 @@ if 'latest_risk_signal' in data:
               "부정" if sig['news_sentiment'] < -0.05 else
               ("긍정" if sig['news_sentiment'] > 0.05 else "중립"))
     c4.metric("뉴스 건수",  f"{int(sig['news_count'])}건")
-    c5.metric("지정학 경보", "🔴 활성" if sig['geopolitical_alert'] else "🟢 없음")
+    c5.metric("지정학 경보", "🔴 활성" if str(sig['geopolitical_alert']).lower() in ('true', '1') else "🟢 없음")
     c6.metric("리스크 점수", f"{sig['risk_score']:.3f}")
+    c7.metric("급등확률(3일)", f"{_surge_p*100:.0f}%",
+              "🔴 높음" if _surge_p > 0.6 else ("🟡 보통" if _surge_p > 0.3 else "🟢 낮음"))
     _ci_mult = sig.get('ci_multiplier', 1.0)
     if _ci_mult and float(_ci_mult) > 1.0:
         st.warning(f"⚡ **Shock 감지** — CI 구간 ×{float(_ci_mult):.1f} 확대 적용 중 (GPR 급등 또는 지정학 이벤트)")
 
     _hedge = float(sig.get('hedge_ratio', 0.0))
-    _surge_p = float(sig.get('surge_prob_3d', 0.0))
     if _hedge > 0.0:
         _hedge_clr = {'SURGE_RISK': '🔴', 'CAUTION': '🟡', 'DROP_RISK': '🟢', 'NORMAL': '⚪'}.get(level, '⚪')
         st.info(f"{_hedge_clr} **권장 헤지 비율: {_hedge*100:.0f}%** — "
@@ -315,7 +351,7 @@ if 'latest_risk_signal' in data:
 st.markdown("---")
 
 # ── 탭 ───────────────────────────────────────────────────────────────────────
-_tab_labels = ["📈 가격 예측", "🌡 리스크 상세", "☁ 키워드 분석", "📊 모델 성능", "📋 예측 오차 로그"]
+_tab_labels = ["📈 예측", "🌡 리스크", "☁ 키워드", "📊 성능", "📋 오차"]
 if _is_admin:
     _tab_labels.append("🔧 관리자")
 _tabs = st.tabs(_tab_labels)
@@ -328,13 +364,80 @@ with tab1:
 
     with col_chart:
         st.subheader("유가 예측 차트")
-        _plot_file = OUTPUT_DIR / ('oil_forecast_plot.png' if _is_admin else 'user_forecast_plot.png')
-        if not _plot_file.exists():
-            _plot_file = OUTPUT_DIR / 'oil_forecast_plot.png'
-        if _plot_file.exists():
-            st.image(str(_plot_file), use_container_width=True)
+        if 'prediction_log' in data and 'forecast_7days' in data:
+            _pl_fc = data['prediction_log'].copy()
+            _fc_df = data['forecast_7days'].copy()
+            _bt_fc = _pl_fc[_pl_fc['type'] == 'backtest'].copy()
+            _lv_fc = _pl_fc[_pl_fc['type'].isin(['live', 'gap'])].copy()
+            _bt_fc['date'] = pd.to_datetime(_bt_fc['date'])
+            _lv_fc['date'] = pd.to_datetime(_lv_fc['date'])
+            _fc_df['date'] = pd.to_datetime(_fc_df['date'])
+            _bt30 = _bt_fc.dropna(subset=['actual_price']).tail(30)
+            _lv_actual = _lv_fc[_lv_fc['actual_price'].notna()]
+
+            fig_fc = go.Figure()
+            if not _bt30.empty:
+                fig_fc.add_trace(go.Scatter(
+                    x=_bt30['date'], y=_bt30['actual_price'],
+                    mode='lines', name='실제 WTI',
+                    line=dict(color='#58a6ff', width=2),
+                    hovertemplate='%{x|%m/%d}<br>실제: $%{y:.2f}<extra></extra>',
+                ))
+            if not _lv_actual.empty:
+                fig_fc.add_trace(go.Scatter(
+                    x=_lv_actual['date'], y=_lv_actual['actual_price'],
+                    mode='lines+markers', name='실제 (실시간)',
+                    line=dict(color='#58a6ff', width=2),
+                    marker=dict(size=5),
+                    hovertemplate='%{x|%m/%d}<br>실제: $%{y:.2f}<extra></extra>',
+                    showlegend=False,
+                ))
+            if _is_admin and not _bt30.empty:
+                _bt30_p = _bt30.dropna(subset=['sarimax_pred'])
+                fig_fc.add_trace(go.Scatter(
+                    x=_bt30_p['date'], y=_bt30_p['sarimax_pred'],
+                    mode='lines', name='SARIMAX 예측',
+                    line=dict(color='#f0c040', width=1.5, dash='dash'),
+                    hovertemplate='%{x|%m/%d}<br>SARIMAX: $%{y:.2f}<extra></extra>',
+                ))
+            if 'lower_80ci' in _fc_df.columns and 'upper_80ci' in _fc_df.columns:
+                _ci_x = pd.concat([_fc_df['date'], _fc_df['date'][::-1]])
+                _ci_y = pd.concat([_fc_df['upper_80ci'], _fc_df['lower_80ci'][::-1]])
+                fig_fc.add_trace(go.Scatter(
+                    x=_ci_x, y=_ci_y,
+                    fill='toself', fillcolor='rgba(240,192,64,0.10)',
+                    line=dict(color='rgba(0,0,0,0)'),
+                    name='80% 예측구간', hoverinfo='skip',
+                ))
+            fig_fc.add_trace(go.Scatter(
+                x=_fc_df['date'], y=_fc_df['forecast_price'],
+                mode='lines+markers', name='앙상블 예측',
+                line=dict(color='#f0c040', width=2, dash='dot'),
+                marker=dict(size=7, symbol='circle-open'),
+                hovertemplate='%{x|%m/%d}<br>예측: $%{y:.2f}<extra></extra>',
+            ))
+            if not _bt30.empty:
+                fig_fc.add_vline(x=str(_bt30['date'].max()),
+                                 line=dict(color='#8b949e', dash='dash', width=1), opacity=0.5)
+            fig_fc.update_layout(
+                paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+                font=dict(color='#c9d1d9'),
+                legend=dict(bgcolor='rgba(22,27,34,0.85)', bordercolor='#30363d',
+                            borderwidth=1, font=dict(size=11)),
+                xaxis=dict(gridcolor='#21262d', tickfont=dict(size=10), title='날짜'),
+                yaxis=dict(gridcolor='#21262d', tickfont=dict(size=10), title='WTI ($)'),
+                margin=dict(l=60, r=20, t=20, b=50),
+                height=390, hovermode='x unified',
+            )
+            st.plotly_chart(fig_fc, use_container_width=True)
         else:
-            st.info("파이프라인 실행 후 차트가 표시됩니다.")
+            _plot_file = OUTPUT_DIR / ('oil_forecast_plot.png' if _is_admin else 'user_forecast_plot.png')
+            if not _plot_file.exists():
+                _plot_file = OUTPUT_DIR / 'oil_forecast_plot.png'
+            if _plot_file.exists():
+                st.image(str(_plot_file), use_container_width=True)
+            else:
+                st.info("파이프라인 실행 후 차트가 표시됩니다.")
 
     with col_table:
         st.subheader("📅 7일 예측")
@@ -377,6 +480,8 @@ with tab1:
             # 합의도 낮으면 경고
             if 'model_std' in fc.columns and float(fc['model_std'].iloc[0]) >= 5:
                 st.warning(f"⚠️ 모델 간 예측 편차 ${fc['model_std'].iloc[0]:.1f} — 불확실성 높음")
+            if 'reliable_forecast' in fc.columns and not fc['reliable_forecast'].astype(str).eq('True').all():
+                st.warning("⚠️ 일부 예측일의 신뢰도가 낮습니다. 예측 결과 해석 시 주의하세요.")
 
             if _is_admin:
                 csv_bytes = fc.to_csv(index=False).encode('utf-8')
@@ -399,7 +504,7 @@ with tab2:
             vol_n  = min(sig['volatility_5d'] * 22, 1.0)
             mom_n  = min(abs(sig['momentum_5d']) * 8, 1.0)
             sent_n = min(max(-sig['news_sentiment'], 0), 1.0)
-            geo_n  = 1.0 if sig['geopolitical_alert'] else 0.0
+            geo_n  = 1.0 if str(sig['geopolitical_alert']).lower() in ('true', '1') else 0.0
             rs_n   = min(sig['risk_score'] / 3.0, 1.0)
 
             factors = {
@@ -410,28 +515,33 @@ with tab2:
                 '⚡ 종합 리스크':   rs_n,
             }
 
-            fig, ax = plt.subplots(figsize=(6, 3.5), facecolor='#161b22')
-            ax.set_facecolor('#1c2433')
-            bar_colors = ['#ff6b6b', '#ffd93d', '#ff4757', '#ff6348', '#e74c3c']
-            y = list(factors.keys())
-            x = list(factors.values())
-            bars = ax.barh(y, x, color=bar_colors, alpha=0.85, height=0.55)
-            ax.set_xlim(0, 1.05)
-            ax.axvline(0.5, color='white', lw=0.6, ls='--', alpha=0.4)
-            ax.axvline(0.8, color='#e74c3c', lw=0.6, ls='--', alpha=0.4)
-            for bar, val in zip(bars, x):
-                ax.text(val + 0.02, bar.get_y() + bar.get_height()/2,
-                        f'{val:.2f}', va='center', color='white', fontsize=8)
-            ax.tick_params(colors='#ccc', labelsize=8)
-            for sp in ax.spines.values(): sp.set_color('#30363d')
-            ax.set_xlabel('Relative Intensity (0–1)', color='#ccc', fontsize=8)
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
+            _bar_clrs = ['#ff6b6b', '#ffd93d', '#ff4757', '#ff6348', '#e74c3c']
+            _y = list(factors.keys())
+            _x = list(factors.values())
+            fig_rf = go.Figure(go.Bar(
+                x=_x, y=_y, orientation='h',
+                marker_color=_bar_clrs, opacity=0.85,
+                text=[f'{v:.2f}' for v in _x],
+                textposition='outside',
+                textfont=dict(color='#c9d1d9', size=11),
+                hovertemplate='%{y}<br>강도: %{x:.2f}<extra></extra>',
+            ))
+            fig_rf.add_vline(x=0.5, line=dict(color='rgba(255,255,255,0.35)', dash='dash', width=1))
+            fig_rf.add_vline(x=0.8, line=dict(color='rgba(231,76,60,0.7)', dash='dash', width=1))
+            fig_rf.update_layout(
+                paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+                font=dict(color='#c9d1d9'),
+                xaxis=dict(range=[0, 1.25], title='Relative Intensity (0–1)',
+                           gridcolor='#21262d', tickfont=dict(size=10)),
+                yaxis=dict(gridcolor='#21262d', tickfont=dict(size=11)),
+                margin=dict(l=10, r=60, t=10, b=40),
+                height=270, showlegend=False,
+            )
+            st.plotly_chart(fig_rf, use_container_width=True)
 
         with col_b:
             st.markdown("**주요 지표**")
-            st.metric("WTI 현재가", f"${sig['wti_price']}")
+            st.metric("WTI 현재가", f"${sig['wti_price']:.2f}")
             st.metric("5일 변동성", f"{sig['volatility_5d']*100:.2f}%")
             st.metric("뉴스 감성", f"{float(sig['news_sentiment']):.3f}")
             if _is_admin:
@@ -443,7 +553,7 @@ with tab2:
                     "리스크 점수": float(sig['risk_score']),
                     "모멘텀(5일)": f"{sig['momentum_5d']*100:+.2f}%",
                     "뉴스 기사 수": int(sig['news_count']),
-                    "지정학 경보":  bool(sig['geopolitical_alert']),
+                    "지정학 경보":  str(sig['geopolitical_alert']).lower() in ('true', '1'),
                     "방향성 편향":  float(sig['directional_bias']),
                     "방향 신뢰도":  sig.get('direction_confidence', 'N/A'),
                 })
@@ -456,44 +566,60 @@ with tab2:
                                sig_csv.read_bytes(),
                                "latest_risk_signal.csv", "text/csv")
 
-        st.markdown("---")
-        st.markdown("**📅 리스크 레벨 히스토리**")
-        _rh_path = OUTPUT_DIR / 'risk_history.csv'
-        if _rh_path.exists():
-            rh = pd.read_csv(_rh_path)
-            rh['date'] = pd.to_datetime(rh['date'])
-            rh = rh.sort_values('date')
-            _LEVEL_CLR = {'NORMAL': '#2ecc71', 'CAUTION': '#f39c12',
-                          'SURGE_RISK': '#e74c3c', 'DROP_RISK': '#3498db', 'CRITICAL': '#8e44ad'}
-            fig_rh, axes_rh = plt.subplots(2, 1, figsize=(10, 4.5), facecolor='#161b22', sharex=True)
-            fig_rh.subplots_adjust(hspace=0.08)
-            ax_p = axes_rh[0]
-            ax_p.set_facecolor('#1c2433')
-            ax_p.plot(rh['date'], rh['wti_price'], color='#58a6ff', lw=1.5)
-            ax_p.set_ylabel('WTI ($)', color='#ccc', fontsize=8)
-            ax_p.tick_params(colors='#ccc', labelsize=7)
-            for sp in ax_p.spines.values(): sp.set_color('#30363d')
-            ax_p.grid(color='#21262d', lw=0.5)
-            for _, row in rh.iterrows():
-                ax_p.axvline(row['date'], color=_LEVEL_CLR.get(row['risk_level'], '#888'), alpha=0.15, lw=3)
-            ax_r = axes_rh[1]
-            ax_r.set_facecolor('#1c2433')
-            ax_r.fill_between(rh['date'], 0, rh['risk_score'], color='#f0c040', alpha=0.4)
-            ax_r.plot(rh['date'], rh['risk_score'], color='#f0c040', lw=1.2)
-            for val, clr in [(0.3, '#f39c12'), (0.6, '#e74c3c')]:
-                ax_r.axhline(val, color=clr, lw=0.8, ls='--', alpha=0.7)
-            ax_r.set_ylabel('리스크 점수', color='#ccc', fontsize=8)
-            ax_r.tick_params(colors='#ccc', labelsize=7)
-            for sp in ax_r.spines.values(): sp.set_color('#30363d')
-            ax_r.grid(color='#21262d', lw=0.5)
-            from matplotlib.patches import Patch
-            handles = [Patch(color=c, label=l) for l, c in _LEVEL_CLR.items()]
-            ax_p.legend(handles=handles, fontsize=7, facecolor='#1c2433', labelcolor='white', loc='upper left', ncol=5)
-            plt.tight_layout()
-            st.pyplot(fig_rh)
-            plt.close()
-        else:
-            st.info("파이프라인 실행 후 리스크 히스토리가 표시됩니다.")
+    st.markdown("---")
+    st.markdown("**📅 리스크 레벨 히스토리**" + ("" if _is_admin else " (최근 30일)"))
+    if 'risk_history' in data:
+        rh = data['risk_history'].copy()
+        rh['date'] = pd.to_datetime(rh['date'])
+        rh = rh.sort_values('date')
+        if not _is_admin:
+            rh = rh.tail(30)
+        _LEVEL_CLR = {'NORMAL': '#2ecc71', 'CAUTION': '#f39c12',
+                      'SURGE_RISK': '#e74c3c', 'DROP_RISK': '#3498db', 'CRITICAL': '#8e44ad'}
+        fig_rh = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                               vertical_spacing=0.05, row_heights=[0.6, 0.4])
+        fig_rh.add_trace(go.Scatter(
+            x=rh['date'], y=rh['wti_price'],
+            mode='lines', name='WTI ($)',
+            line=dict(color='#58a6ff', width=1.5),
+            hovertemplate='%{x|%Y-%m-%d}<br>WTI: $%{y:.2f}<extra></extra>',
+        ), row=1, col=1)
+        for _lv_name, _lv_clr in _LEVEL_CLR.items():
+            _lv_mask = rh['risk_level'] == _lv_name
+            if _lv_mask.any():
+                fig_rh.add_trace(go.Scatter(
+                    x=rh[_lv_mask]['date'], y=rh[_lv_mask]['wti_price'],
+                    mode='markers',
+                    marker=dict(color=_lv_clr, size=10, symbol='circle',
+                                line=dict(color='white', width=1)),
+                    name=_lv_name,
+                    hovertemplate=f'%{{x|%Y-%m-%d}}<br>{_lv_name}<br>$%{{y:.2f}}<extra></extra>',
+                ), row=1, col=1)
+        _rh_bar_clrs = [_LEVEL_CLR.get(l, '#888') for l in rh['risk_level']]
+        fig_rh.add_trace(go.Bar(
+            x=rh['date'], y=rh['risk_score'],
+            marker_color=_rh_bar_clrs, opacity=0.75, name='리스크 점수',
+            hovertemplate='%{x|%Y-%m-%d}<br>점수: %{y:.2f}<extra></extra>',
+        ), row=2, col=1)
+        fig_rh.add_hline(y=0.3, line=dict(color='#f39c12', dash='dash', width=1),
+                         opacity=0.7, row=2, col=1)
+        fig_rh.add_hline(y=0.6, line=dict(color='#e74c3c', dash='dash', width=1),
+                         opacity=0.7, row=2, col=1)
+        fig_rh.update_layout(
+            paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+            font=dict(color='#c9d1d9'),
+            height=430, showlegend=True,
+            legend=dict(bgcolor='rgba(22,27,34,0.85)', bordercolor='#30363d',
+                        font=dict(size=9), orientation='h', yanchor='bottom', y=1.02),
+            margin=dict(l=60, r=20, t=40, b=40),
+        )
+        fig_rh.update_xaxes(gridcolor='#21262d', tickfont=dict(size=9))
+        fig_rh.update_yaxes(gridcolor='#21262d', tickfont=dict(size=9))
+        fig_rh.update_yaxes(title_text='WTI ($)', title_font=dict(size=9), row=1, col=1)
+        fig_rh.update_yaxes(title_text='리스크 점수', title_font=dict(size=9), row=2, col=1)
+        st.plotly_chart(fig_rh, use_container_width=True)
+    else:
+        st.info("파이프라인 실행 후 리스크 히스토리가 표시됩니다.")
 
 # ── Tab 3: 키워드 분석 ───────────────────────────────────────────────────────
 with tab3:
@@ -511,7 +637,7 @@ with tab3:
     with col_kw:
         if 'crisis_keywords' in data:
             kw = data['crisis_keywords'].head(25).copy()
-            kw['분류'] = kw['is_crisis_word'].map({True: '🔴', False: '🔵'})
+            kw['분류'] = kw['is_crisis_word'].astype(str).map({'True': '🔴', 'False': '🔵'})
             # 키워드 한글 변환 (oil_risk_mvp의 _KW_TRANSLATE 재사용)
             _KW_KO = {
                 'oil':'원유','crude':'원유','brent':'브렌트','wti':'WTI','gas':'가스',
@@ -545,7 +671,7 @@ with tab3:
                 'labour':'노동당','tax':'세금','plan':'계획','change':'변화',
                 'hit':'타격','hits':'타격','warns':'경고','food':'식품',
                 'covid':'코로나19','pandemic':'팬데믹','brexit':'브렉시트',
-                'london':'런던','security':'안보','attack':'공격',
+                'london':'런던','security':'안보',
             }
             kw['키워드'] = kw['keyword'].apply(
                 lambda w: _KW_KO.get(w.lower(), w)
@@ -617,7 +743,7 @@ with tab4:
             if not _mon.empty:
                 st.caption(f"※ {', '.join(_mon['model'].tolist())} — 모니터링 전용 (차트 제외)")
             st.caption("**변동성 예측 모델**")
-            st.dataframe(_pf_vol[['역할','model','rmse','mae','r2','train_r2','overfit_gap']],
+            st.dataframe(_pf_vol[[c for c in ['역할','model','rmse','mae','r2','train_r2','overfit_gap'] if c in _pf_vol.columns]],
                          hide_index=True, use_container_width=True)
             if 'overfit_gap' in pf.columns and 'train_r2' in pf.columns:
                 for _, _row in pf.dropna(subset=['overfit_gap']).iterrows():
@@ -632,26 +758,29 @@ with tab4:
                                    f"훈련 R²={_tr:.3f} / CV R²={_cv:.3f} (gap={_gap:.3f})")
 
         with col_g:
-            fig, axes = plt.subplots(1, 3, figsize=(8, 3.5), facecolor='#161b22')
-            for ax, met, ylbl, clr in zip(axes,
-                                          ['rmse', 'mae', 'r2'],
-                                          ['RMSE (↓)', 'MAE (↓)', 'R² (↑)'],
-                                          ['#58a6ff', '#3fb950', '#f0c040']):
-                ax.set_facecolor('#1c2433')
-                _labels = [m.split('(')[0].strip()[:20] for m in _pf_chart['model']]
-                bars = ax.bar(_labels, _pf_chart[met], color=clr, alpha=0.85)
-                ax.set_title(ylbl, color='#e6edf3', fontsize=9)
-                ax.tick_params(colors='#ccc', labelsize=7)
-                plt.setp(ax.get_xticklabels(), rotation=25, ha='right', fontsize=7)
-                for sp in ax.spines.values(): sp.set_color('#30363d')
-                ax.grid(axis='y', color='#21262d', lw=0.5)
-                for bar in bars:
-                    h = bar.get_height()
-                    ax.text(bar.get_x() + bar.get_width()/2, h * 1.03,
-                            f'{h:.3f}', ha='center', va='bottom', color='white', fontsize=7)
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
+            _perf_labels = [m.split('(')[0].strip()[:20] for m in _pf_chart['model']]
+            fig_perf = make_subplots(rows=1, cols=3,
+                                     subplot_titles=['RMSE (↓)', 'MAE (↓)', 'R² (↑)'])
+            for _col_i, (_met, _clr) in enumerate(
+                    zip(['rmse', 'mae', 'r2'], ['#58a6ff', '#3fb950', '#f0c040']), 1):
+                fig_perf.add_trace(go.Bar(
+                    x=_perf_labels, y=_pf_chart[_met],
+                    marker_color=_clr, opacity=0.85,
+                    text=[f'{v:.3f}' for v in _pf_chart[_met]],
+                    textposition='outside', textfont=dict(size=9, color='#c9d1d9'),
+                    showlegend=False,
+                    hovertemplate='%{x}<br>' + _met.upper() + ': %{y:.3f}<extra></extra>',
+                ), row=1, col=_col_i)
+            fig_perf.update_layout(
+                paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+                font=dict(color='#c9d1d9', size=10),
+                height=320, margin=dict(l=30, r=20, t=50, b=60),
+            )
+            fig_perf.update_xaxes(gridcolor='#21262d', tickfont=dict(size=8),
+                                   tickangle=25)
+            fig_perf.update_yaxes(gridcolor='#21262d', tickfont=dict(size=9))
+            fig_perf.update_annotations(font=dict(color='#e6edf3', size=10))
+            st.plotly_chart(fig_perf, use_container_width=True)
             st.caption("차트: 가격 예측 모델 (Prophet 등 모니터링 전용 제외)")
 
         # ── 피처 중요도 (관리자)
@@ -672,26 +801,28 @@ with tab4:
             'regime':'시장 국면', 'futures_spread':'선물 커브 스프레드',
             'contango_dummy':'콘탱고 더미', 'covid_dummy':'COVID 더미',
         }
-        _fi_path = OUTPUT_DIR / 'feature_importance.csv'
-        if _fi_path.exists():
-            fi = pd.read_csv(_fi_path).head(15)
+        if 'feature_importance' in data:
+            fi = data['feature_importance'].head(15).copy()
             fi['feature_ko'] = fi['feature'].map(_FEAT_KO).fillna(fi['feature'])
             fi = fi.sort_values('importance')
-            fig_fi, ax_fi = plt.subplots(figsize=(8, 4.5), facecolor='#161b22')
-            ax_fi.set_facecolor('#1c2433')
-            bars = ax_fi.barh(fi['feature_ko'], fi['importance'], color='#58a6ff', alpha=0.85)
-            ax_fi.set_title('XGBoost-HAR 피처 중요도 (Top 15)', color='#e6edf3', fontsize=10)
-            ax_fi.tick_params(colors='#ccc', labelsize=8)
-            ax_fi.set_xlabel('Importance', color='#ccc', fontsize=8)
-            for sp in ax_fi.spines.values(): sp.set_color('#30363d')
-            ax_fi.grid(axis='x', color='#21262d', lw=0.5)
-            for bar in bars:
-                w = bar.get_width()
-                ax_fi.text(w + 0.001, bar.get_y() + bar.get_height()/2,
-                           f'{w:.3f}', va='center', color='#ccc', fontsize=7)
-            plt.tight_layout()
-            st.pyplot(fig_fi)
-            plt.close()
+            fig_fi = go.Figure(go.Bar(
+                x=fi['importance'], y=fi['feature_ko'], orientation='h',
+                marker_color='#58a6ff', opacity=0.85,
+                text=[f'{v:.3f}' for v in fi['importance']],
+                textposition='outside', textfont=dict(color='#c9d1d9', size=10),
+                hovertemplate='%{y}<br>중요도: %{x:.4f}<extra></extra>',
+            ))
+            fig_fi.update_layout(
+                title=dict(text='XGBoost-HAR 피처 중요도 (Top 15)',
+                           font=dict(color='#e6edf3', size=11)),
+                paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+                font=dict(color='#c9d1d9'),
+                xaxis=dict(title='Importance', gridcolor='#21262d', tickfont=dict(size=9)),
+                yaxis=dict(gridcolor='#21262d', tickfont=dict(size=10)),
+                margin=dict(l=10, r=70, t=50, b=40),
+                height=430, showlegend=False,
+            )
+            st.plotly_chart(fig_fi, use_container_width=True)
         else:
             st.info("파이프라인 실행 후 피처 중요도가 표시됩니다.")
 
@@ -720,10 +851,12 @@ with tab5:
         col_s1, col_s2, col_s3, col_s4 = st.columns(4)
         if not bt.empty and bt['price_error'].notna().any():
             col_s1.metric("백테스트 MAE", f"${bt['price_error'].abs().mean():.2f}")
-            col_s2.metric("백테스트 MAPE", f"{bt['price_error_pct'].abs().mean():.2f}%")
+            if 'price_error_pct' in bt.columns and bt['price_error_pct'].notna().any():
+                col_s2.metric("백테스트 MAPE", f"{bt['price_error_pct'].abs().mean():.2f}%")
         if not live_confirmed.empty:
             col_s3.metric("실시간 MAE", f"${live_confirmed['price_error'].abs().mean():.2f}")
-            col_s4.metric("실시간 MAPE", f"{live_confirmed['price_error_pct'].abs().mean():.2f}%")
+            if 'price_error_pct' in live_confirmed.columns and live_confirmed['price_error_pct'].notna().any():
+                col_s4.metric("실시간 MAPE", f"{live_confirmed['price_error_pct'].abs().mean():.2f}%")
 
         if not _is_admin:
             # 실시간 예측 기록 테이블
@@ -743,8 +876,9 @@ with tab5:
             st.stop()  # 일반 사용자는 여기까지
 
         # ── 드리프트 경고 (live MAPE > backtest MAPE × 2)
-        if (not bt.empty and bt['price_error_pct'].notna().any()
-                and not live_confirmed.empty):
+        if (not bt.empty and 'price_error_pct' in bt.columns and bt['price_error_pct'].notna().any()
+                and not live_confirmed.empty and 'price_error_pct' in live_confirmed.columns
+                and live_confirmed['price_error_pct'].notna().any()):
             bt_mape  = bt['price_error_pct'].abs().mean()
             lv_mape  = live_confirmed['price_error_pct'].abs().mean()
             if lv_mape > bt_mape * 2:
@@ -772,36 +906,44 @@ with tab5:
         # 가격 오차 추이 차트
         if not bt.empty and bt['price_error'].notna().any():
             st.markdown("**SARIMAX 가격 예측 오차 추이 (백테스트 60일)**")
-            fig, axes = plt.subplots(2, 1, figsize=(10, 5), facecolor='#161b22')
-
             bt_plot = bt.dropna(subset=['price_error']).copy()
             bt_plot['date'] = pd.to_datetime(bt_plot['date'])
-
-            ax1 = axes[0]
-            ax1.set_facecolor('#1c2433')
-            ax1.plot(bt_plot['date'], bt_plot['actual_price'],
-                     color='#58a6ff', lw=1.5, label='실제 WTI')
-            ax1.plot(bt_plot['date'], bt_plot['sarimax_pred'],
-                     color='#f0c040', lw=1.5, ls='--', label='SARIMAX 예측')
-            ax1.set_ylabel('WTI ($)', color='#ccc', fontsize=9)
-            ax1.tick_params(colors='#ccc', labelsize=8)
-            ax1.legend(fontsize=8, facecolor='#1c2433', labelcolor='white')
-            for sp in ax1.spines.values(): sp.set_color('#30363d')
-
-            ax2 = axes[1]
-            ax2.set_facecolor('#1c2433')
-            colors = ['#3fb950' if e >= 0 else '#f85149'
-                      for e in bt_plot['price_error']]
-            ax2.bar(bt_plot['date'], bt_plot['price_error'],
-                    color=colors, alpha=0.8, width=0.8)
-            ax2.axhline(0, color='white', lw=0.6)
-            ax2.set_ylabel('오차 (실제-예측, $)', color='#ccc', fontsize=9)
-            ax2.tick_params(colors='#ccc', labelsize=8)
-            for sp in ax2.spines.values(): sp.set_color('#30363d')
-
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
+            fig_err = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                    vertical_spacing=0.05, row_heights=[0.55, 0.45])
+            fig_err.add_trace(go.Scatter(
+                x=bt_plot['date'], y=bt_plot['actual_price'],
+                mode='lines', name='실제 WTI',
+                line=dict(color='#58a6ff', width=1.5),
+                hovertemplate='%{x|%m/%d}<br>실제: $%{y:.2f}<extra></extra>',
+            ), row=1, col=1)
+            if 'sarimax_pred' in bt_plot.columns:
+                fig_err.add_trace(go.Scatter(
+                    x=bt_plot['date'], y=bt_plot['sarimax_pred'],
+                    mode='lines', name='SARIMAX 예측',
+                    line=dict(color='#f0c040', width=1.5, dash='dash'),
+                    hovertemplate='%{x|%m/%d}<br>예측: $%{y:.2f}<extra></extra>',
+                ), row=1, col=1)
+            _err_clrs = ['#3fb950' if e >= 0 else '#f85149' for e in bt_plot['price_error']]
+            fig_err.add_trace(go.Bar(
+                x=bt_plot['date'], y=bt_plot['price_error'],
+                marker_color=_err_clrs, opacity=0.85, name='오차 ($)',
+                hovertemplate='%{x|%m/%d}<br>오차: $%{y:.2f}<extra></extra>',
+            ), row=2, col=1)
+            fig_err.add_hline(y=0, line=dict(color='rgba(255,255,255,0.4)', width=0.8),
+                              row=2, col=1)
+            fig_err.update_layout(
+                paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+                font=dict(color='#c9d1d9'),
+                height=380, hovermode='x unified',
+                legend=dict(bgcolor='rgba(22,27,34,0.85)', bordercolor='#30363d',
+                            font=dict(size=10)),
+                margin=dict(l=60, r=20, t=20, b=40),
+            )
+            fig_err.update_xaxes(gridcolor='#21262d', tickfont=dict(size=9))
+            fig_err.update_yaxes(gridcolor='#21262d', tickfont=dict(size=9))
+            fig_err.update_yaxes(title_text='WTI ($)', title_font=dict(size=9), row=1, col=1)
+            fig_err.update_yaxes(title_text='오차 ($)', title_font=dict(size=9), row=2, col=1)
+            st.plotly_chart(fig_err, use_container_width=True)
 
         # ── 방향성 정확도 / 누적 오차 / 롤링 MAPE ────────────────────────────
         if not bt.empty and bt['price_error'].notna().any():
@@ -810,13 +952,13 @@ with tab5:
             bt_a = bt_a.sort_values('date').reset_index(drop=True)
 
             # 방향성 정확도
-            bt_a['actual_dir']  = bt_a['actual_price'].diff().apply(lambda x: 1 if x > 0 else -1)
-            bt_a['pred_dir']    = bt_a['sarimax_pred'].diff().apply(lambda x: 1 if x > 0 else -1)
-            bt_a['dir_correct'] = (bt_a['actual_dir'] == bt_a['pred_dir']).astype(float)
+            bt_a['actual_dir']  = bt_a['actual_price'].diff().apply(lambda x: np.nan if pd.isna(x) else (1 if x > 0 else -1))
+            bt_a['pred_dir']    = bt_a['sarimax_pred'].diff().apply(lambda x: np.nan if pd.isna(x) else (1 if x > 0 else -1))
+            bt_a['dir_correct'] = (bt_a['actual_dir'] == bt_a['pred_dir']).astype(float).where(bt_a['actual_dir'].notna())
             dir_acc = bt_a['dir_correct'].dropna().mean() * 100
 
-            bt_a['abs_pct_err'] = bt_a['price_error_pct'].abs()
-            rolling_mape = bt_a['abs_pct_err'].rolling(10).mean()
+            bt_a['abs_pct_err'] = bt_a['price_error_pct'].abs() if 'price_error_pct' in bt_a.columns else np.nan
+            rolling_mape = bt_a['abs_pct_err'].rolling(10).mean() if 'price_error_pct' in bt_a.columns else pd.Series(dtype=float)
             bt_a['cum_abs_err'] = bt_a['price_error'].abs().cumsum()
 
             col_d1, col_d2, col_d3 = st.columns(3)
@@ -826,35 +968,36 @@ with tab5:
                           f"{rolling_mape.dropna().iloc[-1]:.2f}%" if rolling_mape.notna().any() else "—")
             col_d3.metric("누적 절대 오차", f"${bt_a['cum_abs_err'].iloc[-1]:.2f}")
 
-            # 누적 오차 & 롤링 MAPE 차트
-            fig2, axes2 = plt.subplots(1, 2, figsize=(10, 3.2), facecolor='#161b22')
-
-            ax_c = axes2[0]
-            ax_c.set_facecolor('#1c2433')
-            ax_c.plot(bt_a['date'], bt_a['cum_abs_err'], color='#f0c040', lw=1.5)
-            ax_c.fill_between(bt_a['date'], 0, bt_a['cum_abs_err'], alpha=0.15, color='#f0c040')
-            ax_c.set_title('누적 절대 오차 ($)', color='#e6edf3', fontsize=9)
-            ax_c.set_ylabel('누적 오차 ($)', color='#ccc', fontsize=8)
-            ax_c.tick_params(colors='#ccc', labelsize=7)
-            for sp in ax_c.spines.values(): sp.set_color('#30363d')
-            ax_c.grid(color='#21262d', lw=0.5)
-
-            ax_r = axes2[1]
-            ax_r.set_facecolor('#1c2433')
-            ax_r.plot(bt_a['date'], rolling_mape, color='#3fb950', lw=1.5, label='10일 롤링 MAPE')
-            mean_mape = bt_a['abs_pct_err'].mean()
-            ax_r.axhline(mean_mape, color='#ff6b6b', lw=0.9, ls='--',
-                         label=f'평균 {mean_mape:.2f}%')
-            ax_r.set_title('롤링 MAPE — 10일 윈도우 (%)', color='#e6edf3', fontsize=9)
-            ax_r.set_ylabel('MAPE (%)', color='#ccc', fontsize=8)
-            ax_r.tick_params(colors='#ccc', labelsize=7)
-            ax_r.legend(fontsize=7, facecolor='#1c2433', labelcolor='white')
-            for sp in ax_r.spines.values(): sp.set_color('#30363d')
-            ax_r.grid(color='#21262d', lw=0.5)
-
-            plt.tight_layout()
-            st.pyplot(fig2)
-            plt.close()
+            mean_mape2 = bt_a['abs_pct_err'].mean()
+            fig2 = make_subplots(rows=1, cols=2,
+                                  subplot_titles=['누적 절대 오차 ($)', '롤링 MAPE — 10일 윈도우 (%)'])
+            fig2.add_trace(go.Scatter(
+                x=bt_a['date'], y=bt_a['cum_abs_err'],
+                mode='lines', name='누적 오차',
+                fill='tozeroy', fillcolor='rgba(240,192,64,0.12)',
+                line=dict(color='#f0c040', width=1.5),
+                hovertemplate='%{x|%m/%d}<br>누적: $%{y:.2f}<extra></extra>',
+            ), row=1, col=1)
+            fig2.add_trace(go.Scatter(
+                x=bt_a['date'], y=rolling_mape,
+                mode='lines', name='10일 롤링 MAPE',
+                line=dict(color='#3fb950', width=1.5),
+                hovertemplate='%{x|%m/%d}<br>MAPE: %{y:.2f}%<extra></extra>',
+            ), row=1, col=2)
+            fig2.add_hline(y=mean_mape2, line=dict(color='#ff6b6b', dash='dash', width=1),
+                           annotation_text=f'평균 {mean_mape2:.2f}%',
+                           annotation_font=dict(color='#ff6b6b', size=9),
+                           row=1, col=2)
+            fig2.update_layout(
+                paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+                font=dict(color='#c9d1d9'),
+                height=300, margin=dict(l=50, r=20, t=50, b=40),
+                showlegend=False,
+            )
+            fig2.update_xaxes(gridcolor='#21262d', tickfont=dict(size=9))
+            fig2.update_yaxes(gridcolor='#21262d', tickfont=dict(size=9))
+            fig2.update_annotations(font=dict(color='#e6edf3', size=10))
+            st.plotly_chart(fig2, use_container_width=True)
 
         st.markdown("---")
 
@@ -862,8 +1005,8 @@ with tab5:
         col_bt, col_lv = st.columns(2)
         with col_bt:
             st.markdown("**백테스트 (최근 10일)**")
-            show_bt = bt.tail(10)[['date', 'sarimax_pred', 'actual_price',
-                                   'price_error', 'price_error_pct']].rename(columns={
+            _bt_show_cols = [c for c in ['date', 'sarimax_pred', 'actual_price', 'price_error', 'price_error_pct'] if c in bt.columns]
+            show_bt = bt.tail(10)[_bt_show_cols].rename(columns={
                 'date': '날짜', 'sarimax_pred': '예측가($)',
                 'actual_price': '실제가($)', 'price_error': '오차($)',
                 'price_error_pct': '오차(%)'
@@ -875,8 +1018,8 @@ with tab5:
             if lv.empty:
                 st.info("실시간 예측 기록이 없습니다.")
             else:
-                show_lv = lv[['date', 'sarimax_pred', 'actual_price',
-                              'price_error', 'price_error_pct']].rename(columns={
+                _lv_show_cols = [c for c in ['date', 'sarimax_pred', 'actual_price', 'price_error', 'price_error_pct'] if c in lv.columns]
+                show_lv = lv[_lv_show_cols].rename(columns={
                     'date': '날짜', 'sarimax_pred': '예측가($)',
                     'actual_price': '실제가($)', 'price_error': '오차($)',
                     'price_error_pct': '오차(%)'
@@ -895,48 +1038,57 @@ with tab5:
             bt_trend['rolling_mape'] = bt_trend['abs_pct'].rolling(10).mean()
             bt_trend['rolling_mae']  = bt_trend['price_error'].abs().rolling(10).mean()
 
-            fig_t, axes_t = plt.subplots(1, 2, figsize=(10, 2.8), facecolor='#161b22')
-
-            for ax in axes_t:
-                ax.set_facecolor('#1c2433')
-                for sp in ax.spines.values(): sp.set_color('#30363d')
-                ax.tick_params(colors='#ccc', labelsize=7)
-                ax.grid(color='#21262d', lw=0.5)
-
-            # MAPE 트렌드
-            ax_m = axes_t[0]
-            ax_m.plot(bt_trend['date'], bt_trend['rolling_mape'],
-                      color='#3fb950', lw=1.5, label='10일 Rolling MAPE')
-            ax_m.axhline(bt_trend['abs_pct'].mean(), color='#f0c040',
-                         lw=0.9, ls='--', label=f"전체 평균 {bt_trend['abs_pct'].mean():.1f}%")
-            ax_m.set_title('MAPE 트렌드 (%)', color='#e6edf3', fontsize=9)
-            ax_m.set_ylabel('MAPE (%)', color='#ccc', fontsize=8)
-            ax_m.legend(fontsize=7, facecolor='#1c2433', labelcolor='white')
-
-            # MAE 트렌드
-            ax_e = axes_t[1]
-            ax_e.plot(bt_trend['date'], bt_trend['rolling_mae'],
-                      color='#58a6ff', lw=1.5, label='10일 Rolling MAE')
-            ax_e.axhline(bt_trend['price_error'].abs().mean(), color='#f0c040',
-                         lw=0.9, ls='--', label=f"전체 평균 ${bt_trend['price_error'].abs().mean():.2f}")
-            ax_e.set_title('MAE 트렌드 ($)', color='#e6edf3', fontsize=9)
-            ax_e.set_ylabel('MAE ($)', color='#ccc', fontsize=8)
-            ax_e.legend(fontsize=7, facecolor='#1c2433', labelcolor='white')
-
-            # live 확인 건 표시
+            _avg_mape = bt_trend['abs_pct'].mean()
+            _avg_mae  = bt_trend['price_error'].abs().mean()
+            fig_t = make_subplots(rows=1, cols=2,
+                                   subplot_titles=['MAPE 트렌드 (%)', 'MAE 트렌드 ($)'])
+            fig_t.add_trace(go.Scatter(
+                x=bt_trend['date'], y=bt_trend['rolling_mape'],
+                mode='lines', name='10일 Rolling MAPE',
+                line=dict(color='#3fb950', width=1.5),
+                hovertemplate='%{x|%m/%d}<br>MAPE: %{y:.2f}%<extra></extra>',
+            ), row=1, col=1)
+            fig_t.add_hline(y=_avg_mape, line=dict(color='#f0c040', dash='dash', width=1),
+                            annotation_text=f'평균 {_avg_mape:.1f}%',
+                            annotation_font=dict(color='#f0c040', size=9), row=1, col=1)
+            fig_t.add_trace(go.Scatter(
+                x=bt_trend['date'], y=bt_trend['rolling_mae'],
+                mode='lines', name='10일 Rolling MAE',
+                line=dict(color='#58a6ff', width=1.5),
+                hovertemplate='%{x|%m/%d}<br>MAE: $%{y:.2f}<extra></extra>',
+            ), row=1, col=2)
+            fig_t.add_hline(y=_avg_mae, line=dict(color='#f0c040', dash='dash', width=1),
+                            annotation_text=f'평균 ${_avg_mae:.2f}',
+                            annotation_font=dict(color='#f0c040', size=9), row=1, col=2)
             if not live_confirmed.empty:
-                live_confirmed_plot = live_confirmed.copy()
-                live_confirmed_plot['date'] = pd.to_datetime(live_confirmed_plot['date'])
-                ax_m.scatter(live_confirmed_plot['date'],
-                             live_confirmed_plot['price_error_pct'].abs(),
-                             color='#f85149', s=40, zorder=5, label='Live 실측')
-                ax_e.scatter(live_confirmed_plot['date'],
-                             live_confirmed_plot['price_error'].abs(),
-                             color='#f85149', s=40, zorder=5, label='Live 실측')
-
-            plt.tight_layout()
-            st.pyplot(fig_t)
-            plt.close()
+                _lcp = live_confirmed.copy()
+                _lcp['date'] = pd.to_datetime(_lcp['date'])
+                if 'price_error_pct' in _lcp.columns:
+                    fig_t.add_trace(go.Scatter(
+                        x=_lcp['date'], y=_lcp['price_error_pct'].abs(),
+                        mode='markers', name='Live 실측',
+                        marker=dict(color='#f85149', size=7, symbol='circle'),
+                        hovertemplate='%{x|%m/%d}<br>Live MAPE: %{y:.2f}%<extra></extra>',
+                    ), row=1, col=1)
+                if 'price_error' in _lcp.columns:
+                    fig_t.add_trace(go.Scatter(
+                        x=_lcp['date'], y=_lcp['price_error'].abs(),
+                        mode='markers', name='Live 실측',
+                        marker=dict(color='#f85149', size=7, symbol='circle'),
+                        hovertemplate='%{x|%m/%d}<br>Live MAE: $%{y:.2f}<extra></extra>',
+                        showlegend=False,
+                    ), row=1, col=2)
+            fig_t.update_layout(
+                paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+                font=dict(color='#c9d1d9'),
+                height=300, margin=dict(l=50, r=20, t=50, b=40),
+                legend=dict(bgcolor='rgba(22,27,34,0.85)', bordercolor='#30363d',
+                            font=dict(size=9)),
+            )
+            fig_t.update_xaxes(gridcolor='#21262d', tickfont=dict(size=9))
+            fig_t.update_yaxes(gridcolor='#21262d', tickfont=dict(size=9))
+            fig_t.update_annotations(font=dict(color='#e6edf3', size=10))
+            st.plotly_chart(fig_t, use_container_width=True)
         else:
             st.info("트렌드 차트는 백테스트 10일 이상 데이터 필요")
 
@@ -954,11 +1106,9 @@ if _is_admin and tab_admin is not None:
 
         # ── 사용자 관리 ──────────────────────────────────────────────────────
         with adm1:
-            import yaml as _yaml
-            from pathlib import Path as _PL
-            _cfg_path = _PL(__file__).parent / 'auth_config.yaml'
+            _cfg_path = Path(__file__).parent / 'auth_config.yaml'
             with open(_cfg_path, encoding='utf-8') as _f:
-                _cfg = _yaml.safe_load(_f)
+                _cfg = yaml.safe_load(_f)
             _users = _cfg['credentials']['usernames']
 
             st.markdown('#### 계정 목록')
@@ -980,25 +1130,24 @@ if _is_admin and tab_admin is not None:
                         else:
                             _users[_new_id] = {'name': _new_nm, 'email': _new_em, 'password': _new_pw}
                             with open(_cfg_path, 'w', encoding='utf-8') as _f:
-                                _yaml.dump(_cfg, _f, allow_unicode=True)
+                                yaml.dump(_cfg, _f, allow_unicode=True)
                             st.success(f'{_new_id} 계정이 추가됐습니다. 페이지를 새로고침하세요.')
                     else:
                         st.warning('아이디와 비밀번호를 입력하세요.')
 
             st.markdown('---')
             st.markdown('#### 구독 만료일 설정')
-            import datetime as _dt3
             _exp_target = st.selectbox('계정', list(_users.keys()), key='exp_sel')
             _cur_exp = _users[_exp_target].get('subscription_expiry', '2026-12-31')
             try:
-                _cur_exp_date = _dt3.datetime.strptime(_cur_exp, '%Y-%m-%d').date()
+                _cur_exp_date = datetime.datetime.strptime(_cur_exp, '%Y-%m-%d').date()
             except Exception:
-                _cur_exp_date = _dt3.date.today()
+                _cur_exp_date = datetime.date.today()
             _new_exp = st.date_input('만료일', value=_cur_exp_date, key='exp_date')
             if st.button('만료일 저장'):
                 _users[_exp_target]['subscription_expiry'] = str(_new_exp)
                 with open(_cfg_path, 'w', encoding='utf-8') as _f:
-                    _yaml.dump(_cfg, _f, allow_unicode=True)
+                    yaml.dump(_cfg, _f, allow_unicode=True)
                 st.success(f'{_exp_target} 만료일 → {_new_exp}')
 
             st.markdown('---')
@@ -1017,7 +1166,7 @@ if _is_admin and tab_admin is not None:
                         else:
                             _users[_pw_target]['password'] = _new_pw_r
                             with open(_cfg_path, 'w', encoding='utf-8') as _f:
-                                _yaml.dump(_cfg, _f, allow_unicode=True)
+                                yaml.dump(_cfg, _f, allow_unicode=True)
                             st.success(f'{_pw_target} 비밀번호가 변경됐습니다.')
 
             st.markdown('---')
@@ -1028,14 +1177,13 @@ if _is_admin and tab_admin is not None:
                 if st.button('삭제', type='secondary'):
                     del _users[_del_target]
                     with open(_cfg_path, 'w', encoding='utf-8') as _f:
-                        _yaml.dump(_cfg, _f, allow_unicode=True)
+                        yaml.dump(_cfg, _f, allow_unicode=True)
                     st.success(f'{_del_target} 계정이 삭제됐습니다. 페이지를 새로고침하세요.')
             else:
                 st.info('삭제 가능한 계정이 없습니다.')
 
         # ── 시스템 모니터링 ──────────────────────────────────────────────────
         with adm2:
-            import os as _os, datetime as _dt
             _log_path = OUTPUT_DIR / 'pipeline_run.log'
             _fc_path  = OUTPUT_DIR / 'forecast_7days.csv'
 
@@ -1043,7 +1191,7 @@ if _is_admin and tab_admin is not None:
             m1, m2, m3 = st.columns(3)
 
             if _log_path.exists():
-                _last_run = _dt.datetime.fromtimestamp(_os.path.getmtime(_log_path)).strftime('%Y-%m-%d %H:%M')
+                _last_run = datetime.datetime.fromtimestamp(os.path.getmtime(_log_path)).strftime('%Y-%m-%d %H:%M')
                 m1.metric('마지막 파이프라인 실행', _last_run)
             else:
                 m1.metric('마지막 파이프라인 실행', '기록 없음')
@@ -1084,11 +1232,10 @@ if _is_admin and tab_admin is not None:
 
             st.markdown('---')
             st.markdown('#### 자동 실행 스케줄러')
-            import subprocess as _ssp
             _sch_name = 'OilRiskPipeline'
 
             def _sch_status():
-                r = _ssp.run(['schtasks', '/Query', '/TN', _sch_name, '/FO', 'LIST'],
+                r = subprocess.run(['schtasks', '/Query', '/TN', _sch_name, '/FO', 'LIST'],
                              capture_output=True, encoding='cp949', errors='replace')
                 return r.returncode == 0, r.stdout
 
@@ -1107,18 +1254,14 @@ if _is_admin and tab_admin is not None:
             with col_btn:
                 st.markdown('<br>', unsafe_allow_html=True)
                 if st.button('등록/갱신'):
-                    from pathlib import Path as _PL5
-                    import sys as _sys3
-                    _sched_py = _PL5(__file__).parent / 'setup_scheduler.py'
-                    _r = _ssp.run([_sys3.executable, str(_sched_py), 'install', str(_h), str(_m)],
+                    _sched_py = Path(__file__).parent / 'setup_scheduler.py'
+                    _r = subprocess.run([sys.executable, str(_sched_py), 'install', str(_h), str(_m)],
                                   capture_output=True, text=True, encoding='utf-8', errors='replace')
                     st.success(_r.stdout.strip() or '등록 완료') if _r.returncode == 0 else st.error(_r.stderr)
 
             if st.button('스케줄 해제', type='secondary'):
-                from pathlib import Path as _PL6
-                import sys as _sys4
-                _sched_py = _PL6(__file__).parent / 'setup_scheduler.py'
-                _r = _ssp.run([_sys4.executable, str(_sched_py), 'remove'],
+                _sched_py = Path(__file__).parent / 'setup_scheduler.py'
+                _r = subprocess.run([sys.executable, str(_sched_py), 'remove'],
                               capture_output=True, text=True, encoding='utf-8', errors='replace')
                 st.info(_r.stdout.strip() or '해제 완료')
 
@@ -1132,8 +1275,6 @@ if _is_admin and tab_admin is not None:
 
         # ── 파이프라인 실행 ──────────────────────────────────────────────────
         with adm3:
-            import subprocess as _sp, sys as _sys
-            from pathlib import Path as _PL2
             st.markdown('#### 수동 파이프라인 실행')
             st.caption('oil_risk_mvp.py 를 즉시 실행합니다. 완료까지 2~5분 소요됩니다.')
 
@@ -1145,17 +1286,17 @@ if _is_admin and tab_admin is not None:
             if st.button('▶ 파이프라인 실행', disabled=st.session_state['pipeline_running']):
                 st.session_state['pipeline_running'] = True
                 st.session_state['pipeline_output'] = '실행 중...'
-                _pipe_path = _PL2(__file__).parent / 'oil_risk_mvp.py'
+                _pipe_path = Path(__file__).parent / 'oil_risk_mvp.py'
                 try:
-                    _result = _sp.run(
-                        [_sys.executable, str(_pipe_path)],
-                        cwd=str(_PL2(__file__).parent),
+                    _result = subprocess.run(
+                        [sys.executable, str(_pipe_path)],
+                        cwd=str(Path(__file__).parent),
                         capture_output=True, text=True,
                         encoding='utf-8', errors='replace', timeout=600,
                     )
                     _out = (_result.stdout or '') + (_result.stderr or '')
                     st.session_state['pipeline_output'] = _out[-4000:] if len(_out) > 4000 else _out
-                except _sp.TimeoutExpired:
+                except subprocess.TimeoutExpired:
                     st.session_state['pipeline_output'] = '타임아웃 (10분 초과)'
                 except Exception as _e:
                     st.session_state['pipeline_output'] = f'오류: {_e}'
@@ -1170,8 +1311,7 @@ if _is_admin and tab_admin is not None:
 
         # ── 이메일 알림 설정 ─────────────────────────────────────────────
         with adm4:
-            from pathlib import Path as _PL3
-            _env_path = _PL3(__file__).parent / '.env'
+            _env_path = Path(__file__).parent / '.env'
 
             def _read_env():
                 env = {}
@@ -1183,9 +1323,7 @@ if _is_admin and tab_admin is not None:
                 return env
 
             def _write_env_key(key, val):
-                if not _env_path.exists():
-                    return
-                lines = _env_path.read_text(encoding='utf-8').splitlines()
+                lines = _env_path.read_text(encoding='utf-8').splitlines() if _env_path.exists() else []
                 updated = False
                 for i, line in enumerate(lines):
                     if line.startswith(key + '='):
@@ -1216,9 +1354,7 @@ if _is_admin and tab_admin is not None:
             st.markdown('---')
             st.markdown('#### 테스트 발송')
             if st.button('📧 테스트 이메일 발송'):
-                from pathlib import Path as _PL4
-                import importlib.util as _ilu
-                _spec = _ilu.spec_from_file_location('mvp', str(_PL4(__file__).parent / 'oil_risk_mvp.py'))
+                _spec = _ilu.spec_from_file_location('mvp', str(Path(__file__).parent / 'oil_risk_mvp.py'))
                 _mvp  = _ilu.module_from_spec(_spec)
                 try:
                     _spec.loader.exec_module(_mvp)
