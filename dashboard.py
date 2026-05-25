@@ -1236,8 +1236,8 @@ if _is_admin and tab_admin is not None:
                 _warns = []
                 if not _har.empty and float(_har['r2'].iloc[0]) < 0.48:
                     _warns.append(f"HAR R²={float(_har['r2'].iloc[0]):.3f} < 0.48")
-                if not _stk.empty and float(_stk['r2'].iloc[0]) < 0.68:
-                    _warns.append(f"Stacking R²={float(_stk['r2'].iloc[0]):.3f} < 0.68")
+                if not _stk.empty and float(_stk['r2'].iloc[0]) < 0.83:
+                    _warns.append(f"Stacking R²={float(_stk['r2'].iloc[0]):.3f} < 0.83")
                 if not _xgb.empty and 'dir_acc' in _xgb.columns and float(_xgb['dir_acc'].iloc[0]) < 0.52:
                     _warns.append(f"dir_acc={float(_xgb['dir_acc'].iloc[0])*100:.1f}% < 52%")
                 for w in _warns:
@@ -1296,33 +1296,36 @@ if _is_admin and tab_admin is not None:
 
             if 'pipeline_running' not in st.session_state:
                 st.session_state['pipeline_running'] = False
-            if 'pipeline_output' not in st.session_state:
-                st.session_state['pipeline_output'] = ''
 
             if st.button('▶ 파이프라인 실행', disabled=st.session_state['pipeline_running']):
                 st.session_state['pipeline_running'] = True
-                st.session_state['pipeline_output'] = '실행 중...'
-                _pipe_path = Path(__file__).parent / 'oil_risk_mvp.py'
+                _log_box2  = st.empty()
+                _log_path2 = OUTPUT_DIR / 'pipeline_run.log'
+                _pipe_path2 = Path(__file__).parent / 'oil_risk_mvp.py'
                 try:
-                    _result = subprocess.run(
-                        [sys.executable, str(_pipe_path)],
+                    import time as _time
+                    _proc2 = subprocess.Popen(
+                        [sys.executable, str(_pipe_path2)],
                         cwd=str(Path(__file__).parent),
-                        capture_output=True, text=True,
-                        encoding='utf-8', errors='replace', timeout=600,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )
-                    _out = (_result.stdout or '') + (_result.stderr or '')
-                    st.session_state['pipeline_output'] = _out[-4000:] if len(_out) > 4000 else _out
-                except subprocess.TimeoutExpired:
-                    st.session_state['pipeline_output'] = '타임아웃 (10분 초과)'
-                except Exception as _e:
-                    st.session_state['pipeline_output'] = f'오류: {_e}'
-                finally:
+                    while _proc2.poll() is None:
+                        if _log_path2.exists():
+                            with open(_log_path2, encoding='utf-8', errors='replace') as _lf2:
+                                _tail2 = ''.join(_lf2.readlines()[-10:])
+                            _log_box2.code(_tail2, language=None)
+                        _time.sleep(2)
                     st.session_state['pipeline_running'] = False
-                st.rerun()
-
-            if st.session_state['pipeline_output']:
-                st.markdown(f"**{'실행 중...' if st.session_state['pipeline_running'] else '실행 완료'}**")
-                st.text_area('출력 로그', st.session_state['pipeline_output'], height=350)
+                    if _proc2.returncode == 0:
+                        st.cache_data.clear()
+                        _log_box2.empty()
+                        st.success('✅ 완료!')
+                        st.rerun()
+                    else:
+                        st.error(f'파이프라인 오류 (exit={_proc2.returncode})')
+                except Exception as _e:
+                    st.session_state['pipeline_running'] = False
+                    st.error(f'오류: {_e}')
 
 
         # ── 이메일 알림 설정 ─────────────────────────────────────────────
