@@ -1752,7 +1752,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
             _imfs = np.load(str(_cem_cache), allow_pickle=True)
             log.info("    CEEMDAN 캐시 로드")
         else:
-            _cem = _CEEMDAN(trials=20, epsilon=0.005)
+            _cem = _CEEMDAN(trials=20, epsilon=0.005, parallel=False)
             _imfs = _cem(_wti_arr)
             np.save(str(_cem_cache), _imfs)
             for _old_c in OUTPUT_DIR.glob('ceemdan_*.npy'):
