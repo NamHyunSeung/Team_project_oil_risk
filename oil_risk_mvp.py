@@ -3942,7 +3942,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         log.warning(f"    오차 보정 모델 실패({_ece})")
                 else:
                     log.info(f"    Stacking 미채택 (MAE={_mae_stack:.4f} ≥ 현재 최저={_mae_curr:.4f})")
-                    results['stacking'] = {
+                    results['stacking_rejected'] = {
                         'name': f'Stacking (+{"+".join(_stack_names)},미채택)',
                         'type': 'price',
                         'rmse': round(_rmse_stack, 5),
