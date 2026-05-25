@@ -232,7 +232,7 @@ with st.sidebar:
     st.markdown("---")
 
     if st.button("🔄 파이프라인 실행 / 새로고침", use_container_width=True, type="primary"):
-        with st.spinner("분석 중... (약 1-2분)"):
+        with st.spinner("분석 중... (약 5~7분)"):
             try:
                 import importlib, oil_risk_mvp
                 importlib.reload(oil_risk_mvp)
@@ -1277,7 +1277,7 @@ if _is_admin and tab_admin is not None:
         # ── 파이프라인 실행 ──────────────────────────────────────────────────
         with adm3:
             st.markdown('#### 수동 파이프라인 실행')
-            st.caption('oil_risk_mvp.py 를 즉시 실행합니다. 완료까지 2~5분 소요됩니다.')
+            st.caption('oil_risk_mvp.py 를 즉시 실행합니다. 완료까지 5~7분 소요됩니다.')
 
             if 'pipeline_running' not in st.session_state:
                 st.session_state['pipeline_running'] = False

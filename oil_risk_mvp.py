@@ -5760,6 +5760,22 @@ def plot_oil_forecast(feature_df: pd.DataFrame, fc_df: pd.DataFrame, signal: dic
 
 def run_pipeline(start_date=None, end_date=None) -> dict:
     """전체 분석 파이프라인 실행 후 결과 dict 반환"""
+    # 파일 로그 핸들러 (관리자 대시보드용) — 중복 추가 방지
+    _log_file = OUTPUT_DIR / 'pipeline_run.log'
+    _root_log = logging.getLogger()
+    _has_fh = any(isinstance(_h, logging.FileHandler) and
+                  getattr(_h, 'baseFilename', '').endswith('pipeline_run.log')
+                  for _h in _root_log.handlers)
+    if not _has_fh:
+        try:
+            OUTPUT_DIR.mkdir(exist_ok=True)
+            _fh = logging.FileHandler(_log_file, encoding='utf-8')
+            _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s | %(message)s",
+                                               datefmt='%H:%M:%S'))
+            _root_log.addHandler(_fh)
+        except Exception:
+            pass
+
     print("\n" + "=" * 65)
     print("  🛢  국제 유가 리스크 예측 시스템  MVP")
     print("=" * 65)
