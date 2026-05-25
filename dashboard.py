@@ -232,17 +232,32 @@ with st.sidebar:
     st.markdown("---")
 
     if st.button("🔄 파이프라인 실행 / 새로고침", use_container_width=True, type="primary"):
-        with st.spinner("분석 중... (약 5~7분)"):
-            try:
-                import importlib, oil_risk_mvp
-                importlib.reload(oil_risk_mvp)
-                oil_risk_mvp.run_pipeline()
+        _log_box  = st.empty()
+        _log_path = OUTPUT_DIR / 'pipeline_run.log'
+        _pipe_path = Path(__file__).parent / 'oil_risk_mvp.py'
+        try:
+            import time as _time
+            _proc = subprocess.Popen(
+                [sys.executable, str(_pipe_path)],
+                cwd=str(Path(__file__).parent),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            while _proc.poll() is None:
+                if _log_path.exists():
+                    with open(_log_path, encoding='utf-8', errors='replace') as _lf:
+                        _tail = ''.join(_lf.readlines()[-8:])
+                    _log_box.code(_tail, language=None)
+                _time.sleep(2)
+            if _proc.returncode == 0:
                 st.cache_data.clear()
+                _log_box.empty()
                 st.success("✅ 완료!")
                 st.rerun()
-            except Exception as e:
-                st.error(f"오류: {e}")
-                st.info("pip install -r requirements.txt 후 재시도하세요.")
+            else:
+                st.error(f"파이프라인 오류 (exit={_proc.returncode})")
+        except Exception as e:
+            st.error(f"오류: {e}")
+            st.info("pip install -r requirements.txt 후 재시도하세요.")
 
     st.markdown("---")
 

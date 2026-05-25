@@ -1741,16 +1741,16 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         from PyEMD import CEEMDAN as _CEEMDAN
         import hashlib as _hl
         _n_total  = len(df)
-        _n_tr_cem = max(_n_total - 90, _n_total)  # 90 = N_TEST
         _n_tr_cem = _n_total - 90 if _n_total > 90 else _n_total
         _wti_full = df['WTI'].ffill().values.astype(float)
         _wti_arr  = _wti_full[:_n_tr_cem]          # 훈련 구간만 사용
         _snap_n   = (_n_tr_cem // 30) * 30   # 30행 단위 스냅 → 월 1회만 재계산
         _cem_hash = _hl.md5(_wti_arr[:_snap_n].tobytes()).hexdigest()[:16]
         _cem_cache = OUTPUT_DIR / f'ceemdan_{_cem_hash}.npy'
+        _next_miss = ((_n_tr_cem // 30) + 1) * 30 - _n_tr_cem
         if _cem_cache.exists():
             _imfs = np.load(str(_cem_cache), allow_pickle=True)
-            log.info("    CEEMDAN 캐시 로드")
+            log.info("    CEEMDAN 캐시 로드 (다음 재계산까지 ~%d 거래일)", _next_miss)
         else:
             _cem = _CEEMDAN(trials=20, epsilon=0.005, parallel=False)
             _imfs = _cem(_wti_arr)
