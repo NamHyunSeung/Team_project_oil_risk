@@ -3941,7 +3941,14 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     except Exception as _ece:
                         log.warning(f"    오차 보정 모델 실패({_ece})")
                 else:
-                    log.info(f"    Stacking 미채택 (R²={_r2_stack:.4f} ≤ 현재 최고={_r2_curr:.4f})")
+                    log.info(f"    Stacking 미채택 (MAE={_mae_stack:.4f} ≥ 현재 최저={_mae_curr:.4f})")
+                    results['stacking'] = {
+                        'name': f'Stacking (+{"+".join(_stack_names)},미채택)',
+                        'type': 'price',
+                        'rmse': round(_rmse_stack, 5),
+                        'mae':  round(_mae_stack,  5),
+                        'r2':   round(_r2_stack,   4),
+                    }
         except Exception as _se:
             log.warning(f"    Stacking 실패({_se})")
 
