@@ -74,6 +74,9 @@ XGB_OPTUNA_CACHE    = OUTPUT_DIR / 'xgb_optuna_cache.json'
 STACK_WEIGHTS_EMA   = OUTPUT_DIR / 'stacking_weights_ema.json'
 FEAT_TRAIN_STATS    = OUTPUT_DIR / 'feature_train_stats.json'
 LAST_RETRAIN_FILE   = OUTPUT_DIR / 'last_retrain.json'
+SVM_CACHE           = OUTPUT_DIR / 'svm_cache.json'
+GARCH_CACHE         = OUTPUT_DIR / 'garch_cache.pkl'
+INTRADAY_CACHE      = OUTPUT_DIR / 'intraday_rv_cache.pkl'
 REFIT_STALE_DAYS    = 7   # 이 일수 초과 시 Optuna 캐시 초기화 → 하이퍼파라미터 재탐색
 EMBED_MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
 EMBED_TOP_K      = 15   # WTI 수익률 상관관계 상위 차원 수
@@ -1739,7 +1742,8 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         _n_tr_cem = _n_total - 90 if _n_total > 90 else _n_total
         _wti_full = df['WTI'].ffill().values.astype(float)
         _wti_arr  = _wti_full[:_n_tr_cem]          # 훈련 구간만 사용
-        _cem_hash = _hl.md5(_wti_arr.tobytes()).hexdigest()[:16]
+        _snap_n   = (_n_tr_cem // 30) * 30   # 30행 단위 스냅 → 월 1회만 재계산
+        _cem_hash = _hl.md5(_wti_arr[:_snap_n].tobytes()).hexdigest()[:16]
         _cem_cache = OUTPUT_DIR / f'ceemdan_{_cem_hash}.npy'
         if _cem_cache.exists():
             _imfs = np.load(str(_cem_cache), allow_pickle=True)
@@ -1788,10 +1792,29 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     _garch_result = None   # 호출자에게 반환할 fit 결과
     try:
         from arch import arch_model as _arch_model
+        import hashlib as _ghl, pickle as _gpk
         _ret_pct = df['log_return'].dropna() * 100   # % 스케일
-        _garch   = _arch_model(_ret_pct, vol='Garch', p=1, q=1,
-                               dist='Normal', rescale=False)
-        _res     = _garch.fit(disp='off', show_warning=False)
+        _ghash = _ghl.md5(_ret_pct.values.tobytes()[-2000:]).hexdigest()[:12]
+        _garch_loaded = False
+        if GARCH_CACHE.exists():
+            try:
+                with open(GARCH_CACHE, 'rb') as _gf:
+                    _gc = _gpk.load(_gf)
+                if _gc.get('hash') == _ghash:
+                    _res = _gc['result']
+                    _garch_loaded = True
+                    log.info("    GARCH 캐시 로드")
+            except Exception:
+                pass
+        if not _garch_loaded:
+            _garch = _arch_model(_ret_pct, vol='Garch', p=1, q=1,
+                                 dist='Normal', rescale=False)
+            _res = _garch.fit(disp='off', show_warning=False)
+            try:
+                with open(GARCH_CACHE, 'wb') as _gf:
+                    _gpk.dump({'hash': _ghash, 'result': _res}, _gf)
+            except Exception:
+                pass
         _cond_vol = _res.conditional_volatility / 100   # 소수점 스케일 복원
         df['garch_vol'] = _cond_vol.reindex(df.index).ffill().bfill().fillna(0)
         _garch_result = _res   # 외부 전달용 저장
@@ -1800,10 +1823,30 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
         log.warning(f"    GARCH 실패({_ge}) → garch_vol=0")
         df['garch_vol'] = 0.0
 
-    # ── 장중 고빈도 실현분산 (1h 데이터, 최근 730일 — 더 정확한 RV 추정)
+    # ── 장중 고빈도 실현분산 (1h 데이터, 최근 365일 — 더 정확한 RV 추정)
     try:
-        _raw_1h = yf.download("CL=F", period="365d", interval="1h",
-                              progress=False, auto_adjust=True)
+        _intra_today = pd.Timestamp.today().normalize()
+        _intra_stale = True
+        if INTRADAY_CACHE.exists():
+            try:
+                import pickle as _pk
+                with open(INTRADAY_CACHE, 'rb') as _pf:
+                    _ic = _pk.load(_pf)
+                if _ic.get('date') == str(_intra_today.date()):
+                    _raw_1h = _ic['data']
+                    _intra_stale = False
+                    log.info("    장중 RV 캐시 로드")
+            except Exception:
+                pass
+        if _intra_stale:
+            _raw_1h = yf.download("CL=F", period="365d", interval="1h",
+                                  progress=False, auto_adjust=True)
+            try:
+                import pickle as _pk
+                with open(INTRADAY_CACHE, 'wb') as _pf:
+                    _pk.dump({'date': str(_intra_today.date()), 'data': _raw_1h}, _pf)
+            except Exception:
+                pass
         if not _raw_1h.empty and len(_raw_1h) > 100:
             _c1h = _raw_1h['Close']
             if isinstance(_c1h, pd.DataFrame): _c1h = _c1h.iloc[:, 0]
@@ -3257,26 +3300,44 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     else:
                         _Xtr_svm, _Xte_svm, _sc_cem = _Xtr_sel, _Xte_sel, None
 
-                    # C 그리드 서치 (시간 기반 단일 검증 분할, 마지막 25%)
-                    _c_grid = [0.3, 0.5, 1.0, 2.0, 3.0, 5.0]
-                    _n_cval = max(30, len(_Xtr_svm) // 4)
+                    # C 그리드 서치 (7일 이내 캐시 사용으로 skip 가능)
+                    import json as _jsc
                     _best_c, _best_c_dir = 1.0, -1.0
-                    for _ci in _c_grid:
-                        _smc = _SVC(kernel='rbf', C=_ci, gamma='scale',
-                                    probability=True, class_weight='balanced', random_state=42)
-                        _swc = np.exp(0.002 * np.arange(len(_Xtr_svm) - _n_cval))
-                        _dzc = _dz_mask_tr[:len(_Xtr_svm) - _n_cval]
-                        if _dzc.sum() >= 30:
-                            _smc.fit(_Xtr_svm[:-_n_cval][_dzc], _y_cls_tr[:-_n_cval][_dzc],
-                                     sample_weight=_swc[_dzc])
-                        else:
-                            _smc.fit(_Xtr_svm[:-_n_cval], _y_cls_tr[:-_n_cval],
-                                     sample_weight=_swc)
-                        _cp = _smc.predict_proba(_Xtr_svm[-_n_cval:])[:, 1]
-                        _cd = float(((_cp > 0.5).astype(int) == _y_cls_tr[-_n_cval:]).mean())
-                        if _cd > _best_c_dir:
-                            _best_c_dir, _best_c = _cd, _ci
-                    log.info(f"        SVM C 그리드: best_C={_best_c} (검증_dir={_best_c_dir*100:.1f}%)")
+                    _svm_c_cached = False
+                    if SVM_CACHE.exists():
+                        try:
+                            _sc_d = _jsc.loads(SVM_CACHE.read_text())
+                            _sc_age = (pd.Timestamp.today() - pd.Timestamp(_sc_d['date'])).days
+                            if _sc_age < REFIT_STALE_DAYS:
+                                _best_c = float(_sc_d['best_c'])
+                                _svm_c_cached = True
+                                log.info(f"        SVM C 캐시 로드: C={_best_c} (age={_sc_age}d)")
+                        except Exception:
+                            pass
+                    if not _svm_c_cached:
+                        _c_grid = [0.3, 0.5, 1.0, 2.0, 3.0, 5.0]
+                        _n_cval = max(30, len(_Xtr_svm) // 4)
+                        for _ci in _c_grid:
+                            _smc = _SVC(kernel='rbf', C=_ci, gamma='scale',
+                                        probability=True, class_weight='balanced', random_state=42)
+                            _swc = np.exp(0.002 * np.arange(len(_Xtr_svm) - _n_cval))
+                            _dzc = _dz_mask_tr[:len(_Xtr_svm) - _n_cval]
+                            if _dzc.sum() >= 30:
+                                _smc.fit(_Xtr_svm[:-_n_cval][_dzc], _y_cls_tr[:-_n_cval][_dzc],
+                                         sample_weight=_swc[_dzc])
+                            else:
+                                _smc.fit(_Xtr_svm[:-_n_cval], _y_cls_tr[:-_n_cval],
+                                         sample_weight=_swc)
+                            _cp = _smc.predict_proba(_Xtr_svm[-_n_cval:])[:, 1]
+                            _cd = float(((_cp > 0.5).astype(int) == _y_cls_tr[-_n_cval:]).mean())
+                            if _cd > _best_c_dir:
+                                _best_c_dir, _best_c = _cd, _ci
+                        try:
+                            SVM_CACHE.write_text(_jsc.dumps({
+                                'best_c': _best_c, 'date': str(pd.Timestamp.today().date())}))
+                        except Exception:
+                            pass
+                        log.info(f"        SVM C 그리드: best_C={_best_c} (검증_dir={_best_c_dir*100:.1f}%)")
 
                     _sm = _SVC(kernel='rbf', C=_best_c, gamma='scale',
                                probability=True, class_weight='balanced', random_state=42)
@@ -3389,8 +3450,16 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     _sw_ls = np.exp(0.002 * np.arange(len(_Xls_tr))); _sw_ls /= _sw_ls.mean()
                     _dz_ls = _dz_mask_tr[_LB:_LB+len(_Xls_tr)]
 
+                    # 주간 refit 시 5 seeds, 일간은 3 seeds (앙상블 분산 ±0.3% 이내)
+                    try:
+                        _lr_age = (pd.Timestamp.today() - pd.Timestamp(
+                            __import__('json').loads(LAST_RETRAIN_FILE.read_text()).get(
+                                'last_retrain', '2000-01-01'))).days
+                    except Exception:
+                        _lr_age = 0
+                    _n_lstm_seeds = 5 if _lr_age >= REFIT_STALE_DAYS else 3
                     _lprobs = [_ltrain(_Xls_tr, _yls_tr, _Xls_te, _yls_te,
-                                       _sw_ls, _dz_ls, seed=s) for s in range(5)]
+                                       _sw_ls, _dz_ls, seed=s) for s in range(_n_lstm_seeds)]
                     _prob_lstm    = np.mean(_lprobs, axis=0)
                     _dir_svm_cur  = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
                     _best_lw, _best_ldir = 0.5, -1.0
@@ -5697,25 +5766,27 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
 
     api_status = {}  # API별 수집 성공 여부 추적
 
-    # yfinance
-    try:
-        price_df = fetch_data(start_date, end_date)
-        _is_dummy = (len(price_df) < 100 and price_df.index[0].year < 2010)
-        api_status['yfinance'] = '❌ 더미' if _is_dummy else '✅ 정상'
-    except Exception as e:
-        price_df = fetch_data(start_date, end_date)
-        api_status['yfinance'] = f'❌ 오류'
+    # yfinance + Guardian 병렬 fetch
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    with _TPE(max_workers=2) as _ex:
+        _f_price = _ex.submit(fetch_data, start_date, end_date)
+        _f_news  = _ex.submit(fetch_news)
+        try:
+            price_df = _f_price.result()
+            _is_dummy = (len(price_df) < 100 and price_df.index[0].year < 2010)
+            api_status['yfinance'] = '❌ 더미' if _is_dummy else '✅ 정상'
+        except Exception:
+            price_df = fetch_data(start_date, end_date)
+            api_status['yfinance'] = '❌ 오류'
+        try:
+            news_df = _f_news.result()
+            api_status['Guardian'] = '✅ 정상' if len(news_df) > 10 else '⚠️ 부족'
+        except Exception:
+            news_df = fetch_news()
+            api_status['Guardian'] = '❌ 오류'
 
     # FRED
     api_status['FRED'] = '✅ 정상' if (_FRED and FRED_API_KEY) else '❌ 미설정'
-
-    # Guardian 뉴스
-    try:
-        news_df = fetch_news()
-        api_status['Guardian'] = '✅ 정상' if len(news_df) > 10 else '⚠️ 부족'
-    except Exception:
-        news_df = fetch_news()
-        api_status['Guardian'] = '❌ 오류'
 
     feature_df, full_df, aux_models = build_features(price_df, news_df)
     # EIA: build_features 이후 실제 데이터 존재 여부로 검증
