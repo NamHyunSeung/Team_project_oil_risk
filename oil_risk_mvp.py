@@ -739,6 +739,8 @@ def fetch_data(start_date=None, end_date=None):
         # CL2=F 먼저 순차 실행 (yfinance 세션 정규화 사이드 이펙트 보존)
         try:
             cl2 = _dl("CL2=F")
+            if cl2.isna().all():
+                raise ValueError("CL2=F all-NaN (delisted)")
             futures_spread = (cl2 - wti).rename("futures_spread")
             log.info(f"    WTI 선물 커브 스프레드 수집 완료 (μ={futures_spread.mean():.3f})")
         except Exception:
@@ -827,8 +829,9 @@ def _patch_price_with_fred(df: pd.DataFrame, col: str, fred_series: str,
             return df
 
         today     = pd.Timestamp(datetime.today().date())
+        cutoff    = today - pd.Timedelta(days=90)
         check_idx = df.index.intersection(fred_data.index)
-        check_idx = check_idx[check_idx < today]
+        check_idx = check_idx[check_idx < cutoff]
 
         if len(check_idx) == 0:
             return df
