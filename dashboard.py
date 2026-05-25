@@ -353,6 +353,15 @@ tab_admin = _tabs[5] if _is_admin else None
 
 # ── Tab 1: 가격 예측 ──────────────────────────────────────────────────────────
 with tab1:
+    if 'latest_risk_signal' in data and not data['latest_risk_signal'].empty:
+        _sig1 = data['latest_risk_signal'].iloc[0]
+        _fc_rel = str(_sig1.get('forecast_reliability', '') or '').upper()
+        _m_age  = int(_sig1.get('model_age_days', 0) or 0)
+        if _fc_rel == 'LOW':
+            st.error("⚠️ **예측 신뢰도 낮음** — 라이브 오차가 백테스트 대비 1.5× 초과. 예측값 참고 수준으로만 활용하세요.")
+        elif _m_age > 30:
+            st.warning(f"⚠️ 모델 미갱신 **{_m_age}일** 경과 — 파이프라인 재실행을 권장합니다.")
+
     col_chart, col_table = st.columns([2.2, 1])
 
     with col_chart:
@@ -455,17 +464,30 @@ with tab1:
                     lambda r: f"${r['lower_80ci']:.1f} ~ ${r['upper_80ci']:.1f}", axis=1
                 )
 
+            # 방향 + 변화율(%) 컬럼
+            _last_px = (float(data['latest_risk_signal'].iloc[0]['wti_price'])
+                        if 'latest_risk_signal' in data and not data['latest_risk_signal'].empty else None)
+            if _last_px and _last_px > 0:
+                _prices = fc['forecast_price'].values
+                _dirs, _chgs = [], []
+                for _i, _p in enumerate(_prices):
+                    _ref = _last_px if _i == 0 else _prices[_i - 1]
+                    _dirs.append('↑' if _p > _ref else ('↓' if _p < _ref else '→'))
+                    _chgs.append(f"{(_p - _last_px) / _last_px * 100:+.2f}%")
+                fc['방향'] = _dirs
+                fc['vs현재(%)'] = _chgs
+
             if _is_admin:
                 display_cols = {
-                    '날짜': '날짜', 'forecast_price': '앙상블($)',
-                    '80% 구간': '80% 구간',
+                    '날짜': '날짜', '방향': '방향', 'forecast_price': '앙상블($)',
+                    'vs현재(%)': 'vs현재(%)', '80% 구간': '80% 구간',
                     'sarimax_forecast': 'SARIMAX($)', 'xgb_forecast': 'XGB($)',
                     '합의도': '합의도', 'bias_correction': 'Bias($)',
                 }
             else:
                 display_cols = {
-                    '날짜': '날짜', 'forecast_price': '앙상블($)',
-                    '80% 구간': '80% 구간', '합의도': '합의도',
+                    '날짜': '날짜', '방향': '방향', 'forecast_price': '앙상블($)',
+                    'vs현재(%)': 'vs현재(%)', '80% 구간': '80% 구간', '합의도': '합의도',
                 }
             show_fc = fc[[c for c in display_cols if c in fc.columns]].rename(columns=display_cols)
             st.dataframe(show_fc, hide_index=True, use_container_width=True)
@@ -487,6 +509,31 @@ with tab1:
 # ── Tab 2: 리스크 상세 ────────────────────────────────────────────────────────
 with tab2:
     st.subheader("🌡 리스크 구성 요소 분석")
+
+    # ── RSS 이벤트 트리거 (상단 우선 표시) ────────────────────────────────────
+    _alert_path = OUTPUT_DIR / 'latest_alerts.json'
+    if _alert_path.exists():
+        try:
+            _al = json.loads(_alert_path.read_text(encoding='utf-8'))
+            _trigs = _al.get('triggers', [])
+            if _trigs:
+                _lvl_ko = {'WARNING': '⚠️ 경고', 'CRITICAL': '🔴 위험', 'NORMAL': '🟢 정상'}
+                _cat_ko = {
+                    'price_move': '가격변동', 'geopolitical': '지정학',
+                    'supply': '공급', 'demand': '수요', 'production': '생산',
+                    'inventory': '재고', 'sanctions': '제재', 'opec': 'OPEC',
+                    'ovx_spike': 'OVX 급등',
+                }
+                _lvl_txt = _lvl_ko.get(_al.get('alert_level', ''), _al.get('alert_level', ''))
+                st.markdown(f"**📡 RSS 이벤트 트리거** — {_lvl_txt} · 총 점수: {_al.get('total_score', 0)}")
+                for _tr in _trigs[:3]:
+                    _cat = _cat_ko.get(_tr.get('category', ''), _tr.get('category', ''))
+                    _scr = _tr.get('score', 0)
+                    st.markdown(f"- **[{_cat}]** 점수 {_scr} · {_tr['title'][:90]}")
+                st.caption(f"기준: {_al.get('checked_at', '—')}")
+                st.markdown("---")
+        except Exception:
+            pass
 
     if 'latest_risk_signal' in data:
         sig = data['latest_risk_signal'].iloc[0]
@@ -537,6 +584,11 @@ with tab2:
             st.metric("WTI 현재가", f"${sig['wti_price']:.2f}")
             st.metric("5일 변동성", f"{sig['volatility_5d']*100:.2f}%")
             st.metric("뉴스 감성", f"{float(sig['news_sentiment']):.3f}")
+            _ovx_val = float(sig.get('ovx_level', 0) or 0)
+            _ovx_alarm = str(sig.get('ovx_alarm', '')).lower() in ('true', '1', 'yes')
+            st.metric("OVX (원유변동성)",
+                      f"{_ovx_val:.1f}",
+                      "🔴 급등 경보" if _ovx_alarm else ("🟡 주의" if _ovx_val > 50 else "🟢 정상"))
             if _is_admin:
                 st.markdown("---")
                 st.markdown("**상세 수치 (관리자)**")
@@ -613,31 +665,6 @@ with tab2:
         st.plotly_chart(fig_rh, use_container_width=True)
     else:
         st.info("파이프라인 실행 후 리스크 히스토리가 표시됩니다.")
-
-    # ── RSS 이벤트 트리거 ──────────────────────────────────────────────────────
-    _alert_path = OUTPUT_DIR / 'latest_alerts.json'
-    if _alert_path.exists():
-        try:
-            _al = json.loads(_alert_path.read_text(encoding='utf-8'))
-            _trigs = _al.get('triggers', [])
-            if _trigs:
-                st.markdown("---")
-                _lvl_ko = {'WARNING': '⚠️ 경고', 'CRITICAL': '🔴 위험', 'NORMAL': '🟢 정상'}
-                _cat_ko = {
-                    'price_move': '가격변동', 'geopolitical': '지정학',
-                    'supply': '공급', 'demand': '수요', 'production': '생산',
-                    'inventory': '재고', 'sanctions': '제재', 'opec': 'OPEC',
-                    'ovx_spike': 'OVX 급등',
-                }
-                _lvl_txt = _lvl_ko.get(_al.get('alert_level', ''), _al.get('alert_level', ''))
-                st.markdown(f"**📡 RSS 이벤트 트리거** — {_lvl_txt} · 총 점수: {_al.get('total_score', 0)}")
-                for _tr in _trigs[:3]:
-                    _cat = _cat_ko.get(_tr.get('category', ''), _tr.get('category', ''))
-                    _scr = _tr.get('score', 0)
-                    st.markdown(f"- **[{_cat}]** 점수 {_scr} · {_tr['title'][:90]}")
-                st.caption(f"기준: {_al.get('checked_at', '—')}")
-        except Exception:
-            pass
 
 # ── Tab 3: 키워드 분석 ───────────────────────────────────────────────────────
 with tab3:
@@ -742,14 +769,23 @@ with tab4:
                 f"{_stk_r2:.3f}",
                 help="앙상블 모델이 실제 유가 변동을 설명하는 비율 (1.0에 가까울수록 좋음)"
             )
+        _stk_adopted = not _stk.empty and '미채택' not in str(_stk['model'].iloc[0])
+        _live_model = "Stacking 앙상블" if _stk_adopted else "SARIMAX (잔차교정)"
+        st.caption(f"현재 라이브 예측 모델: **{_live_model}**")
     else:
         pf = data['model_performance']
 
         # 역할 컬럼 동적 추가
+        _stk_live = not data['model_performance'][
+            data['model_performance']['model'].str.contains('Stacking', na=False)
+        ].pipe(lambda df: df.empty or '미채택' in str(df['model'].iloc[0]))
         def _assign_role(m):
-            if 'Stacking' in m:     return '앙상블 채택'
+            if 'Stacking' in m and '미채택' in m: return '앙상블 (미채택)'
+            if 'Stacking' in m:     return '앙상블 채택 ✅'
             if 'HAR' in m or 'GARCH' in m: return '변동성 진단'
             if 'Prophet' in m:      return '모니터링 전용'
+            if 'SARIMAX' in m:
+                return '가격예측 (라이브 ✅)' if not _stk_live else '가격예측'
             return '모니터링/비교'
         pf = pf.copy()
         pf.insert(0, '역할', pf['model'].apply(_assign_role))
