@@ -9,7 +9,6 @@ import streamlit_authenticator as stauth
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import matplotlib.font_manager as fm
 from pathlib import Path
 import datetime
@@ -614,6 +613,30 @@ with tab2:
         st.plotly_chart(fig_rh, use_container_width=True)
     else:
         st.info("파이프라인 실행 후 리스크 히스토리가 표시됩니다.")
+
+    # ── RSS 이벤트 트리거 ──────────────────────────────────────────────────────
+    _alert_path = OUTPUT_DIR / 'latest_alerts.json'
+    if _alert_path.exists():
+        try:
+            _al = json.loads(_alert_path.read_text(encoding='utf-8'))
+            _trigs = _al.get('triggers', [])
+            if _trigs:
+                st.markdown("---")
+                _lvl_ko = {'WARNING': '⚠️ 경고', 'CRITICAL': '🔴 위험', 'NORMAL': '🟢 정상'}
+                _cat_ko = {
+                    'price_move': '가격변동', 'geopolitical': '지정학',
+                    'supply': '공급', 'demand': '수요', 'production': '생산',
+                    'inventory': '재고', 'sanctions': '제재', 'opec': 'OPEC',
+                }
+                _lvl_txt = _lvl_ko.get(_al.get('alert_level', ''), _al.get('alert_level', ''))
+                st.markdown(f"**📡 RSS 이벤트 트리거** — {_lvl_txt} · 총 점수: {_al.get('total_score', 0)}")
+                for _tr in _trigs[:3]:
+                    _cat = _cat_ko.get(_tr.get('category', ''), _tr.get('category', ''))
+                    _scr = _tr.get('score', 0)
+                    st.markdown(f"- **[{_cat}]** 점수 {_scr} · {_tr['title'][:90]}")
+                st.caption(f"기준: {_al.get('checked_at', '—')}")
+        except Exception:
+            pass
 
 # ── Tab 3: 키워드 분석 ───────────────────────────────────────────────────────
 with tab3:
