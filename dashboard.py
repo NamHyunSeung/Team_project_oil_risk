@@ -627,6 +627,7 @@ with tab2:
                     'price_move': '가격변동', 'geopolitical': '지정학',
                     'supply': '공급', 'demand': '수요', 'production': '생산',
                     'inventory': '재고', 'sanctions': '제재', 'opec': 'OPEC',
+                    'ovx_spike': 'OVX 급등',
                 }
                 _lvl_txt = _lvl_ko.get(_al.get('alert_level', ''), _al.get('alert_level', ''))
                 st.markdown(f"**📡 RSS 이벤트 트리거** — {_lvl_txt} · 총 점수: {_al.get('total_score', 0)}")
@@ -713,7 +714,8 @@ with tab4:
     elif not _is_admin:
         pf = data['model_performance']
         _cls = pf[pf['model'].str.contains('Classifier', na=False)]
-        c1, c2, c3 = st.columns(3)
+        _stk = pf[pf['model'].str.contains('Stacking', na=False)]
+        c1, c2, c3, c4 = st.columns(4)
         if not _cls.empty:
             _dir   = float(_cls['dir_acc'].iloc[0])   if 'dir_acc'    in _cls.columns else None
             _wfdir = float(_cls['wf_dir_acc'].iloc[0]) if 'wf_dir_acc' in _cls.columns and _cls['wf_dir_acc'].notna().any() else None
@@ -733,6 +735,13 @@ with tab4:
             if _wfdir is not None:
                 _wf_help = "과적합 없이 실전 데이터에서 측정한 방향 적중률"
                 c3.metric('검증 적중률 (실전)', f"{_wfdir*100:.0f}%", help=_wf_help)
+        if not _stk.empty and 'r2' in _stk.columns:
+            _stk_r2 = float(_stk['r2'].iloc[0])
+            c4.metric(
+                '앙상블 설명력 (R²)',
+                f"{_stk_r2:.3f}",
+                help="앙상블 모델이 실제 유가 변동을 설명하는 비율 (1.0에 가까울수록 좋음)"
+            )
     else:
         pf = data['model_performance']
 
@@ -848,8 +857,9 @@ with tab4:
         **모델 설명**
         | 모델 | 역할 | 특징 |
         |------|------|------|
+        | **Stacking (Ridge)** | ✅ 앙상블 가격 예측 (채택) | SARIMAX + XGB + VAR → Ridge 메타러너 |
         | **XGBoost-HAR** | 변동성(리스크) 예측 | HAR 구성요소 + 뉴스/지정학 외생변수 |
-        | **SARIMAX** | 7일 가격 예측 | AR(2,1,2) × 주간 계절성 + 외생변수 |
+        | **SARIMAX** | 가격 예측 컴포넌트 | AR(2,1,2) × 주간 계절성 + 외생변수 |
         | **XGBoost-Classifier** | 최종 방향 판단 | SVM+CEEMDAN 앙상블 → 상승/하락 확률 |
         """)
 
@@ -923,7 +933,7 @@ with tab5:
 
         # 가격 오차 추이 차트
         if not bt.empty and bt['price_error'].notna().any():
-            st.markdown("**SARIMAX 가격 예측 오차 추이 (백테스트 60일)**")
+            st.markdown("**가격 예측 오차 추이 (백테스트 60일, SARIMAX 컴포넌트)**")
             bt_plot = bt.dropna(subset=['price_error']).copy()
             bt_plot['date'] = pd.to_datetime(bt_plot['date'])
             fig_err = make_subplots(rows=2, cols=1, shared_xaxes=True,
