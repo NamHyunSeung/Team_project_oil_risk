@@ -215,7 +215,7 @@ _LOG_LIMIT = 1000
 @st.cache_data(ttl=600)
 def load_all():
     out = {}
-    for name in ['model_performance', 'forecast_7days', 'latest_risk_signal', 'crisis_keywords', 'feature_importance', 'risk_history']:
+    for name in ['model_performance', 'forecast_7days', 'latest_risk_signal', 'crisis_keywords', 'feature_importance', 'risk_history', 'live_gap_monthly', 'live_gap_spikes']:
         p = OUTPUT_DIR / f'{name}.csv'
         if p.exists():
             out[name] = pd.read_csv(p)
@@ -236,10 +236,11 @@ with st.sidebar:
         _pipe_path = Path(__file__).parent / 'oil_risk_mvp.py'
         try:
             import time as _time
+            _log_f = open(_log_path, 'w', encoding='utf-8', buffering=1)
             _proc = subprocess.Popen(
                 [sys.executable, str(_pipe_path)],
                 cwd=str(Path(__file__).parent),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=_log_f, stderr=subprocess.STDOUT,
             )
             while _proc.poll() is None:
                 if _log_path.exists():
@@ -247,6 +248,7 @@ with st.sidebar:
                         _tail = ''.join(_lf.readlines()[-8:])
                     _log_box.code(_tail, language=None)
                 _time.sleep(2)
+            _log_f.close()
             if _proc.returncode == 0:
                 st.cache_data.clear()
                 _log_box.empty()
@@ -362,6 +364,23 @@ with tab1:
         elif _m_age > 30:
             st.warning(f"⚠️ 모델 미갱신 **{_m_age}일** 경과 — 파이프라인 재실행을 권장합니다.")
 
+        # ── 리스크 드라이버 자동 요약
+        _drivers = []
+        _gpr_z1 = float(_sig1.get('gpr_zscore', 0) or 0)
+        _ovx1   = float(_sig1.get('ovx_level', 0) or 0)
+        _geo1   = str(_sig1.get('geopolitical_alert', '')).lower() in ('true', '1', 'yes')
+        _sent1  = float(_sig1.get('news_sentiment', 0) or 0)
+        _mom1   = float(_sig1.get('momentum_5d', 0) or 0)
+        if _geo1:                    _drivers.append("지정학 위기")
+        if _gpr_z1 > 1.5:           _drivers.append(f"GPR 급등(z={_gpr_z1:.1f})")
+        if _ovx1 >= 60:              _drivers.append(f"OVX 급등({_ovx1:.0f})")
+        elif _ovx1 >= 45:            _drivers.append(f"OVX 상승({_ovx1:.0f})")
+        if _sent1 < -0.3:            _drivers.append("부정 뉴스 감성")
+        if _mom1 < -0.05:            _drivers.append("하락 모멘텀")
+        elif _mom1 > 0.05:           _drivers.append("상승 모멘텀")
+        if _drivers:
+            st.caption(f"**주요 리스크 드라이버:** {' · '.join(_drivers)}")
+
     col_chart, col_table = st.columns([2.2, 1])
 
     with col_chart:
@@ -409,7 +428,7 @@ with tab1:
                     x=_ci_x, y=_ci_y,
                     fill='toself', fillcolor='rgba(240,192,64,0.10)',
                     line=dict(color='rgba(0,0,0,0)'),
-                    name='80% 예측구간', hoverinfo='skip',
+                    name='75% 예측구간', hoverinfo='skip',
                 ))
             fig_fc.add_trace(go.Scatter(
                 x=_fc_df['date'], y=_fc_df['forecast_price'],
@@ -458,9 +477,9 @@ with tab1:
                     return          '🔴 낮음'
                 fc['합의도'] = fc['model_std'].apply(_consensus)
 
-            # 80% 예측구간 컬럼 생성
+            # 75% 예측구간 컬럼 생성
             if 'lower_80ci' in fc.columns and 'upper_80ci' in fc.columns:
-                fc['80% 구간'] = fc.apply(
+                fc['75% 구간'] = fc.apply(
                     lambda r: f"${r['lower_80ci']:.1f} ~ ${r['upper_80ci']:.1f}", axis=1
                 )
 
@@ -480,14 +499,14 @@ with tab1:
             if _is_admin:
                 display_cols = {
                     '날짜': '날짜', '방향': '방향', 'forecast_price': '앙상블($)',
-                    'vs현재(%)': 'vs현재(%)', '80% 구간': '80% 구간',
+                    'vs현재(%)': 'vs현재(%)', '75% 구간': '75% 구간',
                     'sarimax_forecast': 'SARIMAX($)', 'xgb_forecast': 'XGB($)',
                     '합의도': '합의도', 'bias_correction': 'Bias($)',
                 }
             else:
                 display_cols = {
                     '날짜': '날짜', '방향': '방향', 'forecast_price': '앙상블($)',
-                    'vs현재(%)': 'vs현재(%)', '80% 구간': '80% 구간', '합의도': '합의도',
+                    'vs현재(%)': 'vs현재(%)', '75% 구간': '75% 구간', '합의도': '합의도',
                 }
             show_fc = fc[[c for c in display_cols if c in fc.columns]].rename(columns=display_cols)
             st.dataframe(show_fc, hide_index=True, use_container_width=True)
@@ -772,6 +791,24 @@ with tab4:
         _stk_adopted = not _stk.empty and '미채택' not in str(_stk['model'].iloc[0])
         _live_model = "Stacking 앙상블" if _stk_adopted else "SARIMAX (잔차교정)"
         st.caption(f"현재 라이브 예측 모델: **{_live_model}**")
+
+        # ── 라이브 vs 백테스트 MAE 비교
+        if 'prediction_log' in data and not data['prediction_log'].empty:
+            _pl4 = data['prediction_log']
+            _bt4 = _pl4[_pl4['type'] == 'backtest']
+            _lv4 = _pl4[_pl4['type'].isin(['live', 'gap']) & _pl4['price_error'].notna()]
+            _bt_mae4 = _bt4['price_error'].abs().mean() if not _bt4.empty and _bt4['price_error'].notna().any() else None
+            _lv_mae4 = _lv4['price_error'].abs().mean() if not _lv4.empty else None
+            if _bt_mae4 is not None or _lv_mae4 is not None:
+                st.markdown("---")
+                _cv1, _cv2 = st.columns(2)
+                if _bt_mae4 is not None:
+                    _cv1.metric("백테스트 MAE", f"${_bt_mae4:.2f}", help="백테스트 구간 평균 절대오차")
+                if _lv_mae4 is not None:
+                    _delta = _lv_mae4 - _bt_mae4 if _bt_mae4 else None
+                    _delta_str = f"+${_delta:.2f}" if _delta else None
+                    _cv2.metric("라이브 MAE", f"${_lv_mae4:.2f}", delta=_delta_str,
+                                delta_color="inverse", help=f"실전 예측 오차 (N={len(_lv4)})")
     else:
         pf = data['model_performance']
 
@@ -800,7 +837,8 @@ with tab4:
 
         with col_t:
             st.caption("**가격 예측 모델** (RMSE·MAE: ↓좋음 | R²: ↑좋음)")
-            st.dataframe(_pf_price, hide_index=True, use_container_width=True)
+            _price_cols = [c for c in ['역할','model','rmse','mae','r2','mase','max_error','dir_acc','wf_dir_acc'] if c in _pf_price.columns]
+            st.dataframe(_pf_price[_price_cols], hide_index=True, use_container_width=True)
             _mon = _pf_price[_pf_price['mae'] >= 20]
             if not _mon.empty:
                 st.caption(f"※ {', '.join(_mon['model'].tolist())} — 모니터링 전용 (차트 제외)")
@@ -936,6 +974,36 @@ with tab5:
                                      'price_error_pct':'오차(%)'}.get(c, c)
                                     for c in _lv_show.columns]
                 st.dataframe(_lv_show, hide_index=True, use_container_width=True)
+            # ── 라이브 예측 오차 추이 차트
+            if not live_confirmed.empty and live_confirmed['price_error'].notna().any():
+                st.markdown("---")
+                st.markdown("**라이브 예측 오차 추이**")
+                _lv_chart = live_confirmed[['date','price_error']].copy()
+                _lv_chart['date'] = pd.to_datetime(_lv_chart['date'])
+                _lv_chart = _lv_chart.sort_values('date')
+                _bt_mae_ref = bt['price_error'].abs().mean() if not bt.empty and bt['price_error'].notna().any() else None
+                fig_err = go.Figure()
+                fig_err.add_trace(go.Bar(
+                    x=_lv_chart['date'], y=_lv_chart['price_error'].abs(),
+                    marker_color=['#f85149' if v > (_bt_mae_ref or 0) * 1.5 else '#3fb950'
+                                  for v in _lv_chart['price_error'].abs()],
+                    name='라이브 MAE',
+                ))
+                if _bt_mae_ref is not None:
+                    fig_err.add_hline(y=_bt_mae_ref, line_dash='dash', line_color='#ffa657',
+                                      annotation_text=f"백테스트 MAE ${_bt_mae_ref:.2f}",
+                                      annotation_font_color='#ffa657')
+                fig_err.update_layout(
+                    paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+                    font=dict(color='#c9d1d9', size=10),
+                    height=220, margin=dict(l=30, r=20, t=20, b=40),
+                    showlegend=False, yaxis_title='오차($)',
+                )
+                fig_err.update_xaxes(gridcolor='#21262d')
+                fig_err.update_yaxes(gridcolor='#21262d')
+                st.plotly_chart(fig_err, use_container_width=True)
+                st.caption("녹색: 백테스트 기준 이내 / 빨간색: 1.5× 초과")
+
             st.info("ℹ️ 상세 분석 (드리프트 감지, 오차 추이, 방향성 정확도)은 관리자 전용입니다.")
             st.stop()
 
@@ -1155,6 +1223,84 @@ with tab5:
             st.plotly_chart(fig_t, use_container_width=True)
         else:
             st.info("트렌드 차트는 백테스트 10일 이상 데이터 필요")
+
+        # ── 백테스트 vs 라이브 Gap 분석 ─────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("**🔍 백테스트 vs 라이브 Gap 분석**")
+
+        _gm = data.get('live_gap_monthly')
+        _gs = data.get('live_gap_spikes')
+
+        if _gm is not None and not _gm.empty:
+            # 요약 지표
+            _bt_rows = _gm[_gm['type'] == 'backtest']
+            _lv_rows = _gm[_gm['type'] == 'live']
+            _bt_mae_g = _bt_rows['mae'].mean() if not _bt_rows.empty else None
+            _lv_mae_g = _lv_rows['mae'].mean() if not _lv_rows.empty else None
+            _ratio_g  = (_lv_mae_g / _bt_mae_g) if (_bt_mae_g and _lv_mae_g and _bt_mae_g > 0) else None
+            _n_spk    = len(_gs) if _gs is not None else 0
+
+            _gc1, _gc2, _gc3, _gc4 = st.columns(4)
+            _gc1.metric("백테스트 MAE", f"${_bt_mae_g:.2f}" if _bt_mae_g else "—")
+            _gc2.metric("라이브 MAE", f"${_lv_mae_g:.2f}" if _lv_mae_g else "—")
+            _gc3.metric("Gap 배율", f"{_ratio_g:.2f}×" if _ratio_g else "—",
+                        delta=f"{_ratio_g-1:+.2f}×" if _ratio_g else None,
+                        delta_color="inverse")
+            _gc4.metric("오차 스파이크 건수", str(_n_spk))
+
+            # 월별 MAE 비교 바 차트
+            _gm2 = _gm.copy()
+            _gm2['month'] = _gm2['month'].astype(str)
+            _months = sorted(_gm2['month'].unique())
+            _bt_vals = [_gm2[(_gm2['month']==m) & (_gm2['type']=='backtest')]['mae'].values[0]
+                        if len(_gm2[(_gm2['month']==m) & (_gm2['type']=='backtest')]) > 0 else None
+                        for m in _months]
+            _lv_vals = [_gm2[(_gm2['month']==m) & (_gm2['type']=='live')]['mae'].values[0]
+                        if len(_gm2[(_gm2['month']==m) & (_gm2['type']=='live')]) > 0 else None
+                        for m in _months]
+            _bias_vals = [_gm2[(_gm2['month']==m) & (_gm2['type']=='live')]['bias'].values[0]
+                          if len(_gm2[(_gm2['month']==m) & (_gm2['type']=='live')]) > 0 else None
+                          for m in _months]
+
+            fig_gap = make_subplots(rows=1, cols=2,
+                                    subplot_titles=['월별 MAE (백테스트 vs 라이브)', '라이브 편향 (Bias)'])
+            fig_gap.add_trace(go.Bar(x=_months, y=_bt_vals, name='백테스트',
+                                     marker_color='#3fb950', opacity=0.8,
+                                     hovertemplate='%{x}<br>BT MAE: $%{y:.2f}<extra></extra>'),
+                              row=1, col=1)
+            fig_gap.add_trace(go.Bar(x=_months, y=_lv_vals, name='라이브',
+                                     marker_color='#f85149', opacity=0.8,
+                                     hovertemplate='%{x}<br>Live MAE: $%{y:.2f}<extra></extra>'),
+                              row=1, col=1)
+            _bias_colors = ['#f85149' if (v is not None and v < 0) else '#3fb950' for v in _bias_vals]
+            fig_gap.add_trace(go.Bar(x=_months, y=_bias_vals, name='라이브 편향',
+                                     marker_color=_bias_colors, opacity=0.85,
+                                     hovertemplate='%{x}<br>Bias: $%{y:.3f}<extra></extra>'),
+                              row=1, col=2)
+            fig_gap.add_hline(y=0, line=dict(color='rgba(255,255,255,0.4)', width=0.8), row=1, col=2)
+            fig_gap.update_layout(
+                paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+                font=dict(color='#c9d1d9'),
+                height=300, margin=dict(l=50, r=20, t=50, b=40),
+                barmode='group',
+                legend=dict(bgcolor='rgba(22,27,34,0.85)', bordercolor='#30363d', font=dict(size=9)),
+            )
+            fig_gap.update_xaxes(gridcolor='#21262d', tickfont=dict(size=9))
+            fig_gap.update_yaxes(gridcolor='#21262d', tickfont=dict(size=9))
+            fig_gap.update_annotations(font=dict(color='#e6edf3', size=10))
+            st.plotly_chart(fig_gap, use_container_width=True)
+        else:
+            st.info("Gap 분석 데이터 없음 (파이프라인 실행 후 생성)")
+
+        # 오차 스파이크 테이블
+        if _gs is not None and not _gs.empty:
+            st.markdown("**⚡ 오차 스파이크 (백테스트 MAE 2× 초과)**")
+            _gs_show = _gs.copy()
+            _gs_show.columns = [{'date':'날짜','actual_price':'실제가($)','sarimax_pred':'예측가($)',
+                                  'price_error':'오차($)','abs_error':'절대오차($)',
+                                  'xgb_pred_vol':'XGB 예측변동성','actual_vol_5d':'실제변동성(5d)'
+                                  }.get(c, c) for c in _gs_show.columns]
+            st.dataframe(_gs_show, hide_index=True, use_container_width=True)
 
         # 다운로드
         csv_bytes = pl.to_csv(index=False).encode('utf-8')
