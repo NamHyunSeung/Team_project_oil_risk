@@ -3035,7 +3035,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
     # ─────────────────────────────────────────────────────────────────────
     try:
         from statsmodels.tsa.vector_ar.var_model import VAR as _VAR
-        _var_cols = [c for c in ['WTI', 'Brent', 'DXY', 'VIX'] if c in feature_df.columns]
+        _var_cols = [c for c in ['WTI', 'Brent', 'DXY', 'VIX', 'OVX'] if c in feature_df.columns]
         if len(_var_cols) >= 2 and _SARIMAX:
             log.info("    [B2] VAR 다변량 모델 학습 중...")
             cutoff_v = feature_df.index[-1] - pd.DateOffset(years=SARIMAX_YEARS)
@@ -3069,7 +3069,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 'rmse': _rmse_var, 'mae': _mae_var, 'r2': _r2_var,
                 'model': _var_fit, 'cols': _var_cols, 'lag': _lag_ord,
                 'n_test': _n_te_v, 'type': 'price',
-                'name': f'VAR({_lag_ord}) WTI+Brent+DXY+VIX',
+                'name': f'VAR({_lag_ord}) WTI+Brent+DXY+VIX+OVX',
             }
             log.info(f"    VAR MAE=${_mae_var:.4f}  vs  SARIMAX MAE=${_sx_mae:.4f}")
     except Exception as _ve:
