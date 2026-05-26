@@ -3883,7 +3883,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     'name': f'HAR-XGB-Enhanced (방향성={_har_final_dir*100:.1f}%)',
                 }
                 if _wf_har_acc >= 0.51:
-                    _har_cls_cand = (_mae_har, _wf_har_acc, _har_mdl, _sc_har_cls,
+                    _har_cls_cand = (_mae_har, _har_final_dir, _har_mdl, _sc_har_cls,
                                      _pr_har_adj, _px_har_adj, _r2_har,
                                      _har_cls_feats, 'HAR-Enhanced')
                     log.info(f"    HAR-Enhanced 후보 추가 (wf_dir={_wf_har_acc*100:.1f}%)")
@@ -4160,7 +4160,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _mae_stack  = float(mean_absolute_error(_stack_y[_s], _stack_pred[_s]))
                 _r2_stack   = float(r2_score(_stack_y[_s], _stack_pred[_s]))
                 _rmse_stack = float(np.sqrt(mean_squared_error(_stack_y[_s], _stack_pred[_s])))
-                _ci_q80_stk = float(np.percentile(np.abs(_stack_y - _stack_pred), 80))
+                _ci_q75_stk = float(np.percentile(np.abs(_stack_y - _stack_pred), 75))
                 _coef_str   = ' '.join(f'{n}={w:.3f}' for n, w in zip(_stack_names, _stack_weights))
                 log.info(f"    [E] Stacking({_meta_type}) → R²={_r2_stack:.4f}  MAE={_mae_stack:.4f}  "
                          f"weights=[{_coef_str}]")
@@ -4193,7 +4193,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     _stk_info = {
                         'stack_weights': _stack_weights, 'type': 'price',
                         'rmse': _rmse_stack, 'mae': _mae_stack, 'r2': _r2_stack,
-                        'ci_calib_q80': _ci_q80_stk,
+                        'ci_calib_q75': _ci_q75_stk,
                         'name': f'Stacking ({_base_name},InvMAE-WA)',
                         'sx_feats':    sx_info.get('features', []),
                         'xr_feats':    xr_info['features'],
@@ -4911,7 +4911,7 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     _qsc  = _xr.get('scaler')
     _qfts = _xr.get('features', [])
 
-    lower_80ci = upper_80ci = None
+    lower_75ci = upper_75ci = None
     if _q10m is not None and _q90m is not None and _qsc is not None:
         try:
             _feat_src4 = full_df if full_df is not None else feature_df
@@ -4922,15 +4922,15 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             # D+1 절대 스프레드 계산 후 sqrt(t)로 다단계 확장
             _spread_lo = last_price * np.exp(_ret_q10) - last_price   # 음수
             _spread_hi = last_price * np.exp(_ret_q90) - last_price   # 양수
-            lower_80ci = ensemble + _spread_lo * np.power(t, 0.4)
-            upper_80ci = ensemble + _spread_hi * np.power(t, 0.4)
-            lower_80ci = np.clip(lower_80ci, last_price * 0.80, last_price * 1.20)
-            upper_80ci = np.clip(upper_80ci, last_price * 0.80, last_price * 1.20)
-            log.info(f"    신뢰구간 Q10/Q90 적용: D+1 [{lower_80ci[0]:.2f}, {upper_80ci[0]:.2f}]")
+            lower_75ci = ensemble + _spread_lo * np.power(t, 0.4)
+            upper_75ci = ensemble + _spread_hi * np.power(t, 0.4)
+            lower_75ci = np.clip(lower_75ci, last_price * 0.80, last_price * 1.20)
+            upper_75ci = np.clip(upper_75ci, last_price * 0.80, last_price * 1.20)
+            log.info(f"    신뢰구간 Q10/Q90 적용: D+1 [{lower_75ci[0]:.2f}, {upper_75ci[0]:.2f}]")
         except Exception as _qce:
             log.warning(f"    분위 신뢰구간 계산 실패({_qce}) → 변동성 폴백")
 
-    if lower_80ci is None:
+    if lower_75ci is None:
         # GARCH 조건부 변동성 우선 (더 정확한 변동성 클러스터링 반영)
         # GARCH(1,1) 다단계 조건부 분산 예측 (최우선) — h_{t+k} 각 스텝별 독립 분산
         _garch_res_fc = (aux or {}).get('garch_model') or results.get('garch_vol', {}).get('model')
@@ -4940,8 +4940,8 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                 _fc7 = _garch_res_fc.forecast(horizon=7, reindex=False)
                 _h7  = np.sqrt(_fc7.variance.values[-1, :]) / 100   # % → 소수 변환
                 ci_half = last_price * _h7 * 1.15
-                lower_80ci = ensemble - ci_half
-                upper_80ci = ensemble + ci_half
+                lower_75ci = ensemble - ci_half
+                upper_75ci = ensemble + ci_half
                 _used_garch_fc = True
                 log.info(f"    GARCH(1,1) 다단계 CI: D+1 ±{ci_half[0]:.2f}$ → D+7 ±{ci_half[6]:.2f}$")
             except Exception as _gfe:
@@ -4954,27 +4954,27 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             else:
                 recent_vol = float(_src_vol['vol_5d'].dropna().iloc[-1]) if 'vol_5d' in _src_vol.columns else 0.015
                 ci_half    = ensemble * recent_vol * 1.15 * np.power(t, 0.4)
-            lower_80ci = ensemble - ci_half
-            upper_80ci = ensemble + ci_half
+            lower_75ci = ensemble - ci_half
+            upper_75ci = ensemble + ci_half
 
-    # CI 경험적 보정: 백테스트 stacking 오차 Q80 기준 (실제 80% 커버리지 근사)
-    _ci_q80 = (results.get('stacking') or {}).get('ci_calib_q80')
-    if _ci_q80 is not None and lower_80ci is not None:
-        _d1_half = (float(upper_80ci[0]) - float(lower_80ci[0])) / 2
+    # CI 경험적 보정: 백테스트 stacking 오차 Q75 기준 (실제 75% 커버리지 근사)
+    _ci_q75 = (results.get('stacking') or {}).get('ci_calib_q75')
+    if _ci_q75 is not None and lower_75ci is not None:
+        _d1_half = (float(upper_75ci[0]) - float(lower_75ci[0])) / 2
         if _d1_half > 0.1:
-            _calib = float(np.clip(_ci_q80 / _d1_half, 0.5, 2.5))
+            _calib = float(np.clip(_ci_q75 / _d1_half, 0.5, 2.5))
             if abs(_calib - 1.0) > 0.05:
-                _mid     = (lower_80ci + upper_80ci) / 2
-                _half_ci = (upper_80ci - lower_80ci) / 2
-                lower_80ci = _mid - _half_ci * _calib
-                upper_80ci = _mid + _half_ci * _calib
-                log.info(f"    CI 경험적 보정 ×{_calib:.2f} (Q80={_ci_q80:.2f}$)")
+                _mid     = (lower_75ci + upper_75ci) / 2
+                _half_ci = (upper_75ci - lower_75ci) / 2
+                lower_75ci = _mid - _half_ci * _calib
+                upper_75ci = _mid + _half_ci * _calib
+                log.info(f"    CI 경험적 보정 ×{_calib:.2f} (Q75={_ci_q75:.2f}$)")
 
     fc_df = pd.DataFrame({
         'date':            fc_dates.strftime('%Y-%m-%d'),
         'forecast_price':  np.round(ensemble,    2),
-        'lower_80ci':      np.round(lower_80ci,  2),
-        'upper_80ci':      np.round(upper_80ci,  2),
+        'lower_75ci':      np.round(lower_75ci,  2),
+        'upper_75ci':      np.round(upper_75ci,  2),
         'bias_correction': _bias_per_day,
     })
     if 'sarimax' in forecasts:
@@ -4993,8 +4993,8 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         if _d1_std > 2.0:
             _ci_expand = 1.2
             _fp = fc_df['forecast_price']
-            fc_df['lower_80ci'] = (_fp - (_fp - fc_df['lower_80ci']) * _ci_expand).round(2)
-            fc_df['upper_80ci'] = (_fp + (fc_df['upper_80ci'] - _fp) * _ci_expand).round(2)
+            fc_df['lower_75ci'] = (_fp - (_fp - fc_df['lower_75ci']) * _ci_expand).round(2)
+            fc_df['upper_75ci'] = (_fp + (fc_df['upper_75ci'] - _fp) * _ci_expand).round(2)
             log.warning(f"    ⚠ 모델 불일치 과다(D+1 std={_d1_std:.2f}$) → CI ×{_ci_expand}")
 
     # VaR: 정규분포 5%/95% 분위수 (헤지 기준선 — 단방향 꼬리 리스크)
@@ -5206,9 +5206,9 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
         try:
             _ci_match = fc_df[fc_df['date'] == entry_date_str]
             _ci_row   = _ci_match if not _ci_match.empty else fc_df.iloc[:1]
-            if 'lower_80ci' in fc_df.columns:
-                _entry_lower_ci = round(float(_ci_row['lower_80ci'].iloc[0]), 2)
-                _entry_upper_ci = round(float(_ci_row['upper_80ci'].iloc[0]), 2)
+            if 'lower_75ci' in fc_df.columns:
+                _entry_lower_ci = round(float(_ci_row['lower_75ci'].iloc[0]), 2)
+                _entry_upper_ci = round(float(_ci_row['upper_75ci'].iloc[0]), 2)
         except Exception:
             pass
 
@@ -5234,8 +5234,8 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
             'actual_price':    entry_actual,
             'price_error':     entry_error,
             'price_error_pct': entry_error_pct,
-            'lower_80ci':      _entry_lower_ci,
-            'upper_80ci':      _entry_upper_ci,
+            'lower_75ci':      _entry_lower_ci,
+            'upper_75ci':      _entry_upper_ci,
             'xgb_pred_vol':    xgb_pred_v,
             'actual_vol_5d':   None,
             'vol_error':       None,
@@ -6153,7 +6153,7 @@ def plot_oil_forecast(feature_df: pd.DataFrame, fc_df: pd.DataFrame, signal: dic
     if 'var_forecast' in fc_df.columns:
         ax1.plot(fd, fc_df['var_forecast'], color='#3fb950', lw=1, ls=':', alpha=0.8, label='VAR')
 
-    ax1.fill_between(fd, fc_df['lower_80ci'], fc_df['upper_80ci'],
+    ax1.fill_between(fd, fc_df['lower_75ci'], fc_df['upper_75ci'],
                      alpha=0.18, color=CYAN, label='75% 예측구간')
 
     rlevel = signal['risk_level']
@@ -6308,10 +6308,10 @@ def plot_oil_forecast(feature_df: pd.DataFrame, fc_df: pd.DataFrame, signal: dic
                      feature_df['ma_21d'].iloc[-45:],
                      color='#8b949e', lw=1.0, ls='--', alpha=0.7, label='MA-21')
         # CI 밴드 (먼저 그려야 선 위로 안 덮임)
-        axB.fill_between(fd, fc_df['lower_80ci'], fc_df['upper_80ci'],
+        axB.fill_between(fd, fc_df['lower_75ci'], fc_df['upper_75ci'],
                          alpha=0.30, color=CYAN, label='75% 예측구간', zorder=2)
-        axB.plot(fd, fc_df['lower_80ci'], color=CYAN, lw=0.8, ls=':', alpha=0.6)
-        axB.plot(fd, fc_df['upper_80ci'], color=CYAN, lw=0.8, ls=':', alpha=0.6)
+        axB.plot(fd, fc_df['lower_75ci'], color=CYAN, lw=0.8, ls=':', alpha=0.6)
+        axB.plot(fd, fc_df['upper_75ci'], color=CYAN, lw=0.8, ls=':', alpha=0.6)
         axB.plot(fd, fc_df['forecast_price'], color=CYAN, lw=2.2, ls='--',
                  label='Forecast', zorder=4)
         axB.axvspan(fd.iloc[0], fd.iloc[-1], alpha=0.06, color=rcol)
@@ -6322,7 +6322,7 @@ def plot_oil_forecast(feature_df: pd.DataFrame, fc_df: pd.DataFrame, signal: dic
                      color=CYAN, fontsize=8.5, fontweight='bold',
                      arrowprops=dict(arrowstyle='->', color=CYAN, lw=1))
         # CI 범위 레이블
-        _lo1, _hi1 = fc_df['lower_80ci'].iloc[0], fc_df['upper_80ci'].iloc[0]
+        _lo1, _hi1 = fc_df['lower_75ci'].iloc[0], fc_df['upper_75ci'].iloc[0]
         axB.annotate(f"[${_lo1:.1f} ~ ${_hi1:.1f}]",
                      xy=(fd.iloc[0], (_lo1 + _hi1) / 2),
                      xytext=(12, -18), textcoords='offset points',
@@ -6458,12 +6458,12 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
 
     # Shock CI 확대: classify_risk에서 반환된 ci_multiplier 적용
     _ci_mult = risk_signal.get('ci_multiplier', 1.0)
-    if abs(_ci_mult - 1.0) > 0.01 and 'lower_80ci' in fc_df.columns and 'upper_80ci' in fc_df.columns:
+    if abs(_ci_mult - 1.0) > 0.01 and 'lower_75ci' in fc_df.columns and 'upper_75ci' in fc_df.columns:
         _fp = fc_df['forecast_price']
         # D+1: x(1+(mult-1)*0.5) ~ D+7: x mult — 단기 CI 과도 확대 방지
         _mult_arr = 1.0 + (_ci_mult - 1.0) * np.linspace(0.5, 1.0, len(fc_df))
-        fc_df['lower_80ci'] = (_fp - (_fp - fc_df['lower_80ci']) * _mult_arr).round(2)
-        fc_df['upper_80ci'] = (_fp + (fc_df['upper_80ci'] - _fp) * _mult_arr).round(2)
+        fc_df['lower_75ci'] = (_fp - (_fp - fc_df['lower_75ci']) * _mult_arr).round(2)
+        fc_df['upper_75ci'] = (_fp + (fc_df['upper_75ci'] - _fp) * _mult_arr).round(2)
         _atomic_csv(fc_df, OUTPUT_DIR / 'forecast_7days.csv', index=False)
         log.info(f"    Shock CI 적용: ×{_ci_mult:.1f} → forecast_7days.csv 갱신")
 
@@ -6576,17 +6576,17 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                         log.info(f"    forecast_reliability (백테스트 폴백, n_live={len(_live_known)}): "
                                  f"{_forecast_reliability} (mase={_bt_mase_fb:.3f})")
             # ── C: 75% CI 실제 커버리지 검증
-            if 'lower_80ci' in _pl_check.columns and 'upper_80ci' in _pl_check.columns:
+            if 'lower_75ci' in _pl_check.columns and 'upper_75ci' in _pl_check.columns:
                 _ci_rows = _pl_check[
                     _pl_check['type'].isin(['live', 'gap']) &
                     _pl_check['actual_price'].notna() &
-                    _pl_check['lower_80ci'].notna() &
-                    _pl_check['upper_80ci'].notna()
+                    _pl_check['lower_75ci'].notna() &
+                    _pl_check['upper_75ci'].notna()
                 ]
                 if len(_ci_rows) >= 20:
                     _covered = (
-                        (_ci_rows['actual_price'] >= _ci_rows['lower_80ci']) &
-                        (_ci_rows['actual_price'] <= _ci_rows['upper_80ci'])
+                        (_ci_rows['actual_price'] >= _ci_rows['lower_75ci']) &
+                        (_ci_rows['actual_price'] <= _ci_rows['upper_75ci'])
                     ).mean()
                     log.info(f"    75% CI 커버리지: {_covered:.1%} (N={len(_ci_rows)})")
                     if _covered < 0.65:

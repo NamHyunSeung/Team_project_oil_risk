@@ -126,7 +126,7 @@ with st.sidebar:
     st.markdown(f"**{_name}** 님")
     _authenticator.logout("로그아웃", location="sidebar")
 
-# ── 자동 새로고침 (10분)
+# ── 자동 새로고침 (60분)
 try:
     from streamlit_autorefresh import st_autorefresh
     st_autorefresh(interval=60 * 60 * 1000, key="auto_refresh_v2")
@@ -351,9 +351,9 @@ def _render_price_charts(data):
             _DAY_KO = {0:'월',1:'화',2:'수',3:'목',4:'금',5:'토',6:'일'}
 
             fig_fc = go.Figure()
-            if 'lower_80ci' in fc.columns and 'upper_80ci' in fc.columns:
+            if 'lower_75ci' in fc.columns and 'upper_75ci' in fc.columns:
                 _ci_x = pd.concat([fc['date'], fc['date'][::-1]])
-                _ci_y = pd.concat([fc['upper_80ci'], fc['lower_80ci'][::-1]])
+                _ci_y = pd.concat([fc['upper_75ci'], fc['lower_75ci'][::-1]])
                 fig_fc.add_trace(go.Scatter(
                     x=_ci_x, y=_ci_y, fill='toself',
                     fillcolor='rgba(240,192,64,0.12)',
@@ -400,9 +400,9 @@ def _render_price_charts(data):
                     lambda s: '🟢 높음' if s < 2 else ('🟡 보통' if s < 5 else '🔴 낮음')
                 )
                 _show_cols.append('합의도')
-            if 'lower_80ci' in fc.columns:
+            if 'lower_75ci' in fc.columns:
                 fc['75% 구간'] = fc.apply(
-                    lambda r: f"${r['lower_80ci']:.0f}~${r['upper_80ci']:.0f}", axis=1
+                    lambda r: f"${r['lower_75ci']:.0f}~${r['upper_75ci']:.0f}", axis=1
                 )
                 _show_cols.append('75% 구간')
             if _is_admin:
@@ -419,10 +419,10 @@ def _render_price_charts(data):
                 }
             )
             st.dataframe(show_fc, hide_index=True, use_container_width=True)
-            if 'lower_80ci' in fc.columns and len(fc) > 0:
-                _ci_d1 = float(fc['upper_80ci'].iloc[0]) - float(fc['lower_80ci'].iloc[0])
-                _ci_d7 = float(fc['upper_80ci'].iloc[-1]) - float(fc['lower_80ci'].iloc[-1])
-                st.caption(f"80% 신뢰구간: D+1 ±${_ci_d1/2:.1f}  →  D+7 ±${_ci_d7/2:.1f}")
+            if 'lower_75ci' in fc.columns and len(fc) > 0:
+                _ci_d1 = float(fc['upper_75ci'].iloc[0]) - float(fc['lower_75ci'].iloc[0])
+                _ci_d7 = float(fc['upper_75ci'].iloc[-1]) - float(fc['lower_75ci'].iloc[-1])
+                st.caption(f"75% 신뢰구간: D+1 ±${_ci_d1/2:.1f}  →  D+7 ±${_ci_d7/2:.1f}")
             if 'model_std' in fc.columns and not fc.empty and float(fc['model_std'].iloc[0]) >= 5:
                 st.warning(f"⚠️ 모델 간 예측 편차 ${fc['model_std'].iloc[0]:.1f} — 불확실성 높음")
             if 'reliable_forecast' in fc.columns and not fc['reliable_forecast'].astype(str).eq('True').all():
@@ -655,16 +655,24 @@ def render_admin_page():
             _price_disp = _price.copy()
             _stk_row_m = _price_disp[_price_disp['model'].str.contains('Stacking', na=False)]
             _stk_adopted_m = not (_stk_row_m.empty or _stk_row_m['model'].str.contains('미채택', na=False).any())
-            # HAR-Enhanced 채택 여부: XGBoost-Return과 MAE 동일 여부로 판단
+            # HAR-Enhanced 채택 여부: dir_acc 일치로 판단 (MAE는 우연 일치 가능 — 취약)
             _har_enh_adopted = False
-            if 'mae' in _price.columns:
-                try:
-                    _xr_mae = _price[_price['model'].str.contains('XGBoost-Return', na=False)]['mae']
-                    _he_mae = _price[_price['model'].str.contains('HAR-XGB-Enhanced', na=False)]['mae']
-                    if not _xr_mae.empty and not _he_mae.empty:
-                        _har_enh_adopted = abs(float(_xr_mae.values[0]) - float(_he_mae.values[0])) < 0.01
-                except Exception:
-                    pass
+            try:
+                _xr_row = _price[_price['model'].str.contains('XGBoost-Return', na=False)]
+                _he_row = _price[_price['model'].str.contains('HAR-XGB-Enhanced', na=False)]
+                if not _xr_row.empty and not _he_row.empty:
+                    if 'dir_acc' in _price.columns:
+                        _har_enh_adopted = (
+                            abs(float(_xr_row['dir_acc'].values[0]) -
+                                float(_he_row['dir_acc'].values[0])) < 0.001
+                        )
+                    elif 'mae' in _price.columns:
+                        _har_enh_adopted = (
+                            abs(float(_xr_row['mae'].values[0]) -
+                                float(_he_row['mae'].values[0])) < 0.01
+                        )
+            except Exception:
+                pass
             def _assign_role_tab(m):
                 if 'Stacking' in m and '미채택' in m: return '앙상블 (미채택)'
                 if 'Stacking' in m:      return '앙상블 채택 ✅'
@@ -749,7 +757,26 @@ def render_admin_page():
             st.markdown("---")
             _stk_role_desc = "✅ 앙상블 가격 예측 (채택)" if _stk_adopted_m else "앙상블 (미채택)"
             _dir_model_name = "HAR-XGB-Enhanced" if _har_enh_adopted else "XGBoost-Classifier"
-            _dir_model_desc = "HAR+MI 하이브리드 피처, dead-zone, inv-vol, SVM 블렌드" if _har_enh_adopted else "SVM+CEEMDAN 앙상블 → 상승/하락 확률"
+            # 방향성 정확도: test-set과 WF 모두 표시 (test-set 단독 과대평가 방지)
+            _dir_acc_note = ""
+            if _har_enh_adopted:
+                try:
+                    _he_r = _price[_price['model'].str.contains('HAR-XGB-Enhanced', na=False)]
+                    if not _he_r.empty:
+                        _ts_a = float(_he_r['dir_acc'].values[0]) * 100 if 'dir_acc' in _he_r.columns else None
+                        _wf_a = (float(_he_r['wf_dir_acc'].values[0]) * 100
+                                 if 'wf_dir_acc' in _he_r.columns
+                                 and pd.notna(_he_r['wf_dir_acc'].values[0]) else None)
+                        if _ts_a and _wf_a:
+                            _dir_acc_note = f" (**test={_ts_a:.1f}%** / WF={_wf_a:.1f}%)"
+                        elif _ts_a:
+                            _dir_acc_note = f" (test={_ts_a:.1f}%)"
+                except Exception:
+                    pass
+            _dir_model_desc = (
+                f"HAR+MI 하이브리드 피처, dead-zone, inv-vol, SVM 블렌드{_dir_acc_note}"
+                if _har_enh_adopted else "SVM+CEEMDAN 앙상블 → 상승/하락 확률"
+            )
             st.markdown(f"""
 **모델 설명**
 | 모델 | 역할 | 특징 |
