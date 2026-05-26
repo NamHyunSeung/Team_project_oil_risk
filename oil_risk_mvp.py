@@ -5083,17 +5083,22 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
         for idx, row in old_live.iterrows():
             try:
                 dt = pd.to_datetime(row['date'])
-                if pd.isna(row.get('actual_price')) and dt in price_src.index:
+                _needs_actual   = pd.isna(row.get('actual_price')) and dt in price_src.index
+                _needs_stk_err  = (pd.notna(row.get('actual_price'))
+                                   and pd.isna(row.get('stacking_error'))
+                                   and pd.notna(row.get('stacking_pred')))
+                if (_needs_actual or _needs_stk_err) and dt in price_src.index:
                     ap = float(price_src.loc[dt, 'WTI'])
                     pp = float(row['sarimax_pred'])
                     av = float(feature_df.loc[dt, 'RV_5d']) if (dt in feature_df.index and 'RV_5d' in feature_df.columns) else np.nan
                     pv = float(row['xgb_pred_vol']) if pd.notna(row.get('xgb_pred_vol')) else np.nan
 
-                    old_live.at[idx, 'actual_price']    = round(ap, 2)
-                    old_live.at[idx, 'price_error']     = round(ap - pp, 2)
-                    old_live.at[idx, 'price_error_pct'] = round((ap - pp) / ap * 100, 2) if abs(ap) > 0.01 else None
+                    if _needs_actual:
+                        old_live.at[idx, 'actual_price']    = round(ap, 2)
+                        old_live.at[idx, 'price_error']     = round(ap - pp, 2)
+                        old_live.at[idx, 'price_error_pct'] = round((ap - pp) / ap * 100, 2) if abs(ap) > 0.01 else None
                     _sp_live = row.get('stacking_pred')
-                    if pd.notna(_sp_live):
+                    if pd.notna(_sp_live) and pd.isna(row.get('stacking_error')):
                         old_live.at[idx, 'stacking_error'] = round(ap - float(_sp_live), 2)
                     if not np.isnan(av):
                         old_live.at[idx, 'actual_vol_5d'] = round(av, 5)
