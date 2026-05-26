@@ -5092,6 +5092,9 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
                     old_live.at[idx, 'actual_price']    = round(ap, 2)
                     old_live.at[idx, 'price_error']     = round(ap - pp, 2)
                     old_live.at[idx, 'price_error_pct'] = round((ap - pp) / ap * 100, 2) if abs(ap) > 0.01 else None
+                    _sp_live = row.get('stacking_pred')
+                    if pd.notna(_sp_live):
+                        old_live.at[idx, 'stacking_error'] = round(ap - float(_sp_live), 2)
                     if not np.isnan(av):
                         old_live.at[idx, 'actual_vol_5d'] = round(av, 5)
                     if not (np.isnan(av) or np.isnan(pv)):
@@ -5227,12 +5230,14 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
         except Exception:
             pass
 
+        _stk_err_entry = round(float(entry_actual) - float(entry_pred), 2) if entry_actual is not None else None
         new_entry = {
             'date':            entry_date_str,
             'sarimax_pred':    entry_pred,
             'stacking_pred':   entry_pred,
             'actual_price':    entry_actual,
             'price_error':     entry_error,
+            'stacking_error':  _stk_err_entry,
             'price_error_pct': entry_error_pct,
             'lower_75ci':      _entry_lower_ci,
             'upper_75ci':      _entry_upper_ci,
@@ -6438,16 +6443,23 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
         except Exception as _pfe:
             log.warning(f"    이전 forecast 로드 실패({_pfe}) → gap-fill 생략")
 
-    # Live CI recalibration: 최근 실제 오차 Q75로 훈련시점 Q75 override
+    # Live CI recalibration: live type 실제 예측 오차 Q75로 훈련시점 Q75 override
+    # backtest 오차는 제외 — outlier가 많아 CI 과도 확대 초래
     _pl_path_ci = OUTPUT_DIR / 'prediction_log.csv'
     if _pl_path_ci.exists():
         try:
             _pl_ci = pd.read_csv(_pl_path_ci)
-            _se_ci = _pl_ci['stacking_error'].dropna()
+            _live_rows = _pl_ci[
+                (_pl_ci.get('type', pd.Series(dtype=str)) == 'live') &
+                _pl_ci['stacking_error'].notna()
+            ] if 'type' in _pl_ci.columns else pd.DataFrame()
+            _se_ci = _live_rows['stacking_error'] if not _live_rows.empty else pd.Series(dtype=float)
             if len(_se_ci) >= 20:
                 _live_q75 = float(np.percentile(np.abs(_se_ci.iloc[-60:]), 75))
                 aux_models['live_ci_q75'] = _live_q75
-                log.info(f"    Live CI Q75 재보정: {_live_q75:.2f}$ (N={min(len(_se_ci), 60)})")
+                log.info(f"    Live CI Q75 재보정(live): {_live_q75:.2f}$ (N={min(len(_se_ci), 60)})")
+            else:
+                log.info(f"    Live CI 재보정 스킵 (live 오차 N={len(_se_ci)} < 20, backtest Q75 유지)")
         except Exception as _lce:
             log.warning(f"    Live CI recalibration 실패({_lce})")
 
