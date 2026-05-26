@@ -4957,8 +4957,8 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             lower_75ci = ensemble - ci_half
             upper_75ci = ensemble + ci_half
 
-    # CI 경험적 보정: 백테스트 stacking 오차 Q75 기준 (실제 75% 커버리지 근사)
-    _ci_q75 = (results.get('stacking') or {}).get('ci_calib_q75')
+    # CI 경험적 보정: live prediction_log Q75 우선, 없으면 백테스트 Q75 폴백
+    _ci_q75 = (aux or {}).get('live_ci_q75') or (results.get('stacking') or {}).get('ci_calib_q75')
     if _ci_q75 is not None and lower_75ci is not None:
         _d1_half = (float(upper_75ci[0]) - float(lower_75ci[0])) / 2
         if _d1_half > 0.1:
@@ -6437,6 +6437,19 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
             prev_fc_df = pd.read_csv(_fc_csv)
         except Exception as _pfe:
             log.warning(f"    이전 forecast 로드 실패({_pfe}) → gap-fill 생략")
+
+    # Live CI recalibration: 최근 실제 오차 Q75로 훈련시점 Q75 override
+    _pl_path_ci = OUTPUT_DIR / 'prediction_log.csv'
+    if _pl_path_ci.exists():
+        try:
+            _pl_ci = pd.read_csv(_pl_path_ci)
+            _se_ci = _pl_ci['stacking_error'].dropna()
+            if len(_se_ci) >= 20:
+                _live_q75 = float(np.percentile(np.abs(_se_ci.iloc[-60:]), 75))
+                aux_models['live_ci_q75'] = _live_q75
+                log.info(f"    Live CI Q75 재보정: {_live_q75:.2f}$ (N={min(len(_se_ci), 60)})")
+        except Exception as _lce:
+            log.warning(f"    Live CI recalibration 실패({_lce})")
 
     fc_df                = forecast_next_7days(model_results, feature_df, full_df, aux=aux_models)
     _last_wti = float(feature_df['WTI'].iloc[-1]) if 'WTI' in feature_df.columns else 0.0
