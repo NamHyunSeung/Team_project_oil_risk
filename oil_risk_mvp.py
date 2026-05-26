@@ -5098,8 +5098,10 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
                         old_live.at[idx, 'price_error']     = round(ap - pp, 2)
                         old_live.at[idx, 'price_error_pct'] = round((ap - pp) / ap * 100, 2) if abs(ap) > 0.01 else None
                     _sp_live = row.get('stacking_pred')
+                    # stacking_error: 이미 확정된 actual_price 우선 사용 (price_src는 데이터 갱신으로 값 달라질 수 있음)
+                    _ap_for_err = float(row['actual_price']) if pd.notna(row.get('actual_price')) else ap
                     if pd.notna(_sp_live) and pd.isna(row.get('stacking_error')):
-                        old_live.at[idx, 'stacking_error'] = round(ap - float(_sp_live), 2)
+                        old_live.at[idx, 'stacking_error'] = round(_ap_for_err - float(_sp_live), 2)
                     if not np.isnan(av):
                         old_live.at[idx, 'actual_vol_5d'] = round(av, 5)
                     if not (np.isnan(av) or np.isnan(pv)):
