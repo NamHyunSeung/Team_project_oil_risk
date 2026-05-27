@@ -4956,10 +4956,12 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         if not _used_garch_fc:
             _src_vol = full_df if full_df is not None else feature_df
             if 'garch_vol' in _src_vol.columns:
-                _garch_v = float(_src_vol['garch_vol'].dropna().iloc[-1])
+                _gv_ser = _src_vol['garch_vol'].dropna()
+                _garch_v = float(_gv_ser.iloc[-1]) if len(_gv_ser) > 0 else 1e-4
                 ci_half  = last_price * max(_garch_v, 1e-4) * 1.15 * np.power(t, 0.4)
             else:
-                recent_vol = float(_src_vol['vol_5d'].dropna().iloc[-1]) if 'vol_5d' in _src_vol.columns else 0.015
+                _v5_ser = _src_vol['vol_5d'].dropna() if 'vol_5d' in _src_vol.columns else pd.Series(dtype=float)
+                recent_vol = float(_v5_ser.iloc[-1]) if len(_v5_ser) > 0 else 0.015
                 ci_half    = ensemble * recent_vol * 1.15 * np.power(t, 0.4)
             lower_75ci = ensemble - ci_half
             upper_75ci = ensemble + ci_half
