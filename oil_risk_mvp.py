@@ -1921,7 +1921,9 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
                         _old_c.unlink(missing_ok=True)
                     except Exception as _ul_e:
                         log.debug(f"    CEEMDAN 구 캐시 삭제 실패({_old_c.name}): {_ul_e}")
-        _n_cem = len(_wti_arr)
+        # 캐시 IMF 길이 기준으로 _n_cem 결정 (해시 충돌 시 길이 불일치 방지)
+        _imf_len = _imfs.shape[1] if _imfs.ndim == 2 else len(_imfs[-1])
+        _n_cem = min(len(_wti_arr), _imf_len)
         # 저주파 성분 = 마지막 IMF(추세), 고주파 = 첫 IMF들(잡음)
         _trend_tr = _imfs[-1][:_n_cem]   # 훈련 구간 추세
         _noise_tr = _imfs[0][:_n_cem]    # 훈련 구간 잡음
