@@ -4347,8 +4347,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         _audit_cols = [
             ('news_sentiment',        '당일 뉴스 (OK: T뉴스→T+1가격)'),
             ('news_sentiment_smooth', '당일 뉴스 EWM (OK: T뉴스→T+1가격)'),
-            ('inv_chg_zscore',        'EIA 재고 (fix: +3영업일 발표지연 적용)'),
-            ('inv_surprise',          'EIA 서프라이즈 (fix: +3영업일)'),
+            ('inv_chg_zscore',        f'EIA 재고 (fix: +{EIA_SHIFT}영업일 발표지연 적용)'),
+            ('inv_surprise',          f'EIA 서프라이즈 (fix: +{EIA_SHIFT}영업일)'),
             ('cot_net_pct',           'COT 포지션 (OK: shift(3) 적용)'),
             ('news_sentiment_lag1',   '뉴스 lag1 (OK: 명시 lag)'),
         ]
