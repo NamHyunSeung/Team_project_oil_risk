@@ -330,6 +330,8 @@ CRISIS_SEED = {
     'energy', 'crisis', 'surge', 'crash', 'crude', 'oil', 'brent',
     'barrel', 'demand', 'risk', 'fear', 'concern', 'saudi', 'china',
     'export', 'price', 'tension',
+    'tariff', 'tariffs', 'trade', 'tradewar', 'reciprocal', 'retaliation',
+    'retaliatory', 'protectionism', 'import', 'levy', 'duties',
 }
 
 STOP_WORDS = {
@@ -401,6 +403,9 @@ SENTIMENT_MAP = {
     'expropriation':1.0,'confiscate':0.5,'depletion':0.5,
     'tension':1.0,'threat':0.5,'spike':1.5,'surge':1.0,
     'halt':0.5,'freeze':0.5,'restrict':0.5,
+    'tariff':1.5,'tariffs':1.5,'tradewar':2.0,'trade_war':2.0,
+    'reciprocal':1.5,'retaliation':1.5,'retaliatory':1.5,
+    'protectionism':1.0,'levy':1.0,'duties':1.0,
     # ── WTI 하락 요인: 공급 증가 / 수요 감소 / 리스크 완화 (음수)
     'collapse':-2,'crash':-2,'plunge':-1.5,'slump':-1.5,'plummet':-1.5,
     'glut':-1.5,'oversupply':-1,'overproduction':-1,'gluts':-1.5,
@@ -1605,9 +1610,23 @@ _GEO_EVENTS = {
     "geopolitical tension risk premium crude oil",
     "ceasefire agreement peace deal risk premium falls",
 }
+_OPEC_EVENTS = {
+    "OPEC production cut two million barrels per day deep",
+    "OPEC production cut agreement extended deeper barrels per day",
+    "OPEC surprise voluntary output cut announced",
+    "Saudi Arabia announces unilateral production cut one million",
+    "Saudi Arabia voluntary cut extended deeper barrel reduction",
+    "OPEC+ ministerial meeting agrees production cut quota",
+    "OPEC+ compliance exceeds quota output below target",
+    "OPEC agrees increase output production quota barrels",
+    "OPEC+ eases cuts production increase members",
+    "Saudi Arabia increases output production boost barrels",
+    "weak oil demand forecast IEA OPEC lowers outlook",
+}
 
 def _event_category(text):
-    if text in _GEO_EVENTS: return 'geo'
+    if text in _GEO_EVENTS:  return 'geo'
+    if text in _OPEC_EVENTS: return 'opec'
     if text in _SUPPLY_EVENTS: return 'supply'
     return 'demand'
 
@@ -1762,6 +1781,7 @@ NEWS_FEATS = [
     'news_count', 'news_count_neg',
     'oil_event_score', 'oil_event_score_smooth',
     'sentiment_magnitude', 'extreme_neg_news',
+    'jump_flag', 'jump_magnitude',
     'news_uncertainty',
     'gpr_zscore', 'geo_dummy',
     'ovx_zscore', 'ovx_change',
@@ -1772,6 +1792,7 @@ NEWS_FEATS = [
     # 시장 맥락 (뉴스 신호 증폭/감쇠)
     'opec_days_to_next', 'opec_pre5d',   # OPEC 회의 근접 시 뉴스 신뢰도 상승
     'inv_mom4_z', 'inv_surprise',          # 재고 추세 → 뉴스 방향성 검증
+    'opec_event_score', 'opec_event_score_smooth',
 ]
 
 FEATURE_COLS = [
@@ -1828,6 +1849,8 @@ FEATURE_COLS = [
     'vix_term_slope', 'vix_ts_zscore', 'skew_zscore', 'skew_chg',
     # 5번: 시장 국면(Regime) 피처
     'regime', 'regime_x_sent', 'regime_x_gpr',
+    # 가격 점프 감지 (블랙스완 이벤트)
+    'jump_flag', 'jump_magnitude',
     # COVID 특수 변수
     'covid_dummy',
     # 계절성 (원유 수요 사이클)
@@ -1845,6 +1868,7 @@ FEATURE_COLS = [
     # 가격·재고 기술신호 (MACD 크로스, 모멘텀가속, 재고방향, 감성변화)
     'macd_cross', 'mom_accel', 'inv_draw_signal', 'inv_surprise_dir',
     'supply_demand_gap', 'demand_event_score', 'inv_draw_x_macd', 'sentiment_chg3',
+    'opec_event_score', 'opec_event_score_smooth',
 ]
 
 
@@ -2207,7 +2231,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
                 _sims_sw  /= _sims_sw.sum(axis=1, keepdims=True) + 1e-8
                 _ev_sc_arr = np.array(_ev_scores_v)
                 _ne['_oil_score'] = _sims_sw @ _ev_sc_arr
-                for _cat, _col in [('supply','_supply_score'),('demand','_demand_score'),('geo','_geo_score')]:
+                for _cat, _col in [('supply','_supply_score'),('demand','_demand_score'),('geo','_geo_score'),('opec','_opec_score')]:
                     _cmask   = np.array([c == _cat for c in _OIL_EVENT_CATS], dtype=float)
                     _w       = _sims_sw * _cmask
                     _ne[_col] = (_w / (_w.sum(axis=1, keepdims=True) + 1e-8)) @ _ev_sc_arr
@@ -2224,6 +2248,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
                     '_supply': _wavg_col(g, '_supply_score'),
                     '_demand': _wavg_col(g, '_demand_score'),
                     '_geo':    _wavg_col(g, '_geo_score'),
+                    '_opec':   _wavg_col(g, '_opec_score'),
                 })
             )
             _oil_daily.index = pd.to_datetime(_oil_daily.index)
@@ -2232,7 +2257,8 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
             df['oil_event_score_smooth'] = _oil_s.ewm(span=3, min_periods=1).mean().values
             for _cat, _col in [('_supply','supply_event_score'),
                                 ('_demand','demand_event_score'),
-                                ('_geo',   'geo_event_score')]:
+                                ('_geo',   'geo_event_score'),
+                                ('_opec',  'opec_event_score')]:
                 _s = _oil_daily[_cat].reindex(df.index).ffill().fillna(0)
                 df[_col]             = _s.values
                 df[_col + '_smooth'] = _s.ewm(span=3, min_periods=1).mean().values
@@ -2293,6 +2319,11 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     df['sentiment_magnitude']    = df['news_sentiment'].abs() * np.log1p(df['news_count'])
     # 극단 감성 더미 (EWM 평활 기준 ±0.35 초과)
     df['extreme_neg_news'] = (df['news_sentiment_smooth'] < -0.35).astype(float)
+    # 가격 점프 감지: |일별수익률| > 3σ(60일) → 블랙스완 이벤트 플래그
+    _ret = df['close'].pct_change().fillna(0)
+    _ret_std60 = _ret.rolling(60, min_periods=10).std()
+    df['jump_flag'] = ((_ret.abs() > 3 * _ret_std60) & (_ret_std60 > 0)).astype(float)
+    df['jump_magnitude'] = (_ret.abs() / (_ret_std60 + 1e-8)).clip(upper=10).fillna(0)
     for lag in [1, 2]:
         df[f'news_sentiment_lag{lag}'] = df['news_sentiment'].shift(lag)
         df[f'news_count_lag{lag}']     = df['news_count'].shift(lag)
@@ -4798,14 +4829,20 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                 _feat_r2 = full_df if full_df is not None else feature_df
                 _ovx_abs = float(_feat_r2['OVX'].iloc[-1]) if 'OVX' in _feat_r2.columns and _feat_r2['OVX'].notna().any() else 0.0
                 _sx_pen  = 0.50 if _ovx_abs >= 60 else (0.72 if _ovx_abs >= 40 else 1.0)
+                # M3: 블랙스완 국면 페널티 — extreme_neg_news + jump_flag 동시 발생 시 SARIMAX 추가 억제
+                _enews = float(_feat_r2['extreme_neg_news'].iloc[-1]) if 'extreme_neg_news' in _feat_r2.columns and _feat_r2['extreme_neg_news'].notna().any() else 0.0
+                _jflag = float(_feat_r2['jump_flag'].iloc[-1]) if 'jump_flag' in _feat_r2.columns and _feat_r2['jump_flag'].notna().any() else 0.0
+                _gpr_z = float(_feat_r2['gpr_zscore'].iloc[-1]) if 'gpr_zscore' in _feat_r2.columns and _feat_r2['gpr_zscore'].notna().any() else 0.0
+                _bs_pen = 0.45 if (_enews >= 1.0 and _jflag >= 1.0) else (0.60 if (_enews >= 1.0 or _jflag >= 1.0 or _gpr_z > 2.0) else 1.0)
+                _sx_pen = min(_sx_pen, _bs_pen)
                 _inv = np.array([1/_mae_sx * _sx_pen, 1/_mae_xb, 1/_mae_vr])
                 _wts = _inv / _inv.sum()
                 ensemble = (_wts[0] * forecasts['sarimax']
                             + _wts[1] * forecasts['xgb']
                             + _wts[2] * _var_fc2)
-                log.info(f"    3모델 앙상블(InvMAE+OVX레짐): SARIMAX×{_wts[0]:.2f} "
+                log.info(f"    3모델 앙상블(InvMAE+OVX+BS레짐): SARIMAX×{_wts[0]:.2f} "
                          f"XGB×{_wts[1]:.2f} VAR×{_wts[2]:.2f} "
-                         f"(ovx={_ovx_abs:.0f} sx_pen={_sx_pen:.2f}) → D+1={ensemble[0]:.2f}")
+                         f"(ovx={_ovx_abs:.0f} sx_pen={_sx_pen:.2f} enews={_enews:.0f} jump={_jflag:.0f} gpr_z={_gpr_z:.1f}) → D+1={ensemble[0]:.2f}")
             except Exception as _ve2:
                 log.warning(f"VAR 3모델 앙상블 실패({_ve2}) → 2모델 폴백")
                 ensemble = w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb']
