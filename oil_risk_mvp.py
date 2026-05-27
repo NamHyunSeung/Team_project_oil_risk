@@ -1781,7 +1781,7 @@ NEWS_FEATS = [
     'news_count', 'news_count_neg',
     'oil_event_score', 'oil_event_score_smooth',
     'sentiment_magnitude', 'extreme_neg_news',
-    'jump_flag', 'jump_magnitude',
+    'jump_flag', 'jump_magnitude', 'compound_shock_flag',
     'news_uncertainty',
     'gpr_zscore', 'geo_dummy',
     'ovx_zscore', 'ovx_change',
@@ -2320,10 +2320,19 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
     # 극단 감성 더미 (EWM 평활 기준 ±0.35 초과)
     df['extreme_neg_news'] = (df['news_sentiment_smooth'] < -0.35).astype(float)
     # 가격 점프 감지: |일별수익률| > 3σ(60일) → 블랙스완 이벤트 플래그
-    _ret = df['close'].pct_change().fillna(0)
+    _ret = df['WTI'].pct_change().fillna(0)
     _ret_std60 = _ret.rolling(60, min_periods=10).std()
     df['jump_flag'] = ((_ret.abs() > 3 * _ret_std60) & (_ret_std60 > 0)).astype(float)
     df['jump_magnitude'] = (_ret.abs() / (_ret_std60 + 1e-8)).clip(upper=10).fillna(0)
+    # 복합충격 플래그: 독립 이벤트 타입(지정학/OPEC/극단부정뉴스) 2개 이상 5일 내 동시 발생
+    _geo_f  = (df['geo_event_score_smooth'].fillna(0)  > 0.3).astype(float) if 'geo_event_score_smooth'  in df.columns else pd.Series(0.0, index=df.index)
+    _opec_f = (df['opec_event_score_smooth'].fillna(0) > 0.3).astype(float) if 'opec_event_score_smooth' in df.columns else pd.Series(0.0, index=df.index)
+    _neg_f  = df['extreme_neg_news']
+    df['compound_shock_flag'] = (
+        (_geo_f.rolling(5, min_periods=1).max() +
+         _opec_f.rolling(5, min_periods=1).max() +
+         _neg_f.rolling(5, min_periods=1).max()) >= 2.0
+    ).astype(float)
     for lag in [1, 2]:
         df[f'news_sentiment_lag{lag}'] = df['news_sentiment'].shift(lag)
         df[f'news_count_lag{lag}']     = df['news_count'].shift(lag)
@@ -4193,6 +4202,36 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         _stk_oos_slice = slice(None, _eval_end)
                         log.info(f"    ✅ Rolling-30d 재보정 채택")
 
+                # ── 동적 블랙스완 가중치 (jump_flag/extreme_neg_news → SARIMAX per-row 페널티)
+                if 'SARIMAX' in _stack_names and 'jump_flag' in test_df.columns:
+                    _sx_i   = _stack_names.index('SARIMAX')
+                    _jf_t   = test_df['jump_flag'].fillna(0).values
+                    _en_t   = (test_df['extreme_neg_news'].fillna(0).values
+                               if 'extreme_neg_news' in test_df.columns else np.zeros(len(test_df)))
+                    _gz_t   = (test_df['gpr_zscore'].fillna(0).values
+                               if 'gpr_zscore' in test_df.columns else np.zeros(len(test_df)))
+                    _bpen_t = np.where((_en_t >= 1) & (_jf_t >= 1), 0.45,
+                              np.where((_en_t >= 1) | (_jf_t >= 1) | (_gz_t > 2.0), 0.60, 1.0))
+                    _pm     = np.ones((len(_stack_X), len(_stack_names)))
+                    _pm[:, _sx_i] = _bpen_t
+                    _wr     = _stack_weights[np.newaxis, :] * _pm
+                    _wr    /= _wr.sum(axis=1, keepdims=True)
+                    _dyn_p  = (_stack_X * _wr).sum(axis=1)
+                    _s_ev   = _stk_oos_slice
+                    _mae_pre  = float(mean_absolute_error(_stack_y[_s_ev], _stack_pred[_s_ev]))
+                    _mae_dyn  = float(mean_absolute_error(_stack_y[_s_ev], _dyn_p[_s_ev]))
+                    _maxe_pre = float(np.abs(_stack_y - _stack_pred).max())
+                    _maxe_dyn = float(np.abs(_stack_y - _dyn_p).max())
+                    _n_stress = int((_bpen_t < 1.0).sum())
+                    if _mae_dyn <= _mae_pre + 0.05:
+                        _stack_pred = _dyn_p
+                        log.info(f"    ✅ 동적BS가중치 채택 (stress={_n_stress}일): "
+                                 f"MAE {_mae_pre:.4f}→{_mae_dyn:.4f}  "
+                                 f"maxErr {_maxe_pre:.2f}→{_maxe_dyn:.2f}")
+                    else:
+                        log.info(f"    동적BS가중치 미채택: MAE {_mae_pre:.4f}→{_mae_dyn:.4f} "
+                                 f"(stress={_n_stress}일)")
+
                 _s = _stk_oos_slice
                 _mae_stack  = float(mean_absolute_error(_stack_y[_s], _stack_pred[_s]))
                 _r2_stack   = float(r2_score(_stack_y[_s], _stack_pred[_s]))
@@ -4833,7 +4872,10 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                 _enews = float(_feat_r2['extreme_neg_news'].iloc[-1]) if 'extreme_neg_news' in _feat_r2.columns and _feat_r2['extreme_neg_news'].notna().any() else 0.0
                 _jflag = float(_feat_r2['jump_flag'].iloc[-1]) if 'jump_flag' in _feat_r2.columns and _feat_r2['jump_flag'].notna().any() else 0.0
                 _gpr_z = float(_feat_r2['gpr_zscore'].iloc[-1]) if 'gpr_zscore' in _feat_r2.columns and _feat_r2['gpr_zscore'].notna().any() else 0.0
-                _bs_pen = 0.45 if (_enews >= 1.0 and _jflag >= 1.0) else (0.60 if (_enews >= 1.0 or _jflag >= 1.0 or _gpr_z > 2.0) else 1.0)
+                _cshock = float(_feat_r2['compound_shock_flag'].iloc[-1]) if 'compound_shock_flag' in _feat_r2.columns and _feat_r2['compound_shock_flag'].notna().any() else 0.0
+                _bs_pen = (0.25 if _cshock >= 1.0 else
+                           0.45 if (_enews >= 1.0 and _jflag >= 1.0) else
+                           0.60 if (_enews >= 1.0 or _jflag >= 1.0 or _gpr_z > 2.0) else 1.0)
                 _sx_pen = min(_sx_pen, _bs_pen)
                 _inv = np.array([1/_mae_sx * _sx_pen, 1/_mae_xb, 1/_mae_vr])
                 _wts = _inv / _inv.sum()
@@ -5739,8 +5781,15 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
         log.info(f"    📊 EIA {'발표일' if _eia_dow == 2 else '반응일'} 불확실성 확대: "
                  f"CI×{ci_multiplier:.2f} hedge={hedge_ratio:.2f}")
 
-    # 하드캡: CI multiplier 최대 1.5 (75% 구간 의미 유지)
-    ci_multiplier = float(min(ci_multiplier, 1.5))
+    # 복합충격(geo+opec+극단뉴스 동시 발생) → CI 하드캡 우회 + 극단 확대
+    _cshock_r = float(feature_df.iloc[-1].get('compound_shock_flag', 0.0)) if 'compound_shock_flag' in feature_df.columns else 0.0
+    if _cshock_r >= 1.0:
+        ci_multiplier = max(ci_multiplier, 2.5)
+        if level == 'NORMAL':
+            level = 'CAUTION'
+        log.info(f"    🚨 복합충격 감지: CI×{ci_multiplier:.1f} (지정학+OPEC+극단뉴스 동시)")
+    else:
+        ci_multiplier = float(min(ci_multiplier, 1.5))
 
     # 비대칭 리스크 비율: 최근 라이브 오차 분포 기반 (하방 vs 상방 기대손실)
     _down_risk_pct = 50.0
