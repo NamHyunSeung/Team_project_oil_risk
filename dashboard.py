@@ -49,7 +49,7 @@ st.set_page_config(
 )
 
 # ── 로그인 ────────────────────────────────────────────────────────────────────
-_AUTH_CFG = Path(__file__).parent / "auth_config.yaml"
+_AUTH_CFG = Path(__file__).parent / "config/auth_config.yaml"
 
 def _load_authenticator():
     with open(_AUTH_CFG, encoding="utf-8") as f:
@@ -112,7 +112,7 @@ _is_admin = (_username == "admin")
 
 # ── 구독 만료일 체크
 try:
-    with open(Path(__file__).parent / 'auth_config.yaml', encoding='utf-8') as _f2:
+    with open(Path(__file__).parent / 'config/auth_config.yaml', encoding='utf-8') as _f2:
         _cfg2 = yaml.safe_load(_f2)
     _expiry_str = (_cfg2.get('credentials', {}).get('usernames', {})
                        .get(_username, {}).get('subscription_expiry', ''))
@@ -1316,7 +1316,7 @@ if _is_admin and tab_admin is not None:
 
         # ── 사용자 관리 ──────────────────────────────────────────────────────
         with adm1:
-            _cfg_path = Path(__file__).parent / 'auth_config.yaml'
+            _cfg_path = Path(__file__).parent / 'config/auth_config.yaml'
             with open(_cfg_path, encoding='utf-8') as _f:
                 _cfg = yaml.safe_load(_f)
             _users = _cfg['credentials']['usernames']
