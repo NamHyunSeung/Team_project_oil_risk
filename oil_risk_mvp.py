@@ -2622,16 +2622,16 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         r2_ho   = float(r2_score(y_rv_te, pred_rv))
         log.info(f"        Hold-out 60d → RMSE={rmse_ho:.5f}  MAE={mae_ho:.5f}  R²={r2_ho:.4f}")
 
-        # ── 과적합 감지 (최종 모델 기준: 훈련 R² vs 홀드아웃 테스트 R²)
+        # ── 과적합 감지 (훈련 R² vs WF CV R²: 표시되는 r2와 일치, r2_ho는 별도 진단용)
         r2_train = float(r2_score(y_rv_tr, modelA.predict(X_tr_s)))
-        overfit_gap = r2_train - r2_ho  # 동일 모델 train vs test (fold 모델과 혼용 방지)
+        overfit_gap = r2_train - r2_cv  # train vs WF-CV (r2 컬럼과 동일 기준)
         if overfit_gap > 0.20:
-            log.warning(f"    ⚠️ 과적합 의심: 훈련R²={r2_train:.4f} vs 테스트R²={r2_ho:.4f} "
-                        f"(gap={overfit_gap:.3f})")
+            log.warning(f"    ⚠️ 과적합 의심: 훈련R²={r2_train:.4f} vs CV R²={r2_cv:.4f} "
+                        f"(gap={overfit_gap:.3f})  hold-out R²={r2_ho:.4f}")
         elif overfit_gap < -0.10:
-            log.info(f"        테스트>훈련 (시간가중 훈련 정상): 훈련R²={r2_train:.4f} vs 테스트R²={r2_ho:.4f} (gap={overfit_gap:.3f})")
+            log.info(f"        테스트>훈련 (정상): 훈련R²={r2_train:.4f} vs CV R²={r2_cv:.4f} (gap={overfit_gap:.3f})  hold-out R²={r2_ho:.4f}")
         else:
-            log.info(f"        훈련R²={r2_train:.4f}  테스트R²={r2_ho:.4f}  gap={overfit_gap:.3f} (정상)")
+            log.info(f"        훈련R²={r2_train:.4f}  CV R²={r2_cv:.4f}  hold-out R²={r2_ho:.4f}  gap={overfit_gap:.3f} (정상)")
 
         # ── HAR-Ridge walk-forward CV 평가 후 XGBoost와 비교, 더 좋으면 채택
         try:
@@ -3453,10 +3453,14 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         try:
                             with open(SVM_MODEL_CACHE, 'rb') as _f_sm:
                                 _sm_cached = _pkl_svm.load(_f_sm)
-                            if hasattr(_sm_cached, 'predict_proba'):
+                            _n_feat_cached = getattr(_sm_cached, 'n_features_in_', None)
+                            if (hasattr(_sm_cached, 'predict_proba') and
+                                    (_n_feat_cached is None or _n_feat_cached == _Xtr_svm.shape[1])):
                                 _sm = _sm_cached
                                 _svm_model_loaded = True
-                                log.info(f"        SVM 모델 캐시 로드 (fit skip)")
+                                log.info(f"        SVM 모델 캐시 로드 (fit skip, feat={_Xtr_svm.shape[1]})")
+                            elif _n_feat_cached is not None and _n_feat_cached != _Xtr_svm.shape[1]:
+                                log.info(f"        SVM 캐시 무효화: 피처 수 불일치 ({_n_feat_cached}→{_Xtr_svm.shape[1]}), 재훈련")
                         except Exception:
                             pass
                     if not _svm_model_loaded:
@@ -4306,6 +4310,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                'rmse': round(v['rmse'], 5), 'mae': round(v['mae'], 5), 'r2': round(v['r2'], 4)}
         if 'dir_acc'     in v: row['dir_acc']     = round(v['dir_acc'], 4)
         if 'wf_dir_acc'  in v: row['wf_dir_acc']  = round(v['wf_dir_acc'], 4)
+        if 'r2_ho'       in v: row['r2_ho']       = round(v['r2_ho'], 4)
         if 'train_r2'    in v: row['train_r2']    = round(v['train_r2'], 4)
         if 'overfit_gap' in v: row['overfit_gap'] = round(v['overfit_gap'], 4)
         # MASE (1.0보다 작아야 기준선 대비 개선)
