@@ -35,7 +35,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='statsmodels')
 if hasattr(sys.stdout, 'reconfigure'):
     try: sys.stdout.reconfigure(encoding='utf-8')
     except Exception: pass
-import os, re, logging
+import os, re, logging, json
 try:
     from dotenv import load_dotenv
     load_dotenv()
