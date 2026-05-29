@@ -160,7 +160,7 @@ class OilRiskLauncher(tk.Tk):
         try:
             self._proc = subprocess.Popen(
                 [_PYTHON, "-m", "streamlit", "run",
-                 str(BASE_DIR / "dashboard.py"),
+                 str(BASE_DIR / "dashboard_v2.py"),
                  "--server.headless", "true",
                  "--server.port", "8501"],
                 cwd=str(BASE_DIR),

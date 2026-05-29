@@ -86,6 +86,42 @@ def _atomic_csv(df: "pd.DataFrame", path: "Path", **kwargs) -> None:
         except Exception:
             pass
         raise
+
+def _atomic_json(obj, path, **kwargs) -> None:
+    """Write JSON atomically via temp file + os.replace to avoid partial reads."""
+    import os as _os, tempfile as _tf, json as _json
+    _dir = Path(path).parent
+    with _tf.NamedTemporaryFile(mode='w', dir=_dir, suffix='.tmp', delete=False,
+                                encoding='utf-8') as _fh:
+        _tmp = _fh.name
+    try:
+        with open(_tmp, 'w', encoding='utf-8') as _f:
+            _json.dump(obj, _f, **kwargs)
+        _os.replace(_tmp, path)
+    except Exception:
+        try:
+            _os.unlink(_tmp)
+        except Exception:
+            pass
+        raise
+
+def _atomic_pkl(obj, path, **kwargs) -> None:
+    """Write pickle atomically via temp file + os.replace to avoid partial reads."""
+    import os as _os, tempfile as _tf, pickle as _pickle
+    _dir = Path(path).parent
+    with _tf.NamedTemporaryFile(mode='wb', dir=_dir, suffix='.tmp', delete=False) as _fh:
+        _tmp = _fh.name
+    try:
+        with open(_tmp, 'wb') as _f:
+            _pickle.dump(obj, _f, **kwargs)
+        _os.replace(_tmp, path)
+    except Exception:
+        try:
+            _os.unlink(_tmp)
+        except Exception:
+            pass
+        raise
+
 EMBED_CACHE_FILE = OUTPUT_DIR / 'news_embed_cache.pkl'
 COT_CACHE_FILE   = OUTPUT_DIR / 'cot_cache.csv'
 COT_RAW_FILE     = Path('data/annual.txt')   # CFTC 연간 전체 데이터
@@ -142,11 +178,11 @@ def _save_retrain_record() -> None:
     """재훈련 완료 시각 + 모델 버전 기록."""
     import json as _jw, time as _tw
     try:
-        LAST_RETRAIN_FILE.write_text(_jw.dumps({
+        _atomic_json({
             'timestamp': _tw.time(),
             'model_version': MODEL_VERSION,
             'date': datetime.now().strftime('%Y-%m-%d %H:%M'),
-        }))
+        }, LAST_RETRAIN_FILE)
     except Exception:
         pass
 
@@ -170,7 +206,7 @@ def _check_degradation_trigger(mase: float, ovx_level: float = 0.0) -> bool:
         rec['consecutive_days'] = 0
 
     try:
-        DEGRADATION_FILE.write_text(_jd.dumps(rec))
+        _atomic_json(rec, DEGRADATION_FILE)
     except Exception:
         pass
 
@@ -184,7 +220,7 @@ def _check_degradation_trigger(mase: float, ovx_level: float = 0.0) -> bool:
                 pass
         rec['consecutive_days'] = 0
         try:
-            DEGRADATION_FILE.write_text(_jd.dumps(rec))
+            _atomic_json(rec, DEGRADATION_FILE)
         except Exception:
             pass
         log.warning(f"⚠ 강제 재훈련 트리거: MASE>{_thresh:.1f} {MASE_RETRAIN_DAYS}일 연속 "
@@ -1103,8 +1139,8 @@ def fetch_cot() -> pd.DataFrame:
                     cache = cache.sort_index()
                 # 캐시 저장
                 try:
-                    cache.reset_index().rename(columns={'index':'date'}).to_csv(
-                        COT_CACHE_FILE, index=False)
+                    _atomic_csv(cache.reset_index().rename(columns={'index': 'date'}),
+                                COT_CACHE_FILE, index=False)
                 except Exception:
                     pass
         except Exception as _ce:
@@ -1155,8 +1191,8 @@ def fetch_cot() -> pd.DataFrame:
                             if not _add.empty:
                                 cache = pd.concat([cache, _add]).sort_index()
                         try:
-                            cache.reset_index().rename(columns={'index': 'date'}).to_csv(
-                                COT_CACHE_FILE, index=False)
+                            _atomic_csv(cache.reset_index().rename(columns={'index': 'date'}),
+                                        COT_CACHE_FILE, index=False)
                         except Exception:
                             pass
                         log.info(f"    COT CFTC {_yr}년 자동 갱신: {len(_rows2)}주 추가")
@@ -1320,7 +1356,7 @@ def fetch_news(days_back: int = None):
         log.info(f"    캐시 트리밍: {_before_trim}건 → {len(combined)}건 ({_cutoff.date()} 이후만 유지)")
 
     try:
-        combined.to_csv(NEWS_CACHE_FILE, index=False)
+        _atomic_csv(combined, NEWS_CACHE_FILE, index=False)
         log.info(f"    뉴스 캐시 저장: {len(combined)}건 → {NEWS_CACHE_FILE}")
     except Exception as _nce:
         log.warning(f"    뉴스 캐시 저장 실패({_nce}) → 다음 실행 시 재수집")
@@ -1470,7 +1506,7 @@ def _apply_finbert(news_df: pd.DataFrame) -> pd.DataFrame:
             _append = _new_rows[~_new_rows['title'].astype(str).isin(_existing_titles)]
             if len(_append) > 0:
                 _c = pd.concat([_c, _append], ignore_index=True)
-            _c.to_csv(NEWS_CACHE_FILE, index=False)
+            _atomic_csv(_c, NEWS_CACHE_FILE, index=False)
         except Exception as _ce:
             log.debug(f"    FinBERT 캐시 저장 실패({_ce})")
 
@@ -1736,8 +1772,7 @@ def _apply_embeddings(news_df: pd.DataFrame) -> pd.DataFrame:
             cache = {k: v for k, v in cache.items() if k in _keep}
             log.info(f"    Embedding 캐시 정리: {len(cache)}건 유지")
         try:
-            with open(EMBED_CACHE_FILE, 'wb') as _f:
-                pickle.dump(cache, _f, protocol=4)
+            _atomic_pkl(cache, EMBED_CACHE_FILE, protocol=4)
         except Exception as _ce:
             log.warning(f"    Embedding 캐시 저장 실패({_ce})")
 
@@ -2000,8 +2035,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
                                  dist='Normal', rescale=False)
             _res = _garch.fit(disp='off', show_warning=False)
             try:
-                with open(GARCH_CACHE, 'wb') as _gf:
-                    _gpk.dump({'hash': _ghash, 'result': _res}, _gf)
+                _atomic_pkl({'hash': _ghash, 'result': _res}, GARCH_CACHE)
             except Exception:
                 pass
         _cond_vol = _res.conditional_volatility / 100   # 소수점 스케일 복원
@@ -2031,9 +2065,7 @@ def build_features(price_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFram
             _raw_1h = yf.download("CL=F", period="365d", interval="1h",
                                   progress=False, auto_adjust=True)
             try:
-                import pickle as _pk
-                with open(INTRADAY_CACHE, 'wb') as _pf:
-                    _pk.dump({'date': str(_intra_today.date()), 'data': _raw_1h}, _pf)
+                _atomic_pkl({'date': str(_intra_today.date()), 'data': _raw_1h}, INTRADAY_CACHE)
             except Exception:
                 pass
         if not _raw_1h.empty and len(_raw_1h) > 100:
@@ -2578,7 +2610,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     'mean': float(_col.mean()),
                     'std':  float(_col.std()),
                 }
-        FEAT_TRAIN_STATS.write_text(_json_fds.dumps(_fd_stats))
+        _atomic_json(_fd_stats, FEAT_TRAIN_STATS)
     except Exception as _fds_e:
         log.warning(f"    피처 통계 저장 실패({_fds_e})")
 
@@ -2940,12 +2972,11 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     sarimax_order    = aa.order
                     sarimax_seasonal = aa.seasonal_order
                     log.info(f"    auto_arima 최적: {sarimax_order} × {sarimax_seasonal}")
-                    import json as _json
-                    _sx_cache_file.write_text(_json.dumps({
+                    _atomic_json({
                         'key': _sx_cache_key,
                         'order': list(sarimax_order),
                         'seasonal': list(sarimax_seasonal),
-                    }))
+                    }, _sx_cache_file)
                 except Exception as e:
                     log.warning(f"    auto_arima 실패({e}) → 기본 파라미터 사용")
 
@@ -3255,8 +3286,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         log.info(f"    Optuna 완료: {_best_xgb_params} "
                                  f"(MAE={_study.best_value:.4f})")
                         try:
-                            XGB_OPTUNA_CACHE.write_text(_json_opt.dumps(
-                                {'key': _opt_key, 'params': _best_xgb_params}))
+                            _atomic_json({'key': _opt_key, 'params': _best_xgb_params},
+                                         XGB_OPTUNA_CACHE)
                         except Exception:
                             pass
                 except Exception as _oe:
@@ -3303,7 +3334,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 sorted(zip(available_feats, _imp), key=lambda x: x[1], reverse=True),
                 columns=['feature','importance']
             )
-            _imp_df.to_csv(OUTPUT_DIR / 'xgb_return_importance.csv', index=False)
+            _atomic_csv(_imp_df, OUTPUT_DIR / 'xgb_return_importance.csv', index=False)
 
             # 누적 중요도 90% 또는 상위 25개 이하로 피처 선택
             _sorted_imp = sorted(zip(available_feats, _imp), key=lambda x: x[1], reverse=True)
@@ -3480,8 +3511,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                             if _cd > _best_c_dir:
                                 _best_c_dir, _best_c = _cd, _ci
                         try:
-                            SVM_CACHE.write_text(_jsc.dumps({
-                                'best_c': _best_c, 'date': str(pd.Timestamp.today().date())}))
+                            _atomic_json({'best_c': _best_c,
+                                          'date': str(pd.Timestamp.today().date())}, SVM_CACHE)
                         except Exception:
                             pass
                         log.info(f"        SVM C 그리드: best_C={_best_c} (검증_dir={_best_c_dir*100:.1f}%)")
@@ -3523,8 +3554,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         else:
                             _sm.fit(_Xtr_svm, _y_cls_tr, sample_weight=_sw_svm)
                         try:
-                            with open(SVM_MODEL_CACHE, 'wb') as _f_sm:
-                                _pkl_svm.dump(_sm, _f_sm, protocol=4)
+                            _atomic_pkl(_sm, SVM_MODEL_CACHE, protocol=4)
                         except Exception:
                             pass
                     _best_svm_prob = _sm.predict_proba(_Xte_svm)[:, 1]
@@ -4298,10 +4328,10 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                                      f"{dict(zip(_stack_names, _smooth_w.round(3)))} "
                                      f"(최대변화={_delta:.3f})")
                             _stk_info['stack_weights'] = _smooth_w
-                        STACK_WEIGHTS_EMA.write_text(_json_ema.dumps({
+                        _atomic_json({
                             'names':   list(_stack_names),
                             'weights': list(_stk_info['stack_weights'].round(6).tolist()),
-                        }))
+                        }, STACK_WEIGHTS_EMA)
                     except Exception as _ema_e:
                         log.warning(f"    가중치 EMA 실패({_ema_e}) → 원본 가중치 사용")
 
@@ -5144,6 +5174,14 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
             v_err     = round(av - pv, 5) if not (np.isnan(av) or np.isnan(pv)) else None
             stk_err   = round(ap - sp, 2) if sp is not None else None
 
+            pred_dir = actual_dir = dir_correct = None
+            if i > 0:
+                prev_ap = float(actual_prices[i - 1])
+                _pred_p = sp if sp is not None else pp
+                pred_dir   = 'UP' if _pred_p > prev_ap else ('DOWN' if _pred_p < prev_ap else 'FLAT')
+                actual_dir = 'UP' if ap > prev_ap else ('DOWN' if ap < prev_ap else 'FLAT')
+                dir_correct = 1 if pred_dir == actual_dir else 0
+
             bt_rows.append({
                 'date':            dt.strftime('%Y-%m-%d'),
                 'sarimax_pred':    round(pp, 2),
@@ -5156,6 +5194,9 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
                 'actual_vol_5d':   round(av, 5) if not np.isnan(av) else None,
                 'vol_error':       v_err,
                 'type':            'backtest',
+                'pred_direction':  pred_dir,
+                'actual_direction': actual_dir,
+                'dir_correct':     dir_correct,
             })
 
     bt_df = pd.DataFrame(bt_rows)
@@ -5366,7 +5407,14 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
     live_df = pd.DataFrame(live_rows) if live_rows else pd.DataFrame()
 
     # ── 합치기 & 저장 ────────────────────────────────────────────────
-    combined = pd.concat([bt_df, live_df], ignore_index=True) if not live_df.empty else bt_df
+    if not live_df.empty:
+        combined = pd.concat([bt_df, live_df], ignore_index=True)
+        # live 날짜와 겹치는 backtest 행 제거 — live 행 우선 (look-ahead 편향 방지)
+        _live_dates = set(live_df['date'].astype(str))
+        combined = combined[~((combined['type'] == 'backtest') & combined['date'].astype(str).isin(_live_dates))]
+        combined = combined.reset_index(drop=True)
+    else:
+        combined = bt_df
     _atomic_csv(combined, PRED_LOG_FILE, index=False)
     n_live = len(live_df)
     n_filled = int(live_df['actual_price'].notna().sum()) if not live_df.empty else 0
@@ -5448,9 +5496,9 @@ def analyze_live_gap() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _fire_and_forget(fn, *args, **kwargs):
-    """이메일 전송을 daemon 스레드에서 비동기 실행 — 파이프라인 블로킹 방지."""
+    """이메일 전송을 비동기 실행 — 파이프라인 블로킹 방지. non-daemon: 프로세스 종료 전 완료 보장."""
     import threading
-    t = threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True)
+    t = threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=False)
     t.start()
 
 
@@ -5523,7 +5571,7 @@ WTI 현재가   : ${wti:.2f} / bbl
 
 def monitor_rss_alerts() -> dict:  # noqa: dead — 향후 독립 스케줄러용
     """RSS 긴급 이벤트 스캔. 현재 파이프라인에서 호출 안 됨 (독립 실행 예정)."""
-    import json as _json, urllib.request as _ur, xml.etree.ElementTree as _ET
+    import json as _json, urllib.request as _ur, xml.etree.ElementTree as _ET, time as _time
 
     ALERT_KEYWORDS = {
         'supply_cut':  ['opec cut','production cut','supply disruption','pipeline attack',
@@ -5539,9 +5587,13 @@ def monitor_rss_alerts() -> dict:  # noqa: dead — 향후 독립 스케줄러�
 
     triggered   = []
     seen_titles = set()
+    _rss_deadline = _time.time() + 30  # 총 RSS 수집 최대 30초
 
     # ── RSS 수집
     for url in NEWS_RSS:
+        if _time.time() > _rss_deadline:
+            log.debug("RSS 수집 총 타임아웃(30s) 초과 — 나머지 소스 건너뜀")
+            break
         try:
             req  = _ur.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with _ur.urlopen(req, timeout=8) as resp:
@@ -5594,8 +5646,7 @@ def monitor_rss_alerts() -> dict:  # noqa: dead — 향후 독립 스케줄러�
 
     # ── 저장
     try:
-        (OUTPUT_DIR / 'latest_alerts.json').write_text(
-            _json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+        _atomic_json(result, OUTPUT_DIR / 'latest_alerts.json', ensure_ascii=False, indent=2)
     except Exception:
         pass
 
@@ -5892,7 +5943,7 @@ def extract_crisis_keywords(news_df: pd.DataFrame, top_n: int = 60) -> pd.DataFr
     kw_df['is_crisis_word'] = kw_df['keyword'].isin(CRISIS_SEED)
     kw_df['weight']         = (kw_df['count'] / kw_df['count'].max()).round(4)
 
-    kw_df.to_csv(OUTPUT_DIR / 'crisis_keywords.csv', index=False)
+    _atomic_csv(kw_df, OUTPUT_DIR / 'crisis_keywords.csv', index=False)
     log.info(f"    키워드 {len(kw_df)}개 저장 (crisis={kw_df['is_crisis_word'].sum()}개)")
     return kw_df
 
@@ -6758,8 +6809,7 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
         'live_mae':    round(_live_mae_val, 4) if _live_mae_val is not None else None,
         'api_status':  api_status,
     }
-    with open(OUTPUT_DIR / 'run_meta.json', 'w') as _f:
-        _json.dump(_run_meta, _f)
+    _atomic_json(_run_meta, OUTPUT_DIR / 'run_meta.json')
 
     # ── 결과 요약 출력
     rl = risk_signal['risk_level']

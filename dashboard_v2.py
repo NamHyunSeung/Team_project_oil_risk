@@ -548,7 +548,9 @@ def render_user_page():
     if _fc_rel_u == 'LOW':
         st.error("⚠️ **예측 신뢰도 낮음** — 라이브 오차가 백테스트 대비 1.5× 초과. 예측값 참고 수준으로만 활용하세요.")
     elif _m_age_u > 30:
-        st.warning(f"⚠️ 모델 미갱신 **{_m_age_u}일** 경과 — 파이프라인 재실행을 권장합니다.")
+        st.error(f"🚨 **파이프라인 미실행 {_m_age_u}일** — 데이터·모델 미갱신 상태. 즉시 재실행 필요.")
+    elif _m_age_u > 7:
+        st.warning(f"⚠️ 파이프라인 미실행 **{_m_age_u}일** 경과 — 재실행 권장.")
     _render_risk_drivers(sig)
 
     # 2. 핵심 지표 행
@@ -625,9 +627,12 @@ def render_admin_page():
             m1, m2, m3, m4 = st.columns(4)
             _rel_clr = 'inverse' if _fc_rel == 'LOW' else ('off' if _fc_rel == 'MEDIUM' else 'normal')
             m1.metric("forecast_reliability", _fc_rel)
+            _age_label = "🚨 즉시 재실행" if _m_age > 30 else ("⚠️ 재실행 권장" if _m_age > 7 else ("정상" if _m_age <= 1 else "주의"))
+            _age_clr   = "inverse" if _m_age > 7 else "off"
             m2.metric("모델 나이", f"{_m_age}일",
-                      delta="⚠️ 재훈련 권장" if _m_age > 30 else "정상",
-                      delta_color="inverse" if _m_age > 30 else "off")
+                      delta=_age_label,
+                      delta_color=_age_clr,
+                      help="파이프라인 마지막 실행 경과일 — 0~1일: 정상 / 2~7일: 주의 / 8~30일: 재실행 권장 / 30일+: 즉시 재실행")
             m3.metric("OVX 레짐", f"{_ovx:.0f}",
                       "HIGH" if _ovx >= 60 else ("MEDIUM" if _ovx >= 40 else "LOW"))
             m4.metric("리스크 스코어", f"{float(sig.get('risk_score', 0)):.3f}")
@@ -930,22 +935,30 @@ def render_admin_page():
                 bt_a = bt.dropna(subset=['price_error', 'actual_price', _dir_pred_col]).copy()
                 bt_a['date'] = pd.to_datetime(bt_a['date'])
                 bt_a = bt_a.sort_values('date').reset_index(drop=True)
-                bt_a['actual_dir'] = bt_a['actual_price'].diff().apply(
-                    lambda x: np.nan if pd.isna(x) else (1 if x > 0 else -1))
-                bt_a['pred_dir'] = bt_a[_dir_pred_col].diff().apply(
-                    lambda x: np.nan if pd.isna(x) else (1 if x > 0 else -1))
-                bt_a['dir_correct'] = (bt_a['actual_dir'] == bt_a['pred_dir']).astype(float).where(
-                    bt_a['actual_dir'].notna())
-                dir_acc = bt_a['dir_correct'].dropna().mean() * 100
+                # dir_correct: pred vs prev_close (prediction_log에 사전 계산됨)
+                if 'dir_correct' in bt_a.columns and bt_a['dir_correct'].notna().any():
+                    dir_acc = bt_a['dir_correct'].dropna().mean() * 100
+                else:
+                    bt_a['actual_dir'] = bt_a['actual_price'].diff().apply(
+                        lambda x: np.nan if pd.isna(x) else (1 if x > 0 else -1))
+                    bt_a['pred_dir'] = bt_a[_dir_pred_col].diff().apply(
+                        lambda x: np.nan if pd.isna(x) else (1 if x > 0 else -1))
+                    _dc = (bt_a['actual_dir'] == bt_a['pred_dir']).astype(float).where(bt_a['actual_dir'].notna())
+                    dir_acc = _dc.dropna().mean() * 100
                 bt_a['abs_pct_err'] = bt_a['price_error_pct'].abs() if 'price_error_pct' in bt_a.columns else pd.Series(np.nan, index=bt_a.index)
                 rolling_mape = (bt_a['abs_pct_err'].rolling(10).mean()
                                 if 'price_error_pct' in bt_a.columns else pd.Series(dtype=float))
                 bt_a['cum_abs_err'] = bt_a['price_error'].abs().cumsum()
-                col_d1, col_d2, col_d3 = st.columns(3)
-                col_d1.metric("방향성 정확도", f"{dir_acc:.1f}%")
-                col_d2.metric("최근 10일 롤링 MAPE",
+                _lv_total_n = len(lv)
+
+                col_d1, col_d2, col_d3, col_d4 = st.columns(4)
+                col_d1.metric("방향성 정확도 (백테스트)", f"{dir_acc:.1f}%",
+                              help="예측가 vs 전일 실제 종가 방향 일치율 (prediction_log dir_correct 기준)")
+                col_d2.metric("라이브 예측 누적", f"{_lv_total_n}건",
+                              help="운영 시작 후 누적 라이브 예측 수 (n<10 구간은 방향 정확도 통계적 무의미)")
+                col_d3.metric("최근 10일 롤링 MAPE",
                               f"{rolling_mape.dropna().iloc[-1]:.2f}%" if len(rolling_mape.dropna()) > 0 else "—")
-                col_d3.metric("누적 절대 오차", f"${bt_a['cum_abs_err'].iloc[-1]:.2f}" if len(bt_a) > 0 else "—")
+                col_d4.metric("누적 절대 오차", f"${bt_a['cum_abs_err'].iloc[-1]:.2f}" if len(bt_a) > 0 else "—")
                 mean_mape2 = bt_a['abs_pct_err'].mean() if bt_a['abs_pct_err'].notna().any() else 0
                 fig2 = make_subplots(rows=1, cols=2,
                                      subplot_titles=['누적 절대 오차 ($)', '롤링 MAPE — 10일 윈도우 (%)'])
