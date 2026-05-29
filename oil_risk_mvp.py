@@ -6692,9 +6692,33 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     save_prediction_log(model_results, feature_df, fc_df, prev_fc_df, full_df)
     analyze_live_gap()
 
-    # ── A: 라이브 성능 모니터링 (최근 30건 MAE vs 백테스트 MAE)
+    # ── A: 예측 신뢰도 — forecast_snapshots.csv 전체 기준 MASE
     _live_mae_val = None
     _forecast_reliability = 'UNKNOWN'
+    _snap_mase = None
+    _snap_n = 0
+    _snap_path_chk = OUTPUT_DIR / 'forecast_snapshots.csv'
+    if _snap_path_chk.exists():
+        try:
+            _snap_df = pd.read_csv(_snap_path_chk)
+            if PRED_LOG_FILE.exists():
+                _pl_act = pd.read_csv(PRED_LOG_FILE)[['date', 'actual_price']].rename(columns={'date': 'forecast_date'})
+                _snap_df = _snap_df.merge(_pl_act, on='forecast_date', how='left')
+            _snap_known = _snap_df[_snap_df['actual_price'].notna()].copy()
+            _snap_known['abs_err'] = (_snap_known['actual_price'] - _snap_known['forecast_price']).abs()
+            _snap_n = len(_snap_known)
+            if _snap_n >= 5:
+                _snap_mae = float(_snap_known['abs_err'].mean())
+                _snap_naive = float(_snap_known['actual_price'].diff().abs().dropna().mean())
+                _snap_mase = _snap_mae / max(_snap_naive, 1e-6)
+                _forecast_reliability = (
+                    'HIGH' if _snap_mase < 1.0 else
+                    'MEDIUM' if _snap_mase < 1.5 else 'LOW'
+                )
+                log.info(f"    예측 신뢰도: MASE={_snap_mase:.3f} (n={_snap_n}) → {_forecast_reliability}")
+        except Exception as _sne:
+            log.warning(f"    스냅샷 MASE 계산 실패({_sne})")
+
     if PRED_LOG_FILE.exists():
         try:
             _pl_check = pd.read_csv(PRED_LOG_FILE)
@@ -6702,18 +6726,6 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                 _pl_check['type'].isin(['live', 'gap']) &
                 _pl_check['price_error'].notna()
             ]
-            # 현재 버전 샘플이 충분하면 버전 필터링, 아니면 전체 사용
-            if 'model_version' in _pl_check.columns:
-                _curr_ver_rows = _pl_check[
-                    (_pl_check['type'] == 'live') &
-                    (_pl_check['model_version'] == MODEL_VERSION) &
-                    _pl_check['price_error'].notna()
-                ]
-                if len(_curr_ver_rows) >= 5:
-                    _live_known = _curr_ver_rows
-                    log.info(f"    성능 평가: v{MODEL_VERSION} 기준 {len(_curr_ver_rows)}건")
-                else:
-                    log.info(f"    성능 평가: v{MODEL_VERSION} 샘플 부족({len(_curr_ver_rows)}건) → 전체 사용")
             if len(_live_known) >= 5:
                 _live30 = _live_known.tail(30)
                 # σ-clip: 이상치(±2σ 초과) 제외 후 MAE 계산 (단발 급락/급등 오염 방지)
@@ -6733,7 +6745,7 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                 if _ratio > 1.5:
                     log.warning(f"    ⚠ 라이브 성능 열화: 라이브 MAE={_live_mae_val:.4f} > "
                                 f"백테스트×1.5 ({_bt_mae_ref:.4f}×1.5={_bt_mae_ref*1.5:.4f})")
-                # Rolling MASE: naive persistence 대비 비율 (>0.95 → 재훈련 시점)
+                # 열화 추적용 live MASE (재훈련 트리거 기준)
                 _naive_diffs = _live30_clean['actual_price'].diff().abs().dropna()
                 if len(_naive_diffs) >= 5:
                     _naive_mae_live = float(_naive_diffs.mean())
@@ -6742,12 +6754,8 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                              f"(naive_mae={_naive_mae_live:.4f})")
                     if _live_mase > 0.95:
                         log.warning(f"    ⚠ 라이브 MASE={_live_mase:.3f} → naive 근접, 재훈련 검토")
-                    _forecast_reliability = (
-                        'HIGH' if _live_mase < 1.0 else
-                        'MEDIUM' if _live_mase < 1.5 else 'LOW'
-                    )
                     # 열화 추적 → 연속 N일 초과 시 캐시 강제 초기화
-                    _ovx_deg = float(_live30.get('ovx_level', pd.Series([0.0])).iloc[-1]) if 'ovx_level' in (_live30.columns if hasattr(_live30, 'columns') else []) else 0.0
+                    _ovx_deg = 0.0
                     try:
                         _sig_tmp = pd.read_csv(OUTPUT_DIR / 'latest_risk_signal.csv')
                         _ovx_deg = float(_sig_tmp['ovx_level'].iloc[-1]) if 'ovx_level' in _sig_tmp.columns else 0.0
@@ -6779,24 +6787,6 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                             except Exception as _me:
                                 log.warning(f"    재훈련 알림 이메일 실패({_me})")
                         _fire_and_forget(_send_retrain_email)
-            # 라이브 샘플 부족 → 백테스트로 폴백 계산
-            if _forecast_reliability == 'UNKNOWN':
-                _bt_fb = _pl_check[
-                    (_pl_check['type'] == 'backtest') &
-                    _pl_check['price_error'].notna() &
-                    _pl_check['actual_price'].notna()
-                ].tail(30)
-                if len(_bt_fb) >= 5:
-                    _bt_mae_fb = float(_bt_fb['price_error'].abs().mean())
-                    _naive_fb  = _bt_fb['actual_price'].diff().abs().dropna()
-                    if len(_naive_fb) >= 3:
-                        _bt_mase_fb = _bt_mae_fb / max(float(_naive_fb.mean()), 1e-6)
-                        _forecast_reliability = (
-                            'HIGH' if _bt_mase_fb < 1.0 else
-                            'MEDIUM' if _bt_mase_fb < 1.5 else 'LOW'
-                        )
-                        log.info(f"    forecast_reliability (백테스트 폴백, n_live={len(_live_known)}): "
-                                 f"{_forecast_reliability} (mase={_bt_mase_fb:.3f})")
             # ── C: 75% CI 실제 커버리지 검증
             if 'lower_75ci' in _pl_check.columns and 'upper_75ci' in _pl_check.columns:
                 _ci_rows = _pl_check[
