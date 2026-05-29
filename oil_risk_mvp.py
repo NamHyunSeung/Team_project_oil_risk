@@ -4916,12 +4916,18 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     # 모멘텀 조건부 추가 보정: 강한 하락 추세 구간 과대 예측 패턴 완화
     _mom_src_bias = full_df if full_df is not None else feature_df
     _mom_bias = float(_mom_src_bias['mom_5d'].dropna().iloc[-1]) if 'mom_5d' in _mom_src_bias.columns else 0.0
+    # 1일 수익률 기반 모멘텀 감속 감지: 누적 하락 대비 직전일 변화가 미미하면 보정 축소
+    _mom_1d = float(_mom_src_bias['WTI'].pct_change(1).dropna().iloc[-1]) if 'WTI' in _mom_src_bias.columns else _mom_bias
+    _mom_decel = abs(_mom_1d) / max(abs(_mom_bias), 1e-6)
+    _mom_scale = float(np.clip(_mom_decel / 0.3, 0.3, 1.0)) if _mom_decel < 0.3 else 1.0
     if _mom_bias < -0.08:
-        bias -= 3.0
-        log.info(f"    모멘텀 하락({_mom_bias*100:.1f}%) 추가 보정: -3.0$")
+        _mom_adj = -3.0 * _mom_scale
+        bias += _mom_adj
+        log.info(f"    모멘텀 하락({_mom_bias*100:.1f}%) 추가 보정: {_mom_adj:.2f}$ (감속비={_mom_decel:.3f} scale={_mom_scale:.2f})")
     elif _mom_bias < -0.05:
-        bias -= 2.0
-        log.info(f"    모멘텀 하락({_mom_bias*100:.1f}%) 추가 보정: -2.0$")
+        _mom_adj = -2.0 * _mom_scale
+        bias += _mom_adj
+        log.info(f"    모멘텀 하락({_mom_bias*100:.1f}%) 추가 보정: {_mom_adj:.2f}$ (감속비={_mom_decel:.3f} scale={_mom_scale:.2f})")
     # 모멘텀 방향 vs bias 방향 불일치 시 반감 (방향 전환 후 과소/과대 예측 방지)
     if bias != 0.0 and _mom_bias != 0.0:
         if (bias < 0 and _mom_bias > 0.02) or (bias > 0 and _mom_bias < -0.02):
