@@ -2902,7 +2902,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
     exog_cols = [c for c in [
         'dxy_change', 'demand_shock', 'supply_shock', 'vix_change',
         'brent_wti_spread', 'ovx_change', 'futures_spread',
-        'oil_event_score_smooth', 'news_sentiment_smooth7',
+        'oil_event_score_smooth', 'news_sentiment_smooth7', 'sentiment_chg3',
         'inv_mom4_z', 'gold_wti_ratio_z', 'copper_gold_ratio_z',
     ] if c in feature_df.columns]
     log.info("    [B] SARIMAX 학습 + 1-step ahead 평가 중...")
@@ -3003,12 +3003,17 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             # 훈련 파라미터 고정, 칼만 필터로 1-step ahead 예측
             fit_full   = mdl_full.filter(fit.params)
             pred_obj   = fit_full.get_prediction(start=n_train, dynamic=False)
-            pred_price = pred_obj.predicted_mean.values[-n_test:]
+            pred_price = pred_obj.predicted_mean.values[-n_test_sx:]
 
             y_px_te_sx = sx_test['target_price'].values
-            rmse_b = float(np.sqrt(mean_squared_error(y_px_te_sx, pred_price)))
-            mae_b  = float(mean_absolute_error(y_px_te_sx, pred_price))
-            r2_b   = float(r2_score(y_px_te_sx, pred_price))
+            # full_df extra 행(target_price ffill 오염) 제거 — feature_df 기준만 평가
+            _eval_mask   = sx_test.index.isin(feature_df.index)
+            _pred_eval   = pred_price[_eval_mask]
+            _actual_eval = y_px_te_sx[_eval_mask]
+            _dates_eval  = sx_test.index[_eval_mask]
+            rmse_b = float(np.sqrt(mean_squared_error(_actual_eval, _pred_eval)))
+            mae_b  = float(mean_absolute_error(_actual_eval, _pred_eval))
+            r2_b   = float(r2_score(_actual_eval, _pred_eval))
 
             # 라이브 예측용: 전체 데이터로 재학습 (훈련셋만 학습한 fit은 60일 전 상태)
             log.info("    [B1] 전체 데이터 SARIMAX 재학습 (라이브 예측용)...")
@@ -3023,9 +3028,9 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 'model': fit_live, 'features': exog_cols, 'type': 'price',
                 'rmse': rmse_b, 'mae': mae_b, 'r2': r2_b,
                 'name': f'SARIMAX{sarimax_order} 1-step',
-                'pred_price_test':   pred_price,
-                'actual_price_test': y_px_te_sx,
-                'test_dates':        sx_test.index,
+                'pred_price_test':   _pred_eval,
+                'actual_price_test': _actual_eval,
+                'test_dates':        _dates_eval,
                 'order': sarimax_order, 'seasonal_order': sarimax_seasonal,
             }
             log.info(f"        1-step ahead → RMSE={rmse_b:.4f}  MAE={mae_b:.4f}  R²={r2_b:.4f}")
@@ -3062,15 +3067,17 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     X_te_rc['resid_lag2'] = float(resid_s.iloc[-2] if len(resid_s) >= 2 else resid_s.iloc[-1])
                     corrections = rc_model.predict(rc_scaler.transform(X_te_rc[X_rc.columns]))
 
-                    corrected = pred_price + corrections
-                    _ref = y_px_te_sx
-                    mae_c  = float(mean_absolute_error(_ref, corrected[:len(_ref)]))
+                    # _pred_eval/_actual_eval: full_df extra 행 제거된 평가 기준
+                    _corr_len = len(_pred_eval)
+                    corrected = _pred_eval + corrections[:_corr_len]
+                    _ref = _actual_eval
+                    mae_c  = float(mean_absolute_error(_ref, corrected))
                     mae_s  = results['sarimax']['mae']
-                    r2_c   = float(r2_score(_ref, corrected[:len(_ref)]))
+                    r2_c   = float(r2_score(_ref, corrected))
                     r2_s   = results['sarimax']['r2']
 
                     if mae_c < mae_s:
-                        rmse_c = float(np.sqrt(mean_squared_error(_ref, corrected[:len(_ref)])))
+                        rmse_c = float(np.sqrt(mean_squared_error(_ref, corrected)))
                         log.info(f"        잔차 교정 채택 ✓  MAE: {mae_s:.4f} → {mae_c:.4f}  R²: {r2_s:.4f} → {r2_c:.4f}")
                         # last_resid는 전체 데이터 기준 최신 잔차 사용
                         full_resid = fit_live.resid.reindex(feature_df.index).dropna()
@@ -5031,6 +5038,26 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     log.info(f"    D+2-7 Persistence 블렌딩: D+2={_ms_blend[1]:.0%} ~ D+7={_ms_blend[min(6,len(_ms_blend)-1)]:.0%} "
              f"(모멘텀: {_daily_mom*100:+.2f}%/일, D+7기준점 {_d7_adj:+.2f}$)")
 
+    # ── 5번: 감성 충격 보정 (앙상블 최종 오버레이 — 모든 모델 가중치 희석 없이 완전 반영)
+    # 원시 단순평균 사용 — _wavg_sent weighted avg는 극단 기사 희석시킴
+    try:
+        _nc_file_sh = OUTPUT_DIR / 'guardian_news_cache.csv'
+        if _nc_file_sh.exists():
+            _nc_sh = pd.read_csv(_nc_file_sh)
+            _nc_sh['date'] = pd.to_datetime(_nc_sh['date'])
+            _raw_d_sh  = _nc_sh.groupby('date')['finbert_score'].mean().sort_index()
+            _raw_c3_sh = _raw_d_sh.diff(3)
+            _today_key = _raw_d_sh.index[-1]
+            _chg3_sh   = float(_raw_c3_sh.loc[_today_key]) if _today_key in _raw_c3_sh.index and pd.notna(_raw_c3_sh.loc[_today_key]) else 0.0
+            _sent_sh   = float(_raw_d_sh.loc[_today_key])  if _today_key in _raw_d_sh.index  else 0.0
+            _ens_chg_pct = (ensemble[0] - last_price) / last_price if last_price != 0 else 0.0
+            if _chg3_sh < -0.15 and _sent_sh < 0.10 and _ens_chg_pct > -0.02:
+                _shock_adj = _chg3_sh * 20.0
+                ensemble = ensemble + _shock_adj
+                log.info(f"    ⚡ 감성 충격 보정: raw_chg3={_chg3_sh:.3f} raw_sent={_sent_sh:.3f} → {_shock_adj:+.2f}$")
+    except Exception as _se:
+        log.debug(f"    감성 충격 보정 실패: {_se}")
+
     # ── 예측값 sanity check: spot 대비 ±30% 초과 시 경고
     _dev_d1_pct = (ensemble[0] - last_price) / last_price * 100
     if abs(_dev_d1_pct) > 30.0:
@@ -5188,6 +5215,21 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
     xg  = results.get('xgb_har', {})
     stk = results.get('stacking', {})
 
+    # 감성 충격 보정용 원시 감성 조회 (weighted avg 아닌 단순 mean — 희석 방지)
+    _raw_sent_lkp = {}
+    _raw_chg3_lkp = {}
+    try:
+        _nc_file = OUTPUT_DIR / 'guardian_news_cache.csv'
+        if _nc_file.exists():
+            _nc_df = pd.read_csv(_nc_file)
+            _nc_df['date'] = pd.to_datetime(_nc_df['date'])
+            _raw_daily = _nc_df.groupby('date')['finbert_score'].mean().sort_index()
+            _raw_chg3s = _raw_daily.diff(3)
+            _raw_sent_lkp = {k: float(v) for k, v in _raw_daily.items() if pd.notna(v)}
+            _raw_chg3_lkp = {k: float(v) for k, v in _raw_chg3s.items() if pd.notna(v)}
+    except Exception:
+        pass
+
     if 'pred_price_test' in sx and 'test_dates' in sx:
         dates         = sx['test_dates']
         pred_prices   = sx['pred_price_test']
@@ -5202,6 +5244,19 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
             pv = float(pred_vols[i])   if i < len(pred_vols)   else np.nan
             av = float(actual_vols[i]) if i < len(actual_vols) else np.nan
             sp = round(float(stk_preds[i]), 2) if stk_preds is not None and i < len(stk_preds) else None
+
+            # 감성 충격 보정 (원시 단순평균 사용 — _wavg_sent 희석 방지)
+            if i > 0 and _raw_chg3_lkp:
+                try:
+                    _prev_dt_bt = pd.Timestamp(dates[i - 1])
+                    _chg3_bt    = _raw_chg3_lkp.get(_prev_dt_bt, 0.0)
+                    _sent_bt    = _raw_sent_lkp.get(_prev_dt_bt, 0.0)
+                    _prev_ap    = float(actual_prices[i - 1])
+                    _sx_chg     = (pp - _prev_ap) / _prev_ap if _prev_ap != 0 else 0.0
+                    if _chg3_bt < -0.15 and _sent_bt < 0.10 and _sx_chg > -0.02:
+                        pp = pp + _chg3_bt * 20.0
+                except Exception:
+                    pass
 
             p_err     = round(ap - pp, 2)
             p_err_pct = round((ap - pp) / ap * 100, 2) if ap != 0 else None
@@ -6702,9 +6757,13 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
         try:
             _snap_df = pd.read_csv(_snap_path_chk)
             if PRED_LOG_FILE.exists():
-                _pl_act = pd.read_csv(PRED_LOG_FILE)[['date', 'actual_price']].rename(columns={'date': 'forecast_date'})
+                _pl_act = (pd.read_csv(PRED_LOG_FILE)[['date', 'actual_price']]
+                           .rename(columns={'date': 'forecast_date'})
+                           .drop_duplicates('forecast_date'))  # backtest/live 중복 방지
                 _snap_df = _snap_df.merge(_pl_act, on='forecast_date', how='left')
-            _snap_known = _snap_df[_snap_df['actual_price'].notna()].copy()
+            _snap_known = (_snap_df[_snap_df['actual_price'].notna()]
+                           .sort_values('forecast_date')  # diff() 날짜 순서 보장
+                           .copy())
             _snap_known['abs_err'] = (_snap_known['actual_price'] - _snap_known['forecast_price']).abs()
             _snap_n = len(_snap_known)
             if _snap_n >= 5:

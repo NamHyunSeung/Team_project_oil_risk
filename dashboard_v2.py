@@ -215,6 +215,9 @@ def load_all():
     p_log = OUTPUT_DIR / 'prediction_log.csv'
     if p_log.exists():
         out['prediction_log'] = pd.read_csv(p_log).tail(1000).reset_index(drop=True)
+    p_snap = OUTPUT_DIR / 'forecast_snapshots.csv'
+    if p_snap.exists():
+        out['forecast_snapshots'] = pd.read_csv(p_snap)
     return out
 
 if not (OUTPUT_DIR / 'latest_risk_signal.csv').exists():
@@ -253,7 +256,7 @@ def _render_risk_hero(sig):
 def _render_key_metrics(sig):
     _surge_p  = float(sig.get('surge_prob_3d', 0.0))
     _ovx_val  = float(sig.get('ovx_level', 0) or 0)
-    _ovx_al   = str(sig.get('ovx_alarm', '')).lower() in ('true', '1', 'yes')
+    _ovx_al   = str(sig.get('ovx_alarm', 'NORMAL')).upper()  # 'HIGH'/'ELEVATED'/'NORMAL'
     _hedge    = float(sig.get('hedge_ratio', 0.0))
     _down     = float(sig.get('downside_risk_pct', 0.0))
     _up       = float(sig.get('upside_risk_pct', 0.0))
@@ -266,7 +269,8 @@ def _render_key_metrics(sig):
               f"{float(sig.get('momentum_5d', 0))*100:+.1f}% (5일)")
     c2.metric("OVX",
               f"{_ovx_val:.0f}",
-              "🔴 HIGH" if _ovx_al else ("🟡 MEDIUM" if _ovx_val > 40 else "🟢 LOW"))
+              "🔴 HIGH" if _ovx_al == 'HIGH' else ("🟡 ELEVATED" if _ovx_al == 'ELEVATED' else "🟢 NORMAL"),
+              help="원유 공포지수(CBOE OVX). 높을수록 시장 불안 → 예측 신뢰구간 자동 확대.\n🟢 NORMAL < 35 / 🟡 ELEVATED 35~45 / 🔴 HIGH ≥ 45")
     c3.metric("헤지 비율 권고", f"{_hedge*100:.0f}%")
     c4.metric("하방 / 상방 리스크", f"{_down:.0f}% / {_up:.0f}%")
     c5.metric("급등확률 3일", f"{_surge_p*100:.0f}%",
@@ -405,6 +409,9 @@ def _render_price_charts(data):
                     lambda r: f"${r['lower_75ci']:.0f}~${r['upper_75ci']:.0f}", axis=1
                 )
                 _show_cols.append('75% 구간')
+            if 'var_5pct' in fc.columns:
+                fc['VaR하한($)'] = fc['var_5pct']
+                _show_cols.append('VaR하한($)')
             if _is_admin:
                 for _ac in ['sarimax_forecast', 'xgb_forecast', 'var_forecast', 'bias_correction']:
                     if _ac in fc.columns and _ac not in _show_cols:
@@ -423,6 +430,10 @@ def _render_price_charts(data):
                 _ci_d1 = float(fc['upper_75ci'].iloc[0]) - float(fc['lower_75ci'].iloc[0])
                 _ci_d7 = float(fc['upper_75ci'].iloc[-1]) - float(fc['lower_75ci'].iloc[-1])
                 st.caption(f"75% 신뢰구간: D+1 ±${_ci_d1/2:.1f}  →  D+7 ±${_ci_d7/2:.1f}")
+            if 'var_5pct' in fc.columns and len(fc) > 0:
+                _var_loss_d1 = float(fc['forecast_price'].iloc[0]) - float(fc['var_5pct'].iloc[0])
+                _var_loss_d7 = float(fc['forecast_price'].iloc[-1]) - float(fc['var_5pct'].iloc[-1])
+                st.caption(f"📉 VaR(95%): D+1 최대 ${_var_loss_d1:.1f} 하락 위험  →  D+7 최대 ${_var_loss_d7:.1f}")
             if 'model_std' in fc.columns and not fc.empty and float(fc['model_std'].iloc[0]) >= 5:
                 st.warning(f"⚠️ 모델 간 예측 편차 ${fc['model_std'].iloc[0]:.1f} — 불확실성 높음")
             if 'reliable_forecast' in fc.columns and not fc['reliable_forecast'].astype(str).eq('True').all():
@@ -433,6 +444,96 @@ def _render_price_charts(data):
                                    key="fc_dl_admin")
         else:
             st.info("파이프라인 실행 후 표시됩니다.")
+
+
+def _render_snapshot_analysis(data):
+    """예측 vs 실제 차트 + 방향성 정확도 + 누적 MASE 추이"""
+    if 'forecast_snapshots' not in data or 'prediction_log' not in data:
+        return
+    try:
+        snap = data['forecast_snapshots'].copy()
+        pl   = data['prediction_log'][['date', 'actual_price']].rename(columns={'date': 'forecast_date'})
+        snap = snap.merge(pl, on='forecast_date', how='left')
+        known = snap[snap['actual_price'].notna()].copy().sort_values('forecast_date').reset_index(drop=True)
+    except Exception:
+        return
+    if len(known) < 5:
+        return
+
+    known['abs_err'] = (known['actual_price'] - known['forecast_price']).abs()
+    _mae   = known['abs_err'].mean()
+    _naive = known['actual_price'].diff().abs().dropna().mean()
+    _mase  = _mae / max(_naive, 1e-6)
+
+    known['actual_dir']   = known['actual_price'].diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    known['forecast_dir'] = (known['forecast_price'] - known['actual_price'].shift(1)).apply(
+                                lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    _dmask   = known['actual_dir'] != 0
+    _dir_acc = (known.loc[_dmask, 'actual_dir'] == known.loc[_dmask, 'forecast_dir']).mean() if _dmask.sum() > 0 else 0.0
+
+    st.markdown("**📊 예측 정확도 — 누적 분석**")
+    _sa1, _sa2, _sa3 = st.columns(3)
+    _sa1.metric("방향성 정확도", f"{_dir_acc*100:.0f}%", "상승/하락 방향")
+    _sa2.metric("MASE (전체)", f"{_mase:.3f}",
+                "HIGH" if _mase < 1.0 else ("MEDIUM" if _mase < 1.5 else "LOW"))
+    _sa3.metric("평균 오차 (MAE)", f"${_mae:.2f}", f"N={len(known)}")
+
+    # 예측 vs 실제 차트
+    fig_sa = go.Figure()
+    fig_sa.add_trace(go.Scatter(
+        x=known['forecast_date'], y=known['actual_price'],
+        mode='lines', name='실제가', line=dict(color='#58a6ff', width=2),
+        hovertemplate='%{x}<br>실제: $%{y:.2f}<extra></extra>',
+    ))
+    fig_sa.add_trace(go.Scatter(
+        x=known['forecast_date'], y=known['forecast_price'],
+        mode='lines+markers', name='예측가',
+        line=dict(color='#f0c040', width=1.5, dash='dot'),
+        marker=dict(size=4),
+        hovertemplate='%{x}<br>예측: $%{y:.2f}<extra></extra>',
+    ))
+    fig_sa.update_layout(
+        paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+        font=dict(color='#c9d1d9'), height=250,
+        legend=dict(bgcolor='rgba(22,27,34,0.85)', bordercolor='#30363d', font=dict(size=9),
+                    orientation='h', yanchor='bottom', y=1.02),
+        margin=dict(l=50, r=20, t=30, b=40),
+        xaxis=dict(gridcolor='#21262d', tickfont=dict(size=9)),
+        yaxis=dict(gridcolor='#21262d', tickfont=dict(size=9), title='WTI ($)'),
+        hovermode='x unified',
+    )
+    st.plotly_chart(fig_sa, use_container_width=True)
+
+    # 누적 MASE 추이 (30일 롤링)
+    if len(known) >= 30:
+        _rmase_vals, _rmase_dates = [], []
+        for _i in range(29, len(known)):
+            _w = known.iloc[_i-29:_i+1]
+            _wm = _w['abs_err'].mean()
+            _wn = _w['actual_price'].diff().abs().dropna().mean()
+            _rmase_vals.append(_wm / max(_wn, 1e-6))
+            _rmase_dates.append(known.iloc[_i]['forecast_date'])
+        fig_mase = go.Figure()
+        fig_mase.add_trace(go.Scatter(
+            x=_rmase_dates, y=_rmase_vals,
+            mode='lines', name='MASE (30일 롤링)',
+            line=dict(color='#79c0ff', width=2),
+            hovertemplate='%{x}<br>MASE: %{y:.3f}<extra></extra>',
+        ))
+        fig_mase.add_shape(type='line', xref='paper', x0=0, x1=1, y0=1.0, y1=1.0,
+                           line=dict(color='#e74c3c', dash='dash', width=1), opacity=0.7)
+        fig_mase.add_shape(type='line', xref='paper', x0=0, x1=1, y0=1.5, y1=1.5,
+                           line=dict(color='#f39c12', dash='dash', width=1), opacity=0.5)
+        fig_mase.update_layout(
+            paper_bgcolor='#161b22', plot_bgcolor='#1c2433',
+            font=dict(color='#c9d1d9'), height=200,
+            margin=dict(l=50, r=20, t=20, b=40),
+            xaxis=dict(gridcolor='#21262d', tickfont=dict(size=9)),
+            yaxis=dict(gridcolor='#21262d', tickfont=dict(size=9), title='MASE'),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_mase, use_container_width=True)
+        st.caption("빨간 점선: MASE=1.0 (naive 기준선) | 주황 점선: MASE=1.5 (LOW 임계)")
 
 
 def _render_alerts_news(data):
@@ -566,6 +667,11 @@ def render_user_page():
     # 4. 알람 + 뉴스 키워드
     _render_alerts_news(data)
 
+    st.markdown("---")
+
+    # 5. 예측 정확도 누적 분석
+    _render_snapshot_analysis(data)
+
     # 하단 업데이트 시각
     _meta_path = OUTPUT_DIR / 'run_meta.json'
     if _meta_path.exists():
@@ -626,7 +732,8 @@ def render_admin_page():
             _ovx    = float(sig.get('ovx_level', 0) or 0)
             m1, m2, m3, m4 = st.columns(4)
             _rel_clr = 'inverse' if _fc_rel == 'LOW' else ('off' if _fc_rel == 'MEDIUM' else 'normal')
-            m1.metric("forecast_reliability", _fc_rel)
+            m1.metric("forecast_reliability", _fc_rel,
+                      help="D+1 예측 vs 실제 가격 정확도(MASE 기준).\nHIGH = 나이브 예측보다 잘 맞음 / LOW = 나이브보다 못 맞음")
             _age_label = "🚨 즉시 재실행" if _m_age > 30 else ("⚠️ 재실행 권장" if _m_age > 7 else ("정상" if _m_age <= 1 else "주의"))
             _age_clr   = "inverse" if _m_age > 7 else "off"
             m2.metric("모델 나이", f"{_m_age}일",
@@ -634,8 +741,10 @@ def render_admin_page():
                       delta_color=_age_clr,
                       help="파이프라인 마지막 실행 경과일 — 0~1일: 정상 / 2~7일: 주의 / 8~30일: 재실행 권장 / 30일+: 즉시 재실행")
             m3.metric("OVX 레짐", f"{_ovx:.0f}",
-                      "HIGH" if _ovx >= 60 else ("MEDIUM" if _ovx >= 40 else "LOW"))
-            m4.metric("리스크 스코어", f"{float(sig.get('risk_score', 0)):.3f}")
+                      "HIGH" if _ovx >= 60 else ("MEDIUM" if _ovx >= 40 else "LOW"),
+                      help="원유 공포지수(CBOE OVX). 높을수록 시장 불안 → 예측 신뢰구간 자동 확대.\n🟢 NORMAL < 35 / 🟡 ELEVATED 35~45 / 🔴 HIGH ≥ 45")
+            m4.metric("리스크 스코어", f"{float(sig.get('risk_score', 0)):.3f}",
+                      help="변동성·뉴스·지정학·감성·OVX 5개 요소를 곱해 산출한 종합 위험도.\n2.2 이상이면 SURGE/DROP 위험 단계 진입.")
 
         # 앙상블 정보 (최근 로그에서 파싱)
         _log_path = OUTPUT_DIR / 'pipeline_run.log'
@@ -818,6 +927,9 @@ def render_admin_page():
                 yaxis=dict(gridcolor='#21262d', tickfont=dict(size=10)),
             )
             st.plotly_chart(fig_fi, use_container_width=True)
+
+        st.markdown("---")
+        _render_snapshot_analysis(data)
 
     # ── Tab3: 예측 오차
     with tab_error:
