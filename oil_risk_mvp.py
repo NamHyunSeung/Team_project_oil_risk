@@ -6786,7 +6786,7 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
         print(f"    {mark}  output/{fname}")
     print("─" * 65 + "\n")
 
-    _fire_and_forget(monitor_rss_alerts)
+    monitor_rss_alerts()
 
     return {
         'risk_signal':    risk_signal,
