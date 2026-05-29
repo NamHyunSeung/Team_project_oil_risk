@@ -5181,8 +5181,12 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
                 _needs_stk_err  = (pd.notna(row.get('actual_price'))
                                    and pd.isna(row.get('stacking_error'))
                                    and pd.notna(row.get('stacking_pred')))
-                if (_needs_actual or _needs_stk_err) and dt in price_src.index:
+                _needs_direction = (pd.notna(row.get('actual_price'))
+                                    and pd.isna(row.get('actual_direction')))
+                if (_needs_actual or _needs_stk_err or _needs_direction) and dt in price_src.index:
                     ap = float(price_src.loc[dt, 'WTI'])
+                    if not _needs_actual and pd.notna(row.get('actual_price')):
+                        ap = float(row['actual_price'])  # confirmed actual 우선 (rollover 오염 방지)
                     pp = float(row['sarimax_pred'])
                     av = float(feature_df.loc[dt, 'RV_5d']) if (dt in feature_df.index and 'RV_5d' in feature_df.columns) else np.nan
                     pv = float(row['xgb_pred_vol']) if pd.notna(row.get('xgb_pred_vol')) else np.nan
@@ -6625,7 +6629,7 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                     log.info(f"    성능 평가: v{MODEL_VERSION} 기준 {len(_curr_ver_rows)}건")
                 else:
                     log.info(f"    성능 평가: v{MODEL_VERSION} 샘플 부족({len(_curr_ver_rows)}건) → 전체 사용")
-            if len(_live_known) >= 10:
+            if len(_live_known) >= 5:
                 _live30 = _live_known.tail(30)
                 # σ-clip: 이상치(±2σ 초과) 제외 후 MAE 계산 (단발 급락/급등 오염 방지)
                 _abs_err = _live30['price_error'].abs()
