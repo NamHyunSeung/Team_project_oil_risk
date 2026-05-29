@@ -4291,10 +4291,13 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         log.warning(f"    ⚠ 스태킹 가중치 미미: {_wn}={_wv:.3f} < 0.05 "
                                     f"(해당 모델 기여 없음)")
 
-                # Stacking 채택 기준: SARIMAX는 Stacking 컴포넌트이므로 비교 대상 제외
-                # XGBoost-Return 대비 개선 여부만 확인 (SARIMAX와 비교하면 항상 불리)
-                _mae_curr = xr_info.get('mae', float('inf'))
-                if _mae_stack < _mae_curr:
+                # Stacking 채택 기준: 최고 단일 모델(SARIMAX) 기준
+                # MAE < SARIMAX MAE  OR  (R² > SARIMAX R² AND MAE < SARIMAX MAE × 1.05)
+                _mae_best = sx_info.get('mae', xr_info.get('mae', float('inf')))
+                _r2_best  = sx_info.get('r2', -float('inf'))
+                _stk_mae_ok    = _mae_stack < _mae_best
+                _stk_r2_relax  = (_r2_stack > _r2_best) and (_mae_stack < _mae_best * 1.05)
+                if _stk_mae_ok or _stk_r2_relax:
                     _base_name = '+'.join(_stack_names)
                     _stk_info = {
                         'stack_weights': _stack_weights, 'type': 'price',
@@ -4370,7 +4373,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     except Exception as _ece:
                         log.warning(f"    오차 보정 모델 실패({_ece})")
                 else:
-                    log.info(f"    Stacking 미채택 (MAE={_mae_stack:.4f} ≥ 현재 최저={_mae_curr:.4f})")
+                    log.info(f"    Stacking 미채택 (MAE={_mae_stack:.4f} ≥ SARIMAX {_mae_best:.4f}×1.05={_mae_best*1.05:.4f})")
                     results['stacking_rejected'] = {
                         'name': f'Stacking (+{"+".join(_stack_names)},미채택)',
                         'type': 'price',
