@@ -5143,28 +5143,25 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     _atomic_csv(fc_df, OUTPUT_DIR / 'forecast_7days.csv', index=False)
     log.info("    forecast_7days.csv 저장")
 
-    # ── 예측 스냅샷 누적 저장 (run_date별 7일 예측 append-only)
+    # ── D+1 예측 스냅샷 누적 저장 (run_date당 1행 append-only)
     try:
         _run_date_str = pd.Timestamp.today().strftime('%Y-%m-%d')
         _snap_path = OUTPUT_DIR / 'forecast_snapshots.csv'
-        _snap_rows = []
-        for _si, _sr in fc_df.iterrows():
-            _snap_rows.append({
-                'run_date':       _run_date_str,
-                'forecast_date':  str(_sr['date']),
-                'd_ahead':        int(_si) + 1,
-                'forecast_price': round(float(_sr['forecast_price']), 2),
-                'lower_75ci':     round(float(_sr['lower_75ci']), 2) if pd.notna(_sr.get('lower_75ci')) else None,
-                'upper_75ci':     round(float(_sr['upper_75ci']), 2) if pd.notna(_sr.get('upper_75ci')) else None,
-                'sarimax_pred':   round(float(_sr['sarimax_forecast']), 2) if pd.notna(_sr.get('sarimax_forecast')) else None,
-            })
-        _snap_new = pd.DataFrame(_snap_rows)
+        _d1 = fc_df.iloc[0]
+        _snap_row = pd.DataFrame([{
+            'run_date':       _run_date_str,
+            'forecast_date':  str(_d1['date']),
+            'forecast_price': round(float(_d1['forecast_price']), 2),
+            'lower_75ci':     round(float(_d1['lower_75ci']), 2) if pd.notna(_d1.get('lower_75ci')) else None,
+            'upper_75ci':     round(float(_d1['upper_75ci']), 2) if pd.notna(_d1.get('upper_75ci')) else None,
+            'sarimax_pred':   round(float(_d1['sarimax_forecast']), 2) if pd.notna(_d1.get('sarimax_forecast')) else None,
+        }])
         if _snap_path.exists():
             _snap_existing = pd.read_csv(_snap_path)
             _snap_existing = _snap_existing[_snap_existing['run_date'] != _run_date_str]
-            _snap_new = pd.concat([_snap_existing, _snap_new], ignore_index=True)
-        _atomic_csv(_snap_new, _snap_path, index=False)
-        log.info(f"    forecast_snapshots.csv 스냅샷 저장 (run={_run_date_str}, {len(_snap_rows)}행)")
+            _snap_row = pd.concat([_snap_existing, _snap_row], ignore_index=True)
+        _atomic_csv(_snap_row, _snap_path, index=False)
+        log.info(f"    forecast_snapshots.csv 저장 (run={_run_date_str} → {str(_d1['date'])} 예측={round(float(_d1['forecast_price']),2)})")
     except Exception as _se:
         log.warning(f"    스냅샷 저장 실패: {_se}")
 
