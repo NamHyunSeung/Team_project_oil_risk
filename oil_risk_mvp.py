@@ -4886,8 +4886,16 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         log.info(f"    ✅ Stacking 앙상블 적용: D+1={ensemble[0]:.2f} "
                  f"(D+2-7: {'SARIMAX 제외' if _sx_idx is not None else '전체 가중치'})")
     elif 'sarimax' in forecasts and 'xgb' in forecasts:
+        # stacking이 SARIMAX 대비 명시적으로 미채택된 경우 → SARIMAX 단독 사용
+        # (fallback 역MAE 앙상블은 XGB/VAR 노이즈로 오히려 악화)
+        _stk_rej = results.get('stacking_rejected', {})
+        _sx_mae_fb = results.get('sarimax', {}).get('mae', 999.0)
+        if _stk_rej and _stk_rej.get('mae', 999.0) > _sx_mae_fb:
+            ensemble = forecasts['sarimax'].copy()
+            log.info(f"    SARIMAX 단독 사용 (stacking 미채택, SARIMAX MAE={_sx_mae_fb:.4f} 최선) "
+                     f"→ D+1={ensemble[0]:.2f}")
         # VAR가 있으면 3모델 역MAE 가중 앙상블, 없으면 2모델
-        if 'var' in results:
+        elif 'var' in results:
             try:
                 _vr2   = results['var']
                 _vhist2 = feature_df[_vr2['cols']].dropna().asfreq('B', method='ffill').dropna()
