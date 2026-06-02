@@ -173,6 +173,11 @@ fetch_data() → fetch_news() → build_features()
 - HAR-Ridge가 XGBoost보다 일시적으로 hold-out 성능 우위
 - → 최종적으로 XGBoost-HAR 유지 (Optuna 튜닝 후 역전)
 
+### holdout 평가 복구 (`0201ff0`)
+
+- 이전 편집에서 실수로 삭제된 `rmse_ho`/`r2_ho` holdout 지표 재삽입
+- model_performance.csv hold-out 행 정상화
+
 ---
 
 ## Phase 6: 뉴스 감성 파이프라인 개선 (2026-05-13)
@@ -194,6 +199,12 @@ fetch_data() → fetch_news() → build_features()
 
 - 뉴스 감성 + OVX 변동성 + DXY momentum을 SARIMAX 외생변수로 추가
 - 동적 앙상블 가중치 스무딩: α=0.3 EMA
+
+### 워드클라우드 한국어 번역 (`d182d1f`, `2f1fb1f`, `9ddf2d6`)
+
+- 영문 키워드 → 한국어 번역 매핑 추가 (`d182d1f`)
+- 모든 키워드 한국어 커버리지 완성 (`2f1fb1f`)
+- england/industry/stop/thing/obituary 등 누락 카테고리 보완 + 대시보드 테이블 반영 (`9ddf2d6`)
 
 ---
 
@@ -337,6 +348,11 @@ fetch_data() → fetch_news() → build_features()
 - 기존: MAE + 방향성 복합 조건 → 수정: **MAE-only** 비교
 - actual_price_test 동일 기간 타겟 정렬 (threshold overfitting 수정)
 
+### har_vol_pred 피처 주입 롤백 (`07aae91`)
+
+- XGBoost-Return에 har_vol_pred(변동성 예측값) 피처 주입 실험 → 즉시 롤백
+- **결과**: MAE 3.79→3.96 악화, dir_acc 50%→45% 하락 → 노이즈 피처로 판단
+
 ---
 
 ## Phase 10: SENTIMENT_MAP 확장 + CEEMDAN (2026-05-20)
@@ -445,7 +461,7 @@ fetch_data() → fetch_news() → build_features()
 
 - streamlit-authenticator 기반 로그인 화면
 - PyInstaller OilRisk.spec으로 Windows EXE 빌드
-- 로그인 관련 버그 수정 5건 (`0e61ceb` ~ `8857acb`): TypeError, 세션 유지 문제, 중복 폼 표시
+- 로그인 관련 버그 수정 5건 (`0e61ceb`, `0f55520`, `94c5fed`, `8857acb`): TypeError, 세션 유지 문제, 중복 폼 표시
 
 ### 구독 플랜 관리 (`9a44f34`, `fd35e7e`)
 
@@ -477,6 +493,17 @@ fetch_data() → fetch_news() → build_features()
 - `--rss-alerts` CLI 플래그 추가: 별도 프로세스로 RSS 모니터링 실행
 - Windows Task Scheduler XML 기반 4시간 주기 자동 등록 기능
 - → Phase 15 (`72c315a`)에서 실제 50+ 소스 RSS 감지 기능 완성
+
+### 관리자/사용자 기능 보완 (`8d91ec5`, `a23c778`, `fa9434d`, `b04416f`, `4463899`, `5be50d6`)
+
+| 커밋 | 내용 |
+|------|------|
+| `8d91ec5` | Tab4 SyntaxError 수정 (고아 else 제거 + admin 블록 들여쓰기) |
+| `a23c778` | Tab2 리스크 레벨 히스토리 제거 |
+| `fa9434d` | 리스크 히스토리를 관리자 로그인 시 Tab2에 표시 |
+| `b04416f` | 이메일 알림 수정 + 관리자 탭 이메일 설정 UI |
+| `4463899` | 예측 신뢰구간 시각화 개선 + 로그인 버그 수정 |
+| `5be50d6` | 코드 최적화: 불필요 블록 제거 및 실행 속도 개선 |
 
 ---
 
@@ -599,6 +626,14 @@ SURGE_RISK 신호 감지 엔진: 4단계 단계적 개발
 - MASE(persistence 대비 상대 오차), MaxError 지표 추가
 - 전체 모델 성능을 persistence 대비로 가시화
 
+### 버그 수정 및 피처 개선 (`23f43a6`, `2452bfa`, `cde420b`)
+
+| 커밋 | 내용 |
+|------|------|
+| `23f43a6` | news_uncertainty SVM 주입 후보 추가 (컬럼 미생성 시 자동 필터링) |
+| `2452bfa` | feature_df→full_df 9곳, yfinance date+1, embedding dim 누출, wf_preds NaN 마스킹, gap_error 0나누기, AEC 재구성, CEEMDAN unlink, SMTP timeout, HAR_FEATURE_COLS 정리, ridge fallback 연결 (총 10건) |
+| `cde420b` | 대시보드 모델 성능 표시 정리 |
+
 ---
 
 ## Phase 14: 신뢰성 및 품질 강화 (2026-05-29 ~ 06-01)
@@ -660,6 +695,15 @@ SURGE_RISK 신호 감지 엔진: 4단계 단계적 개발
 - D+1만 기록, run_date당 1행으로 dedup 수정 (`3d38564`)
 - n=90 스냅샷 도달 시 MASE=0.606 산출 (D+1 기준) (`b450361`)
 - forecast_reliability: 스냅샷 수 기반 UNKNOWN → LOW → MEDIUM → HIGH
+
+### 버그 수정 (`474e34b`, `70817fe`, `22aee5e`, `5f13e15`)
+
+| 커밋 | 내용 |
+|------|------|
+| `474e34b` | EIA 실패 시 inv_surprise/inv_mom4_z 누락 버그 수정 |
+| `70817fe` | data_through를 full_df 기준으로 수정 (실제 최신 데이터 날짜 표시) |
+| `22aee5e` | SARIMAX 캐시키 MD5 해시, df_full ffill().bfill(), ExtSVM 행별 CEEMDAN |
+| `5f13e15` | Q10/Q90 dict kwargs TypeError, CEEMDAN 훈련 구간 데이터 누출, XGB-Cls blend 혼합 버그 수정 |
 
 ---
 
