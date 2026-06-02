@@ -315,6 +315,28 @@ fetch_data() → fetch_news() → build_features()
 - 크로스에셋(금·구리) + Mutual Information 독립 채널 실험
 - → `b41fca6`에서 XGB-Cls 블렌드 라이브 예측 미반영 버그 수정
 
+### MI 기반 피처 선택 (`450e44c`)
+
+- Mutual Information으로 XGBClassifier 방향성 피처 자동 평가
+- MI 낮은 피처 제외 → 노이즈 억제 + 과적합 방지
+
+### 분류기 임계값 최적화 실험 (`f40f473`, `bb2ee65`, `ccec2fc`)
+
+| 커밋 | 변경 | 결과 |
+|------|------|------|
+| `f40f473` | threshold 탐색 0.38~0.62 (고정 0.5 대신 그리드 탐색) | 최적값 탐색 |
+| `bb2ee65` | threshold 0.55로 상향 + horizon별 bias decay | 방향성 개선 기대 |
+| `ccec2fc` | **0.55→0.51 롤백** | MASE 0.97→1.02 회귀 방지 |
+
+- 임계값 상향으로 방향성 정확도 개선 기대했으나 가격 예측 MASE 악화
+- horizon별 bias decay: 장기(D+4~7) 예측 편향 점진적 감쇠
+- **결론**: threshold=0.51 확정
+
+### Stacking 채택 기준 수정 (`4c70a0f`)
+
+- 기존: MAE + 방향성 복합 조건 → 수정: **MAE-only** 비교
+- actual_price_test 동일 기간 타겟 정렬 (threshold overfitting 수정)
+
 ---
 
 ## Phase 10: SENTIMENT_MAP 확장 + CEEMDAN (2026-05-20)
@@ -402,6 +424,19 @@ fetch_data() → fetch_news() → build_features()
 - 수정: 7일 이상 오래된 경우 공식 URL에서 자동 다운로드
 - URL: `https://www.policyuncertainty.com/gpr.html` 직접 갱신
 
+### Session7 리스크 신호 인프라 (`296842f`)
+
+- CI 교정: 예측-실제 잔차 기반 신뢰구간 자동 캘리브레이션
+- Multi-step 평가: D+1~D+7 각 horizon별 독립 성능 추적
+- Rolling-30d 앙상블 가중치: 30일 롤링 기준 동적 재조정
+- direction filter: 임계 이하 방향 신호 제거 (false positive 억제)
+- futures_spread proxy: 선물 스프레드 → 시장 방향 보조 신호 활용
+
+### EMA 앙상블 가중치 스무딩 (`e2f209a`)
+
+- live stacking 예측에 EMA(α=0.3) 가중치 스무딩 적용
+- 단기 오차 급변 시 앙상블 가중치 과민 반응 억제
+
 ---
 
 ## Phase 12: 운영 기능 확장 (2026-05-21~25)
@@ -431,6 +466,17 @@ fetch_data() → fetch_news() → build_features()
 - 천연가스(NG=F), RBOB 가솔린 모멘텀
 - 3-2-1 크랙 스프레드 (HO/WTI 비율)
 - EIA 재고 서프라이즈 (`inv_surprise`) + 4주 모멘텀 z-score (`inv_mom4_z`)
+
+### Walk-forward CV 보고 지표 강화 (`059a026`)
+
+- Walk-forward fold별 성능 지표(MAE/MASE/dir_acc) 전체 보고 추가
+- Quantile XGBoost(Q10/Q90) 후보 평가 — 이후 Phase 13에서 채택
+
+### RSS 경보 스케줄러 CLI (`f48e621`)
+
+- `--rss-alerts` CLI 플래그 추가: 별도 프로세스로 RSS 모니터링 실행
+- Windows Task Scheduler XML 기반 4시간 주기 자동 등록 기능
+- → Phase 15 (`72c315a`)에서 실제 50+ 소스 RSS 감지 기능 완성
 
 ---
 
@@ -512,6 +558,47 @@ fetch_data() → fetch_news() → build_features()
 - FEATURE_COLS에서 완전 중복(Pearson r > 0.98) 피처 8개 제거
 - 이후 Phase 16 다중공선성 제거(G안)의 전처리 단계
 
+### Surge detector 단계별 개발 (`812a7ca`, `600ba58`, `fed6730`, `351e7a9`)
+
+SURGE_RISK 신호 감지 엔진: 4단계 단계적 개발
+
+| 커밋 | 변경 | 핵심 지표 |
+|------|------|-----------|
+| `812a7ca` | additive surge detector 최초 도입 (OVX+momentum+news 합산) | recall=13.5% |
+| `600ba58` | threshold 5%, recall 임계 0.30 적용 | recall **13.5%→70.4%** |
+| `fed6730` | OVX gate 추가 (낮은 OVX 구간 surge 억제), hedge_ratio 산출 시작 | 오탐 방지 |
+| `351e7a9` | temporal filter + OVX calm CI reduction | 연속 오탐 억제 |
+
+- MASE 0.8127 유지: surge recall 대폭 개선에도 가격 예측 열화 없음
+
+### Session8 EIA lag 교정 중간 단계 (`f1595f1`)
+
+- EIA 재고 발표 lag 교정: 발표 후 +3 거래일 시프트 (중간 단계)
+- look-ahead audit log 추가: 잠재 데이터 누출 지점 전수 기록
+- → Phase 15에서 `shift(1)`로 최종 단축 (EIA_SHIFT=1)
+
+### SARIMAX residual correction 기준 개선 (`14f6f63`)
+
+- 잔차 교정 채택 기준: R² → **MAE 기준**으로 변경 (더 직접적인 예측 오차 지표)
+- bias regime reset: 레짐 전환 감지 시 누적 bias 초기화
+- HAR overfit_gap: fold 모델 vs 최종 모델 동일 기준 비교 정렬
+
+### Prophet benchmark_only 정렬 (`fdd539e`)
+
+- Phase 13 도입 후 Prophet `benchmark_only` 모드 첫 실행 오류 수정
+- HAR 최종 모델 파라미터를 fold 모델과 동기화
+
+### Temporal decay half-life 단축 (`1d616a6`)
+
+- 앙상블 시간 감쇠(temporal decay) half-life 단축
+- 목적: 레짐 전환 시 빠른 가중치 적응 (2026 고변동 구간 대응)
+
+### Naive persistence baseline 추가 (`274125e`)
+
+- model_performance.csv에 naive persistence baseline 행 추가
+- MASE(persistence 대비 상대 오차), MaxError 지표 추가
+- 전체 모델 성능을 persistence 대비로 가시화
+
 ---
 
 ## Phase 14: 신뢰성 및 품질 강화 (2026-05-29 ~ 06-01)
@@ -537,6 +624,11 @@ fetch_data() → fetch_news() → build_features()
 - Multi-window MAE: 전체/60일/45일 성능 분리 보고
 - 라이브 MASE 모니터링 (`c12ff30`): backtest MAE 1.5배 초과 시 경고
 - 예측 이상 감지: D+1이 spot 대비 ±30% 초과 시 경고
+- Atomic CSV writes: temp파일 기록 후 rename (54161a4) — 파이프라인 중단 시 부분 기록 방지
+- yfinance 데이터 staleness 검사: 최신 데이터가 >2 거래일 지연 시 경고 (`7a8d982`)
+- stacking 가중치 이상 감지 로깅: 가중치 급변 시 경고 기록 (`93536f9`)
+- meta-learner 최소 샘플 guard: 40 → **60**으로 상향 (`b35f71e`) — 불안정 가중치 방지
+- SARIMAX 캐시 키에 exog 컬럼 목록 포함 (`075594c`) — 피처 변경 시 스테일 캐시 재사용 방지
 
 ### MASE 기반 자동 재훈련 (`c12ff30`, `d4908ce`)
 
@@ -607,6 +699,17 @@ fetch_data() → fetch_news() → build_features()
 - **이전**: `shift(3)` → 3거래일 후 반영
 - **수정**: `shift(1)` → 다음 거래일 즉시 반영
 - EIA_SHIFT=1: 목요일 발표 당일 반영으로 신호 적시성 향상
+
+### Event-conditional direction thresholds (`294c611`)
+
+- OPEC 회의 / EIA 발표 / jump_flag 활성 시 방향성 임계값 동적 변경
+- 이벤트 종류별 threshold 조정 테이블:
+  | 이벤트 | threshold 변경 | 목적 |
+  |--------|---------------|------|
+  | OPEC 긴급회의 감지 | 완화 (더 낮은 신뢰도 허용) | 공급 충격 방향 신호 민감도 ↑ |
+  | EIA 발표일 | 유지 (기본값) | 재고 발표 전후 중립 유지 |
+  | jump_flag 활성 | 강화 (높은 신뢰도 요구) | 급변 시 오탐 방지 |
+- 방향 신호 품질 개선: 이벤트 없는 구간과 이벤트 구간 임계값 분리
 
 ---
 
@@ -700,4 +803,5 @@ fetch_data() → fetch_news() → build_features()
 | SARIMAX 3년 window (1차, Phase 7) | R² 0.756→0.724 악화 (고변동 레짐 데이터 미포함) |
 | EIA 제품 재고 + CFTC COT + 크랙 스프레드 | 데이터 수집 불안정, 기존 피처와 중복 |
 | News-Sentiment XGBoost D4 | `11edc9c` 미사용 모델 정리 시 제거 |
+| 분류기 임계값 0.55 (`bb2ee65`) | MASE 0.97→1.02 회귀, 0.51로 복구 (`ccec2fc`) |
 | Pseudo-Huber 손실 | *채택* (MAE 3.637→3.596 개선) |
