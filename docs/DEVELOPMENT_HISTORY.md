@@ -80,28 +80,35 @@ fetch_data() → fetch_news() → build_features()
 - gap-fill 로직: actual_price 미수신 시 full_df에서 소급 채움
 - backtest / live 구분 필드 추가
 
+### SARIMAX live forecast 버그 수정 (`f14a07c`)
+
+- **버그**: SARIMAX가 train-only 모델로 라이브 예측 → 최근 데이터 반영 안 됨
+- **수정**: full-data 모델(훈련+라이브 구간 포함)로 forecast 수행
+- 이후 예측값이 최신 가격 레벨에 훨씬 근접
+
 ### Live 오차 피드백 루프 (`72f1161`)
 
 - **Bias 교정 (A)**: 직전 5일 live 오차 평균으로 SARIMAX 예측 보정
 - **Live-aware 앙상블 가중치 (B)**: live 오차 누적되면 가중치 동적 조정
-- → 이후 지속 개선됨 (Phase 12에서 최종 수정)
+- → 이후 Phase 16에서 최종 수정 (live tail 5일 median 방식으로 개선)
 
 ### FRED WTI fallback (`f91f8a0`)
 
 - yfinance rollover 시 CL=F 값이 튀는 문제 발생 (2026-05-06/08)
 - FRED DCOILWTICO로 90일 이내 이상치 패치
+- Brent FRED 검증 + API 상태 추적 대시보드 표시 (`5d7a703`)
 
 ### 이메일 알림 + 로그 로테이션 (`e172fad`)
 
 - SMTP (Gmail) 이메일 알림: SURGE_RISK / DROP_RISK 발생 시 자동 전송
 - 로그 파일 5MB 초과 시 `.bak`으로 자동 로테이션
 
-### 대시보드 초기 기능 (`f87039b`)
+### 대시보드 초기 기능 + 한국어화 (`f87039b`, `28bd3fc` ~ `7689611`)
 
 - 한글 폰트 (Malgun Gothic)
-- 피처 중요도 차트
-- 5분 자동 새로고침
-- EIA API 상태 표시
+- 피처 중요도 차트, 5분 자동 새로고침, EIA API 상태 표시
+- 한국어 키워드 번역 사전 구축 (300+ 단어): wordcloud 한국어 표시
+- 워드클라우드 제목·범례 한국어화
 
 ---
 
@@ -110,13 +117,14 @@ fetch_data() → fetch_news() → build_features()
 ### Prophet 추가 (`3690106`, `ec18ba7`)
 
 - 트렌드 + 계절성 분해 모델로 D+1~D+7 앙상블에 편입 시도
+- 모델 브레이크다운 + 컨센서스 표시 추가
 
 ### Prophet 제거 (`fae30a0`)
 
 - **결과**: R² = -4.3 → 완전 실패
 - **원인**: 유가는 트렌드+계절성 구조가 아닌 충격(jump) 기반 시계열
   - 2020 마이너스 유가, 2022 러시아 침공, 2026 관세 충격 등 극단값 대응 불가
-- **결정**: Prophet 영구 제거. 이후 Prophet은 `benchmark_only` 모드로만 유지
+- **결정**: Prophet 영구 제거. 이후 `benchmark_only` 모드(CatBoost/Prophet monitoring)로만 유지
 
 ---
 
@@ -127,7 +135,7 @@ fetch_data() → fetch_news() → build_features()
 - 문제: XGBoost와 SARIMAX를 동일 window(10년)로 훈련 → 각 모델 특성 미반영
 - **XGBoost**: 10년 데이터 + 지수감쇠 가중치 (최근 레짐 집중)
 - **SARIMAX**: 5년 데이터 (중장기 트렌드 + 계절성)
-- Bias 교정 임계값: |error| > 3 → > 2로 강화
+- Bias 교정 임계값: |error| > 3 → > 2로 강화 (`85038a4`)
 
 ### XGBoost-Return 모델 (`0e90396`)
 
@@ -143,15 +151,16 @@ fetch_data() → fetch_news() → build_features()
 
 - XGBoost-HAR: train R²=0.80, hold-out R²=0.37 → overfit_gap = 0.44
 - 원인: FEATURE_COLS(100+개)를 그대로 변동성 예측에 투입
+- overfit_gap 컬럼 `model_performance.csv`에 추가 (`c0b4c0f`)
 
 ### 변동성 모델 실험 4종 (`5d240e0`, `1466c3e`, `3d394fb`)
 
 | 실험 | 내용 | 결과 |
 |------|------|------|
 | A | GARCH(1,1) 레버리지 효과 | 보조 지표로 활용 |
-| B | Parkinson 범위 변동성 추가 | 다중공선성 유발 → 이후 제거 |
-| C | EWMA 변동성 (λ=10/21/63) | 다중공선성 유발 → 이후 제거 |
-| D | Intraday RV(1h) + VIX3M + SKEW | 데이터 수집 불안정 |
+| B | Parkinson 범위 변동성 추가 | 다중공선성 유발 → Phase 16에서 제거 |
+| C | EWMA 변동성 (λ=10/21/63) | 다중공선성 유발 → Phase 16에서 제거 |
+| D | Intraday RV(1h) + VIX3M + SKEW | 데이터 수집 불안정 → Phase 16에서 제거 |
 
 ### HAR 전용 피처셋 도입 (`f2df09a`)
 
@@ -171,7 +180,7 @@ fetch_data() → fetch_news() → build_features()
 ### 감성 분석 다층 구조 (`0824403`)
 
 - **TextBlob**: 기본 영문 감성
-- **SENTIMENT_MAP**: 유가 도메인 전용 어휘 (Loughran-McDonald 기반, 300+ 단어)
+- **SENTIMENT_MAP**: 유가 도메인 전용 어휘 (초기 버전)
 - **PHRASE_SENTIMENT**: 복합 표현 처리 ("supply cut" → +0.6 등)
 - **INTENSIFIERS**: 강조어 (significantly, sharply 등) 가중치
 
@@ -190,11 +199,12 @@ fetch_data() → fetch_news() → build_features()
 
 ## Phase 7: SARIMAX 파라미터 실험 (2026-05-14)
 
-### 훈련 윈도우 축소 실험 (`866b752`)
+### 훈련 윈도우 축소 실험 1차 (`866b752`)
 
 - SARIMAX_YEARS: 5 → 3 테스트
 - **결과**: R² 0.756 → 0.724 (악화)
 - **롤백** (`256e325`): SARIMAX_YEARS=5 복구
+- → 이후 Phase 14에서 3년으로 재전환 시 성공 (고변동 레짐 데이터 포함 여부가 핵심)
 
 ### Optuna 하이퍼파라미터 최적화 (`638f2a4`)
 
@@ -228,6 +238,11 @@ fetch_data() → fetch_news() → build_features()
 - WTI 가격 방향(UP/DOWN) 라벨로 FinBERT 파인튜닝 시도
 - **문제**: 학습 데이터 부족 + 훈련 시간 과도 (일일 실행 불가)
 
+### XGBoost-Return 2-pass 피처 선택 (`224ceb2`)
+
+- 누적 중요도 90% 또는 상위 25개로 피처 자동 선택
+- 이후 XGBoost-Classifier로 전환 시에도 동일 방식 유지
+
 ### 최종 FinBERT 채택 형태
 
 - 뉴스 헤드라인 감성 점수 보조 입력으로만 사용
@@ -235,7 +250,12 @@ fetch_data() → fetch_news() → build_features()
 
 ---
 
-## Phase 9: 방향성 예측 개선 라운드 (2026-05-16~18)
+## Phase 9: 방향성 예측 개선 라운드 (2026-05-16~19)
+
+### 성능 개선 실험 5종 (`9dcb07c`) → 전체 롤백
+
+- Ridge-TW 동적 앙상블 도입 직후 5가지 동시 실험
+- **결과**: 전체 성능 열화 → 일괄 롤백
 
 ### Oil Event 라이브러리 (`97b749e`, `490183d`)
 
@@ -246,7 +266,7 @@ fetch_data() → fetch_news() → build_features()
 
 - Managed Money 롱/숏 포지션 비율을 방향성 피처로 시도
 - **문제**: 주간 데이터라 일일 예측에 lag 발생 → 즉시 롤백
-- → 이후 CFTC CoT는 raw 피처로만 포함 (신호 생성 아님)
+- → 이후 CFTC CoT는 raw 피처로만 포함, Phase 13에서 auto-download 구현
 
 ### 방향성 타깃 변환 실험 (`fa65c85`) → 롤백 (`123a4bf`)
 
@@ -272,11 +292,38 @@ fetch_data() → fetch_news() → build_features()
 
 - GRU-Attention, CNN1D 방향성 분류기 실험
 - **문제**: 훈련 시간 10분+ → 일일 파이프라인 5분 목표와 충돌
-- **결정**: 제거
+- 캔들스틱 패턴 / 웨이블릿 / 거래량 프로파일 / PCA 차원 축소 실험 정리
+- **결정**: 전체 제거
+
+### BiLSTM 조건부 앙상블 + SVM C 그리드 서치 (`933a4e2`)
+
+- 감성 재매핑(news_sentiment → 도메인 분류 기반 재산출)
+- BiLSTM 조건부 앙상블: 고변동성 레짐에서 BiLSTM 가중치 상향
+- SVM C 파라미터 그리드 서치 자동화
+- → 이후 `11edc9c` 미사용 코드 정리 시 BiLSTM 제거 (운영 복잡도 증가 대비 개선 미미)
+
+### Pseudo-Huber 손실 적용 (`104326b`)
+
+- XGBoost Stacking 메타러너에 Pseudo-Huber 손실 적용
+- **결과**: Stacking MAE 3.637 → **3.596** (채택)
+- 이유: 극단 오차에 대한 민감도 줄이면서 L2 손실 특성 유지
+
+### XGB-Cls blend + 역변동성 가중치 (`8d755d9`)
+
+- XGBoost 분류기 blend ratio 도입 (soft probability 혼합)
+- 역변동성(1/vol_5d) 가중치로 저변동 구간 예측에 집중
+- 크로스에셋(금·구리) + Mutual Information 독립 채널 실험
+- → `b41fca6`에서 XGB-Cls 블렌드 라이브 예측 미반영 버그 수정
 
 ---
 
-## Phase 10: CEEMDAN 신호 분해 (2026-05-19)
+## Phase 10: SENTIMENT_MAP 확장 + CEEMDAN (2026-05-20)
+
+### SENTIMENT_MAP 유가 도메인 어휘 확장 (`53e2bf1`)
+
+- Loughran-McDonald 금융 어휘 기반 유가 특화 재매핑
+- 총 500+ 단어: "crude draw" → +0.8, "refinery outage" → +0.6 등
+- 유가 방향에 반하는 금융 감성 어휘 역전 처리
 
 ### CEEMDAN 피처 추가 (`6ace118`, `9cd33ea`)
 
@@ -289,9 +336,24 @@ fetch_data() → fetch_news() → build_features()
 - Windows에서 CEEMDAN `parallel=True` 시 멀티프로세싱 deadlock
 - `parallel=False`로 수정
 
+### SVM 세부 피처 주입 실험 (`afddb30` ~ `b8235d8`)
+
+단계적으로 SVM 전용 피처를 추가하며 walk-forward 방향성 정확도 개선:
+
+| 커밋 | 추가 피처 | WF dir_acc |
+|------|----------|-----------|
+| `afddb30` | supply_event_score, demand_event_score, geo_event_score | 53.9% |
+| `d5dc3eb` | news_uncertainty (뉴스 불확실성 점수) | 54.1% |
+| `d097f31` | 지수감쇠 샘플 가중치 (최근 레짐 집중) | 53.1% (일시 악화) |
+| `dbed0eb` | Dead-zone 레이블 필터링 (FLAT 구간 제외) | 53.9% |
+| `b8235d8` | VRP(ovx_rv_spread, 변동성 위험 프리미엄) | **54.2%** |
+
+- 최종 SVM WF dir_acc = 54.2% (채택)
+- WF 5폴드 방향성 평가 상시 추가 (`828ad0e`)
+
 ---
 
-## Phase 11: 스태킹 앙상블 + LightGBM (2026-05-20)
+## Phase 11: 스태킹 앙상블 + LightGBM (2026-05-21)
 
 ### LightGBM 베이스 모델 추가 (`31a9df4`)
 
@@ -301,14 +363,44 @@ fetch_data() → fetch_news() → build_features()
 ### Stacking 메타러너 (`c156900`)
 
 - Ridge 메타러너: SARIMAX + XGBoost + VAR → 최종 예측
-- Walk-forward adaptive meta-learner 추가 (후속 커밋)
-- 최종 WF-Adapt Stacking MASE = 0.7135
+- Walk-forward adaptive meta-learner 추가 (`9b6d19d`)
+- Stacking 채택 조건 개선: 비교 기준 XGBoost → SARIMAX MAE로 수정 (`03541f7`, `eab2098`)
+
+### Stacking WF-Adapt 성능 개선 과정
+
+| 변경 | Stacking MAE |
+|------|-------------|
+| 초기 Stacking | ~3.725 |
+| Pseudo-Huber 손실 (`104326b`) | 3.596 |
+| 뉴스 감성 모델 4가지 개선 (`39513cb`) | 3.691 → 3.596 |
+| WF-Adapt split 45/45→30/60 (`1a65c0d`) | 2.630 → **2.536** (+3.5%) |
+| inv_mom4_z SARIMAX exog (`25e4231`) | 2.536 → 2.532 |
+| gold/copper ratio z-scores (`1e09d94`) | 2.532 → **2.482** |
+| 최종 WF-Adapt Stacking MASE | 0.7135 |
 
 ### Stacking 미채택 결정
 
 - **SARIMAX(0,1,0) 단독 MASE = 0.602 < Stacking MASE = 0.7135**
 - Stacking 추가 복잡도 대비 성능 열위 → 비교 지표로만 유지
 - Stacking 채택 조건: Stacking MAE < SARIMAX MAE × 0.97 (롤링 30일 기준)
+
+### 파이프라인 실행 시간 최적화 (`ba398c7`, `e58d679`)
+
+- 목표: 일일 파이프라인 < 5분
+- 최적화 내용: SVM 캐시, CEEMDAN 캐시, Optuna 캐시 조건부 재사용
+- 6개 캐시 최적화 → 5분 이내 달성 (`d891895`)
+
+### 방향성 모델 선택 기준 개선 (`9b0e556`)
+
+- 기존: in-sample dir_acc 기준으로 Classifier-adj 선택
+- 수정: walk-forward dir_acc(wf_dir_acc) 기준으로 선택
+- 이유: in-sample 과적합 방지
+
+### GPR 파일 자동 갱신 (`ca4fd50`)
+
+- 기존: `data/data_gpr_daily_recent.xls` 수동 다운로드 필요
+- 수정: 7일 이상 오래된 경우 공식 URL에서 자동 다운로드
+- URL: `https://www.policyuncertainty.com/gpr.html` 직접 갱신
 
 ---
 
@@ -318,7 +410,12 @@ fetch_data() → fetch_news() → build_features()
 
 - streamlit-authenticator 기반 로그인 화면
 - PyInstaller OilRisk.spec으로 Windows EXE 빌드
-- 로그인 관련 버그 수정 5건 (`0e61ceb` ~ `8857acb`)
+- 로그인 관련 버그 수정 5건 (`0e61ceb` ~ `8857acb`): TypeError, 세션 유지 문제, 중복 폼 표시
+
+### 구독 플랜 관리 (`9a44f34`, `fd35e7e`)
+
+- 로그인 화면 구독 플랜 안내 추가
+- Pro 단일 플랜으로 단순화
 
 ### 관리자 탭 (`fda8eff`, `cda52e8`, `719229b`)
 
@@ -343,39 +440,103 @@ fetch_data() → fetch_news() → build_features()
 
 - VAR(9): WTI + Brent + DXY + VIX → OVX 추가 (`9a4ff41`)
 - MASE = 0.9998 (Persistence 수준) → 비교 지표로만 사용
-
-### ETS(HW-Damped) 추가 (`3ac36d4`)
-
-- Holt-Winters Damped Exponential Smoothing
-- MASE = 1.0 (Persistence 동급) → 비교 지표로만 사용
-
-### Quantile XGBoost (`89910e0`)
-
-- Q10/Q90 예측으로 신뢰구간 시각화
-- 이후 75% CI 방식으로 통합
+- VAR fallback 로직: VAR 실패 시 SARIMAX 단독 사용 (`0a90f35`)
 
 ### Ridge-TW 동적 앙상블 (`ad944c6`)
 
 - Temporal Weighting Ridge: 최근 오차에 지수감쇠 가중치
 - Walk-forward 30일 rolling 앙상블 가중치
 
+### Multi-step Direct SARIMAX (`3ac36d4`)
+
+- D+2~D+7을 각각 별도 모델로 직접 예측 (Direct 방식)
+- 기존 recursive 예측 대비 중장기 오차 누적 감소
+- Optuna 재튜닝 + XGB 슬라이딩 윈도우도 동시 적용
+
+### ETS(HW-Damped) 추가 (`3ac36d4`)
+
+- Holt-Winters Damped Exponential Smoothing
+- MASE = 1.0 (Persistence 동급) → 비교 지표로만 사용
+- GARCH 1-step 평가도 추가 (단기 변동성 기준선)
+
+### Quantile XGBoost (`89910e0`)
+
+- Q10/Q90 예측으로 신뢰구간 시각화
+- 이후 75% CI 방식으로 통합
+
+### News-Sentiment XGBoost D4 → 정리 (`ab55dac`, `39513cb`, `11edc9c`)
+
+- News-Sentiment XGBoost 베이스 모델 D4 추가: Stacking MAE 3.725→3.691
+- 4가지 뉴스 감성 개선 실험으로 일부 개선
+- → `11edc9c` 미사용 코드/피처/모델 정리 시 제거 (독립 모델로서 한계)
+
+### CatBoost/Prophet monitoring 모델 (`9730ac2`)
+
+- CatBoost + Prophet을 `benchmark_only` 모드로 재도입
+- 목적: 메인 앙상블 성능 비교 기준선, regime 가중치 보조
+- 스태킹 임계값 강화: tree-based stacking 채택 기준 조정
+
+### OPEC meeting calendar + EIA direct-download (`0cf05f1`)
+
+- OPEC 정기/긴급 회의 일정 캘린더 피처: `opec_meeting_flag`, `opec_days_to_next`
+- EIA API 실패 시 EIA 공식 사이트 직접 다운로드 fallback
+
+### DXY + gold/copper 거시 피처 강화 (`1b6a249`, `1e09d94`)
+
+- DXY 장기 모멘텀 (60/120일) SARIMAX exog 추가
+- Optuna 하이퍼파라미터 재탐색 (stale 캐시 초기화)
+- 금/구리 비율 z-score SARIMAX exog 추가 (`1e09d94`): Stacking MAE 2.532→2.482
+
+### OPEC + EIA 신호 NEWS_FEATS 통합 (`af80bc9`)
+
+- OPEC 캘린더 + EIA 재고 신호를 NEWS_FEATS 채널로 통합
+- 뉴스 피처와 거시 피처의 독립적 앙상블 경로 분리
+
+### CFTC COT auto-download (`7807609`)
+
+- `fetch_cot()` 함수: CFTC 공식 사이트에서 annual.txt 자동 다운로드
+- 기존 수동 관리(`data/annualof.txt`) → 자동화
+
+### Backtest window 확장 (`ddb7a86`)
+
+- backtest 기간: 60일 → **90일**로 확장
+- 더 긴 평가 구간으로 계절성/레짐 변화 포함
+
+### EIA 제품 재고 + 크랙 스프레드 피처 추가 → 롤백 (`3c1cbab`, `398fc99`, `b2797e8`)
+
+- EIA 휘발유·정제유 재고, CFTC COT, HO=F 3-2-1 크랙 스프레드 피처 추가
+- **롤백 이유**: 데이터 수집 불안정 + 기존 크랙 스프레드와 중복 → 복잡도 증가 대비 개선 미미
+
+### 완전 중복 피처 8개 제거 (`f2dd965`)
+
+- FEATURE_COLS에서 완전 중복(Pearson r > 0.98) 피처 8개 제거
+- 이후 Phase 16 다중공선성 제거(G안)의 전처리 단계
+
 ---
 
 ## Phase 14: 신뢰성 및 품질 강화 (2026-05-29 ~ 06-01)
 
-### 데이터 누출 수정 2라운드 (`0cbb12b`, `1837d3d`)
+### 데이터 누출 수정 2라운드 (`5613f7a`, `0cbb12b`, `1837d3d`, `52c9081`)
 
-- EIA 재고 서프라이즈 자기참조 누출 수정
-- classify_risk 분위수 누출 수정
+- EIA 재고 서프라이즈 자기참조 누출 수정 (look-ahead 2건)
+- classify_risk 분위수 누출 수정 (전체 데이터 분위수 → 훈련 구간 분위수)
 - Winsorization + Regime 라벨 누출 수정
+- 총 데이터 누출 수정: 4건 (2라운드)
+
+### CI live recalibration (`40112f5`, `521da58`)
+
+- prediction_log의 stacking_error 기반 CI 자동 보정
+- live 오차 분포에 따라 75% CI 실시간 확장/축소
+- `521da58`: live-type 오차만 사용, stacking_error 컬럼 채움
+- `5e8986d`, `c9c61c9`: stacking_error 소급 backfill
 
 ### 모니터링 체계 구축
 
-- 피처 드리프트 감지: 훈련 p01/p99 저장 → live OOD 경고 (`fd49854`)
-- CI 보정 추적: 75% 신뢰구간 실제 커버리지 모니터링 (`c84afce`)
-- Multi-window MAE: 전체/60일/45일 성능 분리 보고 (`a35f9f1`)
-- 라이브 MASE 모니터링: backtest MAE 1.5배 초과 시 경고 (`959c3be`)
-- 예측 이상 감지: D+1이 spot 대비 ±30% 초과 시 경고 (`b814b61`)
+- 피처 드리프트 감지: 훈련 p01/p99 저장 → live OOD 경고
+- CI 보정 추적: 75% 신뢰구간 실제 커버리지 모니터링
+- Multi-window MAE: 전체/60일/45일 성능 분리 보고
+- 라이브 MASE 모니터링 (`c12ff30`): backtest MAE 1.5배 초과 시 경고
+- 예측 이상 감지: D+1이 spot 대비 ±30% 초과 시 경고
 
 ### MASE 기반 자동 재훈련 (`c12ff30`, `d4908ce`)
 
@@ -384,12 +545,19 @@ fetch_data() → fetch_news() → build_features()
 - 조건 충족 시 Optuna/SVM/GARCH 캐시 전체 초기화
 - OVX 수준별 임계값 동적 조정: OVX≥60 → 2.0, OVX≥40 → 1.7
 
-### SARIMAX 최종 파라미터 확정
+### SARIMAX 최종 파라미터 확정 (`036a856`)
 
 - SARIMAX(0,1,0): 랜덤워크+드리프트
   - (2,1,1)에서 변경: 고변동 레짐에서 AR/MA 항이 오히려 노이즈 유발
-- SARIMAX_WINDOW_YEARS = 3: 최근 레짐 집중 (5년 대비 고변동 구간 대응 우수)
+- SARIMAX_WINDOW_YEARS = 3: 최근 레짐 집중 (5년 대비 2026 관세 충격 구간 집중)
+  - 1차 실험(Phase 7)에서 실패했던 3년이 이번엔 성공: 훈련 데이터에 2026 고변동 레짐 포함
 - MASE = **0.602** 확정
+
+### D+2-7 예측 개선 (`036a856`, `062ea64`)
+
+- D+2-7: SARIMAX flat forecast (동일값 반복) 제외 → persistence blend 적용
+- D+2-7 momentum bias 추가 (`9881ff7`): 방향 신호 기반 drift 보정
+- **결과**: D+2-7 예측 방향성 개선, flat forecast 문제 해소
 
 ### forecast_snapshots.csv + 예측 신뢰도 (`3b38636`, `b450361`)
 
@@ -401,11 +569,31 @@ fetch_data() → fetch_news() → build_features()
 
 ## Phase 15: 리스크 신호 고도화 (2026-06-01~02)
 
+### VaR + OVX alarm + hedge_ratio (`f2cf98b`)
+
+- var_5pct / var_95pct: 5%/95% Value at Risk
+- OVX alarm: HIGH(≥50), EXTREME(≥70)
+- hedge_ratio: OVX + vol_5d 기반 헤지 비율 권고
+- asymmetric risk ratio: downside/upside_risk_pct 비대칭 리스크
+
+### surge_prob_3d + Surge detector
+
+- 3일 급등 확률 계산
+- OVX gate + temporal filter로 오탐 방지
+- momentum bias D+2-7 연동 (`9881ff7`)
+
+### CI + momentum bias 개선 (`804008d`, `71c1a05`)
+
+- CI tail coverage 실제 커버리지 추적
+- hedge_ratio 강건성 개선
+- momentum bias 과보정 방지 (deceleration scaling, `670d3d0`)
+
 ### Black Swan 탄력성 (`c48d179`, `c2cb2fb`)
 
 - 관세 관련 키워드(tariff, sanction 등) 감지 → jump_flag 활성화
 - jump_flag 활성 시: CI 1.2배 확장, surge_prob 패널티
 - OPEC 긴급 회의 감지 → 리스크 점수 가중
+- compound shock CI: 복합 충격 시 CI 추가 확장
 
 ### 실시간 RSS 이벤트 경보 (`72c315a`)
 
@@ -413,15 +601,27 @@ fetch_data() → fetch_news() → build_features()
 - 유가 관련 키워드 감지 시 즉시 이메일 알림
 - `run_rss_alerts.bat` / `config/task_schedule_rss.xml`
 
-### VaR + OVX alarm + hedge_ratio (`f2cf98b`, `351e7a9`)
+### EIA 데이터 적시성 개선 (`47404c1`)
 
-- var_5pct / var_95pct: 5%/95% Value at Risk
-- OVX alarm: HIGH(≥50), EXTREME(≥70)
-- hedge_ratio: OVX + vol_5d 기반 헤지 비율 권고
+- EIA 재고 발표: 매주 목요일 KST 기준
+- **이전**: `shift(3)` → 3거래일 후 반영
+- **수정**: `shift(1)` → 다음 거래일 즉시 반영
+- EIA_SHIFT=1: 목요일 발표 당일 반영으로 신호 적시성 향상
 
 ---
 
 ## Phase 16: 최종 버그 수정 + 다중공선성 제거 (2026-06-02, 커밋 `6f8a980`)
+
+### 대시보드 버그 17개 수정 + 예측 로그 캡 (`bd7dd3e`)
+
+- 대시보드 크래시/divide-by-zero 17개 버그 수정
+- prediction_log.csv 1000행 캡 추가 (무한 증가 방지)
+- 관리자 전용 탭 접근 제어 강화
+
+### 불필요 모델 제거 + 주간 Optuna 재탐색 (`cb1a625`)
+
+- 죽은 모델(D2/D3/D4/D5) 제거: 미사용 베이스 모델 전부 정리
+- REFIT_STALE_DAYS=7: 7일마다 Optuna 캐시 초기화 → 하이퍼파라미터 재탐색
 
 ### Bias 교정 소스 수정
 
@@ -490,12 +690,14 @@ fetch_data() → fetch_news() → build_features()
 | 동적 FinBERT 비중 | FinBERT 감성 부호 역전 (supply cut → NEGATIVE) |
 | 공급/수요 분리 감성 | 분리 기준 모호, 샘플 부족 |
 | FinBERT fine-tuning | 학습 데이터 부족, 훈련 시간 과도 |
-| CFTC CoT 방향 피처 | 주간 데이터 lag → 즉시 롤백 |
+| CFTC CoT 방향 피처 (1차) | 주간 데이터 lag → 즉시 롤백 |
 | 방향성 타깃 이진화 | FLAT 제거 시 정보 손실, 성능 동일 |
 | 방향성 임계값 최적화/국면분리/보팅앙상블 | 성능 개선 없음 |
+| 성능 개선 실험 5종 (`9dcb07c`) | 전체 성능 열화 |
 | GRU-Attn / CNN1D | 훈련 시간 10분+ → 일일 파이프라인 초과 |
-| Optuna OPEC 이벤트 | 성능 개선 미미 |
-| SARIMAX 3년 window (1차) | R² 0.756→0.724 악화 |
-| SVM exponential decay weights | WF 52.8→53.1% (소폭 개선, 유지) |
-| CEEMDAN+SVM (EIA CFTC crackspread) | 복잡도 대비 개선 미미 |
-| 성능 개선 실험 5종 (세션9) | 전체 성능 열화 |
+| BiLSTM 조건부 앙상블 | 운영 복잡도 증가, `11edc9c` 정리 시 제거 |
+| Optuna OPEC 이벤트 (1차) | 성능 개선 미미 |
+| SARIMAX 3년 window (1차, Phase 7) | R² 0.756→0.724 악화 (고변동 레짐 데이터 미포함) |
+| EIA 제품 재고 + CFTC COT + 크랙 스프레드 | 데이터 수집 불안정, 기존 피처와 중복 |
+| News-Sentiment XGBoost D4 | `11edc9c` 미사용 모델 정리 시 제거 |
+| Pseudo-Huber 손실 | *채택* (MAE 3.637→3.596 개선) |
