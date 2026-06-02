@@ -619,12 +619,15 @@ SURGE_RISK 신호 감지 엔진: 4단계 단계적 개발
 
 ### 모니터링 체계 구축
 
-- 피처 드리프트 감지: 훈련 p01/p99 저장 → live OOD 경고
-- CI 보정 추적: 75% 신뢰구간 실제 커버리지 모니터링
-- Multi-window MAE: 전체/60일/45일 성능 분리 보고
+- 피처 드리프트 감지: 훈련 p01/p99 저장 → live OOD 경고 (`1c53f62`)
+- CI 보정 추적: 75% 신뢰구간 실제 커버리지 모니터링 (`fd49854`)
+- Multi-window MAE: 전체/60일/45일 성능 분리 보고 (`c84afce`)
 - 라이브 MASE 모니터링 (`c12ff30`): backtest MAE 1.5배 초과 시 경고
-- 예측 이상 감지: D+1이 spot 대비 ±30% 초과 시 경고
-- Atomic CSV writes: temp파일 기록 후 rename (54161a4) — 파이프라인 중단 시 부분 기록 방지
+- 라이브 예측 MAE 모니터링 (`959c3be`): 실시간 경고 로깅 (자동 재훈련과 별개)
+- 예측 이상 감지: D+1이 spot 대비 ±30% 초과 시 경고 (`b814b61`)
+- CI 자동 확장 1.2x (`a35f9f1`): D+1 모델 간 예측 불일치 std >$2 시 CI 확장
+- Atomic CSV writes: temp파일 기록 후 rename (`54161a4`) — 파이프라인 중단 시 부분 기록 방지
+- Optuna cache key에 피처 컬럼 목록 포함 (`52f1943`) — 피처 변경 시 Optuna 스테일 캐시 방지
 - yfinance 데이터 staleness 검사: 최신 데이터가 >2 거래일 지연 시 경고 (`7a8d982`)
 - stacking 가중치 이상 감지 로깅: 가중치 급변 시 경고 기록 (`93536f9`)
 - meta-learner 최소 샘플 guard: 40 → **60**으로 상향 (`b35f71e`) — 불안정 가중치 방지
@@ -651,10 +654,11 @@ SURGE_RISK 신호 감지 엔진: 4단계 단계적 개발
 - D+2-7 momentum bias 추가 (`9881ff7`): 방향 신호 기반 drift 보정
 - **결과**: D+2-7 예측 방향성 개선, flat forecast 문제 해소
 
-### forecast_snapshots.csv + 예측 신뢰도 (`3b38636`, `b450361`)
+### forecast_snapshots.csv + 예측 신뢰도 (`3b38636`, `3d38564`, `b450361`)
 
-- run_date별 D+1~D+7 예측 이력 누적
-- n=90 스냅샷 도달 시 MASE=0.606 산출 (D+1 기준)
+- run_date별 D+1~D+7 예측 이력 누적 (`3b38636`)
+- D+1만 기록, run_date당 1행으로 dedup 수정 (`3d38564`)
+- n=90 스냅샷 도달 시 MASE=0.606 산출 (D+1 기준) (`b450361`)
 - forecast_reliability: 스냅샷 수 기반 UNKNOWN → LOW → MEDIUM → HIGH
 
 ---
@@ -711,6 +715,55 @@ SURGE_RISK 신호 감지 엔진: 4단계 단계적 개발
   | jump_flag 활성 | 강화 (높은 신뢰도 요구) | 급변 시 오탐 방지 |
 - 방향 신호 품질 개선: 이벤트 없는 구간과 이벤트 구간 임계값 분리
 
+### 운영 안정화 (`60ec37b`, `2496812`, `09fa760`, `c860cb9`, `46a0752`)
+
+- regime-adaptive stacking 위기 감지 가중치 강화 (`60ec37b`)
+- bias correction: 지수가중평균 → **중앙값**으로 변경 (`2496812`) — 이상치 포함 시 bias 과대추정 방지
+- 리스크 신호 3종 개선 (`09fa760`): surge_prob 모멘텀 할인, DROP_RISK 트리거 조건, CI horizon scaling
+- direction tracking 추가, forecast reliability flag, D+2-7 momentum drift 개선 (`c860cb9`)
+- model versioning 도입, surge_prob 출력 투명성 개선 (`46a0752`)
+
+---
+
+## Phase 15.5: 운영 안정화 및 구조 재편 (2026-05-25~27)
+
+### 대시보드 UX/버그 수정 (`81c909c`, `e3ed5b0`, `b8c9785`, `fc11398`, `3f0dedd`)
+
+- 대시보드 버그 수정 + CI 명칭 80→75 변경 + HAR 감지 개선 (`81c909c`)
+- 대시보드 UX 5가지 개선 (`e3ed5b0`)
+- 대시보드 UX 4가지 이슈 수정 (`b8c9785`)
+- 미사용 mpatches import 제거, Tab2에 RSS 트리거 섹션 추가 (`fc11398`)
+- 리스크 신호 상단 RSS 경보 배너 제거 (`3f0dedd`)
+
+### 파이프라인/크래시 안정화 (`b418278`, `df3e88e`, `984b267`, `9453233`, `c4743bc`, `2ef4a6a`, `02a9179`, `147717a`, `5db27cd`)
+
+- stacking_rejected 키 KeyError 크래시 수정 (`b418278`)
+- Stacking NameError 수정 (`df3e88e`)
+- 크래시/divide-zero guard 6건 수정 (B1-B4/R1/R2) (`984b267`)
+- Tab5 앞 관리자 전용 공지 추가 (`9453233`)
+- rollback 임계값 수정, 파이프라인 UX 개선 (`c4743bc`)
+- 파이프라인 UX 및 CEEMDAN 캐시 가시성 개선 (`2ef4a6a`)
+- CL2=F NaN fallback 수정, FRED patch를 90일 이내로 제한 (`02a9179`)
+- 파이프라인 파일 로그 핸들러 추가, 타이밍 예측값 수정 (`147717a`)
+- dir_acc 및 운영 신뢰성 개선 (`5db27cd`)
+
+### bias_correction / Stacking / VAR 개선 (`8cc06b9`)
+
+- bias_correction decay 수정, Stacking backtest 추가, drift detection 수정, VAR forecast column 추가 (`8cc06b9`)
+
+### 프로젝트 구조 재편 (`ee0de76`, `c9614c5`)
+
+- 프로젝트 파일 구조 재편 (config/ 폴더 분리 등) (`ee0de76`)
+- auth_config.yaml 경로를 config/로 업데이트 (`c9614c5`)
+
+### 버그 수정 묶음 (`ba3edf0`, `78ebdb2`, `345a42d`, `76be03b`, `17cb80f`)
+
+- EIA look-ahead audit 메시지 하드코딩 +3 수정 → EIA_SHIFT 변수 사용 (`ba3edf0`)
+- CI fallback vol dropna().iloc[-1] all-NaN guard 추가 (`78ebdb2`)
+- CEEMDAN 캐시 IMF 길이 < 훈련 윈도우 시 off-by-one 수정 (`345a42d`)
+- 번역 캐시 저장 실패 원인인 json import 누락 수정 (`76be03b`)
+- SVM 캐시 피처 불일치 수정 + overfit_gap 일관성 개선 (`17cb80f`)
+
 ---
 
 ## Phase 16: 최종 버그 수정 + 다중공선성 제거 (2026-06-02, 커밋 `6f8a980`)
@@ -755,6 +808,14 @@ SURGE_RISK 신호 감지 엔진: 4단계 단계적 개발
 | HAR_FEATURE_COLS 수 | 27 | 22 | -5 |
 | HAR hold-out R² | 0.0719 | 0.0913 | +27% |
 | CLS F1 | - | - | +0.7% |
+
+### forecast_snapshots 수정 및 Phase 16 이후 버그 수정 (`787c14a`, `de0755e`, `8ae8f2a`, `743dfd3`, `4bb4499`)
+
+- Stacking 거절 시 순수 SARIMAX fallback 보장 (`787c14a`)
+- 대시보드 버그 수정 + tooltip + snapshot analysis panel 추가 (`de0755e`)
+- direction accuracy 수정, backtest/live 행 dedup, 대시보드 정리 (`8ae8f2a`)
+- monitor_rss_alerts 동기 실행으로 변경 (`743dfd3`)
+- live_mae null 버그 수정, actual_direction backfill 추가 (`4bb4499`)
 
 ---
 
