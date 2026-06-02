@@ -101,6 +101,39 @@ SURGE_RISK / DROP_RISK 발생 시 이메일 자동 알림.
 
 ---
 
+## 리스크 스코어 계산 방식
+
+```
+mom_ratio  = min(|mom_5d| / hist_mom_75, 3.5)       # 트렌드형 이동 포착
+vol_ratio  = max(vol_5d / hist_vol_75, mom_ratio)    # 변동성·모멘텀 중 큰 값
+risk_score = vol_ratio × news_amp × geo_amp × sentiment_amp × ovx_amp
+```
+
+- `hist_vol_75` / `hist_mom_75`: 훈련 구간(최근 60일 제외) 기준 75분위
+- `cap=3.5`: 기존 SURGE_RISK 구간에서 mom_ratio 과도 증폭 방지
+- 트렌드형 이동(매일 +2~3% 누적)과 스파이크형 이동 모두 포착
+
+---
+
+## 지정학 위험 감지
+
+GPR(Geopolitical Risk) 데이터 지연 문제를 3단계로 보완:
+
+1. **GPR 임계값 완화**: z-score > 0.5 (이전 > 1.0) — 상위 약 30% 수준에서 위기 감지
+2. **지정학 키워드 확장**: iran, hormuz, blockade, houthi, naval blockade, oil embargo 등 추가
+3. **뉴스 실시간 보완**: `latest_alerts.json`에서 geopolitical 뉴스 감지 시 GPR 데이터와 무관하게 geo_dummy=1 강제 적용
+
+---
+
+## risk_history.csv (리스크 이력)
+
+- 최근 1년(365일) 분 기록 유지
+- **공휴일·주말 포함**: 영업일·달력일 기준 전일 값 forward fill → 차트 빈 칸 없음
+  - 거래일 데이터 없는 날(미국 공휴일, 토/일)은 직전 거래일의 vol_5d, mom_5d, WTI 값 사용
+  - 뉴스·감성·OVX 등 독립 피처는 당일 값 반영
+
+---
+
 ## 자동 재훈련
 
 - **REFIT_STALE_DAYS=7**: 7일마다 Optuna 캐시 초기화 → 하이퍼파라미터 재탐색

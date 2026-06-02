@@ -78,6 +78,7 @@ def _atomic_csv(df: "pd.DataFrame", path: "Path", **kwargs) -> None:
                                 encoding='utf-8', newline='') as _fh:
         _tmp = _fh.name
     try:
+        kwargs.setdefault('encoding', 'utf-8')
         df.to_csv(_tmp, **kwargs)
         _os.replace(_tmp, path)
     except Exception:
@@ -651,7 +652,7 @@ def _attach_gpr(df: pd.DataFrame) -> pd.DataFrame:
         gpr_aligned = gpr_z.reindex(df.index).ffill().bfill().fillna(0)
 
         df['gpr_zscore'] = gpr_aligned
-        df['geo_dummy']  = (gpr_aligned > 1.0).astype(float)  # 상위 16% 이상 = 지정학 위기
+        df['geo_dummy']  = (gpr_aligned > 0.5).astype(float)  # 상위 ~30% 이상 = 지정학 위기 (완화된 임계값)
 
         n_events = int(df['geo_dummy'].sum())
         log.info(f"    GPR 연결 완료: 지정학 위기일 {n_events}일 "
@@ -5746,7 +5747,10 @@ def monitor_rss_alerts() -> dict:  # noqa: dead — 향후 독립 스케줄러�
         'supply_cut':  ['opec cut','production cut','supply disruption','pipeline attack',
                         'embargo','export ban','field shutdown','force majeure'],
         'geopolitical':['nuclear plant','missile strike','drone attack','war escalat',
-                        'strait of hormuz','tanker attack','oil facility','refinery attack'],
+                        'strait of hormuz','tanker attack','oil facility','refinery attack',
+                        'iran sanction','iran attack','iran war','hormuz block','hormuz clos',
+                        'oil blockade','ceasefire fail','military strike','naval blockade',
+                        'supply disruption','oil embargo','pipeline sabotage','houthi attack'],
         'demand_shock':['recession','demand collapse','economic crisis','china slowdown',
                         'global downturn','demand destruction'],
         'price_move':  ['oil surges','oil plunges','crude spikes','wti jumps','brent soars',
@@ -5873,6 +5877,14 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     n_count   = float(feature_df['news_count'].iloc[-7:].sum()) if 'news_count' in feature_df.columns else float(row.get('news_count', 0.0))
     bb        = float(row.get('bb_position',           0.0))
     geo       = float(row.get('geo_dummy',             0.0))
+    # 뉴스 기반 지정학 감지로 GPR 데이터 지연 보완
+    try:
+        import json as _json
+        _alerts = _json.loads((OUTPUT_DIR / 'latest_alerts.json').read_text(encoding='utf-8'))
+        if any(t.get('category') == 'geopolitical' for t in _alerts.get('triggers', [])):
+            geo = max(geo, 1.0)
+    except Exception:
+        pass
     ovx_z     = float(row.get('ovx_zscore',            0.0))
     ovx_level = float(row.get('OVX',                  0.0))
     ovx_chg   = float(row.get('ovx_change',            0.0))
@@ -5884,9 +5896,12 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     # 훈련 구간(최근 60일 제외) 기준 분위수 사용 (CEEMDAN/Regime과 동일 기준)
     _n_tr_cr = max(len(feature_df) - 60, 252)
     hist_vol_75 = float(feature_df['vol_5d'].iloc[:_n_tr_cr].quantile(0.75)) if 'vol_5d' in feature_df.columns else 0.022
+    hist_mom_75 = float(feature_df['mom_5d'].abs().iloc[:_n_tr_cr].quantile(0.75)) if 'mom_5d' in feature_df.columns else 0.047
 
     # ── 리스크 점수
-    vol_ratio     = vol / (hist_vol_75 + 1e-8)
+    # mom_ratio: 5일 모멘텀 절대값 기반 (트렌드형 이동 포착, cap=3.5로 과도 증폭 방지)
+    mom_ratio     = min(abs(mom_5) / (hist_mom_75 + 1e-8), 3.5)
+    vol_ratio     = max(vol / (hist_vol_75 + 1e-8), mom_ratio)
     news_amp      = max(1 + min((n_neg - n_pos * 0.5) / 8, 1.0), 1.0)
     geo_amp       = 1.35 if geo > 0.5 else 1.0
     sentiment_amp = 1 + max(-sentiment, 0) * 0.5 + extreme_n * 0.1
@@ -6827,9 +6842,17 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
             _existing_dates = set(pd.to_datetime(_bfill_df['date']).dt.strftime('%Y-%m-%d'))
         _bfill_cutoff = pd.Timestamp.now() - pd.DateOffset(years=1)
         _bfill_fd = feature_df[feature_df.index >= _bfill_cutoff] if hasattr(feature_df.index, 'min') and pd.api.types.is_datetime64_any_dtype(feature_df.index) else feature_df.iloc[-252:]
+        # 공휴일(WTI 없는 영업일) 포함: 영업일 기준 reindex 후 전일 값 forward fill
+        if pd.api.types.is_datetime64_any_dtype(_bfill_fd.index) and len(_bfill_fd) > 0:
+            _bfill_end = min(_bfill_fd.index.max(), pd.Timestamp.now().normalize())
+            _bfill_fd = _bfill_fd.reindex(
+                pd.date_range(_bfill_fd.index.min(), _bfill_end, freq='D'),
+                method='ffill'
+            )
         # hist_vol_75: classify_risk와 동일 방법 (고정 기준선)
         _n_tr_cr_bf = max(len(feature_df) - 60, 252)
         _h_vol75_bf = float(feature_df['vol_5d'].iloc[:_n_tr_cr_bf].quantile(0.75)) if 'vol_5d' in feature_df.columns else 0.022
+        _h_mom75_bf = float(feature_df['mom_5d'].abs().iloc[:_n_tr_cr_bf].quantile(0.75)) if 'mom_5d' in feature_df.columns else 0.047
         _bfill_rows = []
         for _bdate, _brow in _bfill_fd.iterrows():
             _ds = str(_bdate)[:10]
@@ -6848,7 +6871,8 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
             _bpz      = float(_brow.get('price_zscore',           0.0))
             _bexn     = float(_brow.get('extreme_neg_news',       0.0))
             _bwti     = float(_brow.get('WTI',                    0.0))
-            _bvol_ratio  = _bvol / (_h_vol75_bf + 1e-8)
+            _bmom_ratio  = min(abs(_bmom5) / (_h_mom75_bf + 1e-8), 3.5)
+            _bvol_ratio  = max(_bvol / (_h_vol75_bf + 1e-8), _bmom_ratio)
             _bnews_amp   = max(1 + min((_bneg - _bpos * 0.5) / 8, 1.0), 1.0)
             _bgeo_amp    = 1.35 if _bgeo > 0.5 else 1.0
             _bsent_amp   = 1 + max(-_bsent, 0) * 0.5 + _bexn * 0.1
@@ -6912,9 +6936,16 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
             _snap_df = pd.read_csv(_snap_path_chk)
             if PRED_LOG_FILE.exists():
                 _pl_act = (pd.read_csv(PRED_LOG_FILE)[['date', 'actual_price']]
-                           .rename(columns={'date': 'forecast_date'})
+                           .rename(columns={'date': 'forecast_date', 'actual_price': '_pl_actual'})
                            .drop_duplicates('forecast_date'))  # backtest/live 중복 방지
                 _snap_df = _snap_df.merge(_pl_act, on='forecast_date', how='left')
+                # snap에 actual_price 컬럼이 이미 있으면 merge 시 _x/_y로 분리됨 → coalesce
+                if 'actual_price_x' in _snap_df.columns:
+                    _snap_df['actual_price'] = _snap_df['actual_price_x'].fillna(_snap_df.get('actual_price_y'))
+                    _snap_df = _snap_df.drop(columns=[c for c in ['actual_price_x', 'actual_price_y'] if c in _snap_df.columns])
+                elif '_pl_actual' in _snap_df.columns:
+                    _snap_df['actual_price'] = _snap_df['actual_price'].fillna(_snap_df['_pl_actual'])
+                _snap_df = _snap_df.drop(columns=[c for c in ['_pl_actual'] if c in _snap_df.columns])
             _snap_known = (_snap_df[_snap_df['actual_price'].notna()]
                            .sort_values('forecast_date')  # diff() 날짜 순서 보장
                            .copy())
