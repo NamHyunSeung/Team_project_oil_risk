@@ -82,7 +82,7 @@ if not st.session_state.get("authentication_status"):
   <p style='color:#e6edf3; font-size:2.2rem; font-weight:700; margin:0;'>$79<span style='font-size:0.95rem; font-weight:400; color:#8b949e;'>/월</span></p>
   <hr style='border-color:#1f6feb; margin:14px 0;'>
   <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 7일 WTI 가격 예측</p>
-  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 리스크 신호 (NORMAL ~ SURGE)</p>
+  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 리스크 신호 (정상 ~ 급등위험)</p>
   <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 뉴스 감성 분석</p>
   <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ OVX 원유변동성 · 지정학 알람</p>
   <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 이메일 알림 (급등/급락)</p>
@@ -126,12 +126,21 @@ with st.sidebar:
     st.markdown(f"**{_name}** 님")
     _authenticator.logout("로그아웃", location="sidebar")
 
-# ── 자동 새로고침 (60분)
+# ── 자동 새로고침 (5분 간격으로 run_meta.json 변경 감지)
 try:
     from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=60 * 60 * 1000, key="auto_refresh_v2")
+    st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh_v2")
 except ImportError:
-    st.markdown('<meta http-equiv="refresh" content="3600">', unsafe_allow_html=True)
+    st.markdown('<meta http-equiv="refresh" content="300">', unsafe_allow_html=True)
+
+_meta_path = OUTPUT_DIR / 'run_meta.json'
+if _meta_path.exists():
+    _mtime = os.path.getmtime(_meta_path)
+    if 'last_meta_mtime' not in st.session_state:
+        st.session_state['last_meta_mtime'] = _mtime
+    elif st.session_state['last_meta_mtime'] != _mtime:
+        st.session_state['last_meta_mtime'] = _mtime
+        st.rerun()
 
 # ── 스타일
 st.markdown("""
@@ -269,8 +278,8 @@ def _render_key_metrics(sig):
               f"{float(sig.get('momentum_5d', 0))*100:+.1f}% (5일)")
     c2.metric("OVX",
               f"{_ovx_val:.0f}",
-              "🔴 HIGH" if _ovx_al == 'HIGH' else ("🟡 ELEVATED" if _ovx_al == 'ELEVATED' else "🟢 NORMAL"),
-              help="원유 공포지수(CBOE OVX). 높을수록 시장 불안 → 예측 신뢰구간 자동 확대.\n🟢 NORMAL < 35 / 🟡 ELEVATED 35~45 / 🔴 HIGH ≥ 45")
+              "🔴 높음" if _ovx_al == 'HIGH' else ("🟡 상승" if _ovx_al == 'ELEVATED' else "🟢 정상"),
+              help="원유 공포지수(CBOE OVX). 높을수록 시장 불안 → 예측 신뢰구간 자동 확대.\n🟢 정상 < 35 / 🟡 상승 35~45 / 🔴 높음 ≥ 45")
     c3.metric("헤지 비율 권고", f"{_hedge*100:.0f}%")
     c4.metric("하방 / 상방 리스크", f"{_down:.0f}% / {_up:.0f}%")
     c5.metric("급등확률 3일", f"{_surge_p*100:.0f}%",
@@ -395,9 +404,12 @@ def _render_price_charts(data):
             )
             if 'latest_risk_signal' in data and not data['latest_risk_signal'].empty:
                 _last_px = float(data['latest_risk_signal'].iloc[0]['wti_price'])
-                fc['변화'] = fc['forecast_price'].apply(
-                    lambda p: (f"{'↑' if p > _last_px else ('↓' if p < _last_px else '→')} {(p-_last_px)/_last_px*100:+.1f}%") if _last_px != 0 else "→ —"
-                )
+                # 변화 = D+1은 현재가 대비, D+2~D+7은 전일 예측가 대비 (일별 방향 표시)
+                _prev_prices = [_last_px] + list(fc['forecast_price'].iloc[:-1])
+                fc['변화'] = [
+                    (f"{'↑' if p > b else ('↓' if p < b else '→')} {(p-b)/b*100:+.1f}%") if b != 0 else "→ —"
+                    for p, b in zip(fc['forecast_price'], _prev_prices)
+                ]
             _show_cols = ['날짜', 'forecast_price', '변화']
             if 'model_std' in fc.columns:
                 fc['합의도'] = fc['model_std'].apply(
@@ -438,6 +450,58 @@ def _render_price_charts(data):
                 st.warning(f"⚠️ 모델 간 예측 편차 ${fc['model_std'].iloc[0]:.1f} — 불확실성 높음")
             if 'reliable_forecast' in fc.columns and not fc['reliable_forecast'].astype(str).eq('True').all():
                 st.warning("⚠️ 일부 예측일의 신뢰도가 낮습니다. 예측 결과 해석 시 주의하세요.")
+
+            # ② D+1 방향 합의 신호
+            try:
+                if 'latest_risk_signal' in data and not data['latest_risk_signal'].empty:
+                    _wti   = float(data['latest_risk_signal'].iloc[0]['wti_price'])
+                    _d1    = fc.iloc[0]
+                    _dirs  = []
+                    if 'sarimax_forecast' in fc.columns:
+                        _dirs.append('UP' if float(_d1['sarimax_forecast']) > _wti else 'DOWN')
+                    if 'xgb_forecast' in fc.columns:
+                        _dirs.append('UP' if float(_d1['xgb_forecast'])    > _wti else 'DOWN')
+                    _dirs.append('UP' if float(_d1['forecast_price']) > _wti else 'DOWN')
+                    if 'prediction_log' in data and not data['prediction_log'].empty:
+                        _pl_live = data['prediction_log'][data['prediction_log']['type'] == 'live']
+                        _pl_dir  = _pl_live[_pl_live['pred_direction'].isin(['UP','DOWN'])]
+                        if not _pl_dir.empty:
+                            _dirs.append(str(_pl_dir.iloc[-1]['pred_direction']))
+                    _n   = len(_dirs)
+                    _up  = _dirs.count('UP')
+                    _dn  = _dirs.count('DOWN')
+                    _lbl = '↑ 상승' if _up > _dn else '↓ 하락'
+                    _maj = max(_up, _dn)
+                    if _maj == _n:
+                        st.success(f"✅ D+1 방향 합의: {_lbl} ({_maj}/{_n} 모델 일치)")
+                    elif _maj >= _n - 1:
+                        st.info(f"🔶 D+1 방향: {_lbl} 우세 ({_maj}/{_n}) — 일부 불일치")
+                    else:
+                        st.warning(f"⚠️ D+1 방향 불일치 (↑{_up} vs ↓{_dn}) — 신호 불확실")
+            except Exception:
+                pass
+
+            # ④ 단일 예측 이상치 경고
+            try:
+                if 'prediction_log' in data and not data['prediction_log'].empty:
+                    _pl_conf = data['prediction_log'][
+                        (data['prediction_log']['type'] == 'live') &
+                        data['prediction_log']['price_error'].notna()
+                    ].tail(20)
+                    if len(_pl_conf) >= 5:
+                        _errs   = _pl_conf['price_error'].abs()
+                        _mu     = _errs.mean()
+                        _thresh = _mu + 2 * _errs.std()
+                        _last   = _pl_conf.iloc[-1]
+                        _last_e = abs(float(_last['price_error']))
+                        if _last_e > _thresh:
+                            st.warning(
+                                f"⚠️ {_last['date']} 예측 오차 ${_last_e:.2f} — "
+                                f"최근 평균 ${_mu:.2f} + 2σ(기준 ${_thresh:.2f}) 초과"
+                            )
+            except Exception:
+                pass
+
             if _is_admin:
                 _fc_dl = fc.to_csv(index=False).encode('utf-8')
                 st.download_button("💾 예측 CSV", _fc_dl, "forecast_7days.csv", "text/csv",
@@ -549,8 +613,10 @@ def _render_alerts_news(data):
                 _lvl_ko = {'WARNING': '⚠️ 경고', 'CRITICAL': '🔴 위험', 'NORMAL': '🟢 정상'}
                 _cat_ko = {
                     'price_move': '가격변동', 'geopolitical': '지정학',
-                    'supply': '공급', 'demand': '수요', 'inventory': '재고',
-                    'sanctions': '제재', 'opec': 'OPEC', 'ovx_spike': 'OVX 급등',
+                    'supply': '공급', 'supply_cut': '공급감산',
+                    'demand': '수요', 'demand_shock': '수요충격',
+                    'inventory': '재고', 'sanctions': '제재',
+                    'opec': 'OPEC', 'ovx_spike': 'OVX 급등',
                 }
                 _lvl_txt = _lvl_ko.get(_al.get('alert_level', ''), _al.get('alert_level', ''))
                 st.caption(f"{_lvl_txt} · {_al.get('checked_at', '—')}")
@@ -741,10 +807,10 @@ def render_admin_page():
                       delta_color=_age_clr,
                       help="파이프라인 마지막 실행 경과일 — 0~1일: 정상 / 2~7일: 주의 / 8~30일: 재실행 권장 / 30일+: 즉시 재실행")
             m3.metric("OVX 레짐", f"{_ovx:.0f}",
-                      "HIGH" if _ovx >= 60 else ("MEDIUM" if _ovx >= 40 else "LOW"),
-                      help="원유 공포지수(CBOE OVX). 높을수록 시장 불안 → 예측 신뢰구간 자동 확대.\n🟢 NORMAL < 35 / 🟡 ELEVATED 35~45 / 🔴 HIGH ≥ 45")
+                      "높음" if _ovx >= 60 else ("보통" if _ovx >= 40 else "낮음"),
+                      help="원유 공포지수(CBOE OVX). 높을수록 시장 불안 → 예측 신뢰구간 자동 확대.\n🟢 정상 < 35 / 🟡 상승 35~45 / 🔴 높음 ≥ 45")
             m4.metric("리스크 스코어", f"{float(sig.get('risk_score', 0)):.3f}",
-                      help="변동성·뉴스·지정학·감성·OVX 5개 요소를 곱해 산출한 종합 위험도.\n2.2 이상이면 SURGE/DROP 위험 단계 진입.")
+                      help="변동성·뉴스·지정학·감성·OVX 5개 요소를 곱해 산출한 종합 위험도.\n2.2 이상이면 급등/급락 위험 단계 진입.")
 
         # 앙상블 정보 (최근 로그에서 파싱)
         _log_path = OUTPUT_DIR / 'pipeline_run.log'
@@ -1424,7 +1490,7 @@ def render_admin_page():
 
         _env = _read_env()
         st.markdown(f"발신: `{_env.get('SMTP_USER', '미설정')}` | 수신: `{_env.get('ALERT_TO', '미설정')}`")
-        st.caption("SURGE_RISK / DROP_RISK 감지 시 자동 발송")
+        st.caption("급등위험 / 급락위험 감지 시 자동 발송")
 
         with st.form('email_cfg_v2'):
             _new_to = st.text_input('수신 이메일', value=_env.get('ALERT_TO', ''))

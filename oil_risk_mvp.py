@@ -1708,8 +1708,8 @@ def _load_embed_model():
     try:
         from transformers import AutoTokenizer, AutoModel
         import torch as _t
-        _EMBED_TOK = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME)
-        _EMBED_MDL = AutoModel.from_pretrained(EMBED_MODEL_NAME)
+        _EMBED_TOK = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME, local_files_only=True)
+        _EMBED_MDL = AutoModel.from_pretrained(EMBED_MODEL_NAME, local_files_only=True)
         _dev = _t.device('cuda' if _t.cuda.is_available() else 'cpu')
         _EMBED_MDL = _EMBED_MDL.to(_dev).eval()
         _EMBED_REDY = True
@@ -1791,15 +1791,16 @@ HAR_FEATURE_COLS = [
     # 핵심 HAR 성분
     'RV_1d', 'RV_5d', 'RV_21d', 'RV_63d',
     # GARCH / EWMA (parkinson=rv_intraday 완전중복 제거)
-    'garch_vol', 'ewma_vol_10', 'ewma_vol_21', 'ewma_vol_63',
-    # 변동성 모멘텀
-    'rv_term_slope', 'rv_5d_chg', 'rv_mom_5_21',
+    'garch_vol',
+    # ewma_vol_10/21/63 제거 — 서로 VIF 수백, garch_vol로 대체됨
+    # 변동성 모멘텀 (rv_mom_5_21 = RV_5d - RV_21d 선형결합 — 완전공선성 제거)
+    'rv_term_slope', 'rv_5d_chg',
     # 레버리지 효과
     'leverage_effect', 'neg_return',
     # EIA 발표일 효과
     'dow_wednesday', 'dow_thursday', 'eia_vol_signal',
-    # 장중 RV (정확한 측정)
-    'rv_intraday', 'rv_intraday_5d',
+    # 장중 RV (정확한 측정; _5d/_21d/_vs_close는 rv_intraday 고VIF 파생 — 제거)
+    'rv_intraday',
     # 파생상품 (옵션 내재변동성)
     'ovx_zscore', 'ovx_change', 'ovx_rv_spread',
     'vix_change', 'vix_zscore',
@@ -1867,19 +1868,19 @@ FEATURE_COLS = [
     # EIA 미국 원유 재고 (실물 수급 지표)
     'inv_chg_zscore', 'inv_lvl_zscore',
     # HAR 장기 성분 + 레버리지 효과 + EIA 요일 효과
-    'RV_63d', 'neg_return', 'return_neg', 'return_pos',
+    # return_neg 제거 (return_1d = return_pos + return_neg 선형결합)
+    'RV_63d', 'neg_return', 'return_pos',
     'leverage_effect', 'dow_wednesday', 'dow_thursday', 'dow_monday',
     'eia_vol_signal',
     # A: GARCH 조건부 분산
     'garch_vol',
-    # B: Parkinson 장중 범위 추정 (rv_intraday 중복으로 FEATURE_COLS 제외, HAR만 유지)
-    'parkinson_vol',
-    # C: EWMA 변동성
-    'ewma_vol_10', 'ewma_vol_21', 'ewma_vol_63',
-    # D: 변동성 모멘텀
-    'rv_term_slope', 'rv_5d_chg', 'rv_mom_5_21',
-    # 장중 고빈도 실현분산 (1h)
-    'rv_intraday', 'rv_intraday_5d', 'rv_intraday_21d', 'rv_intra_vs_close',
+    # B: Parkinson 장중 범위 추정 (rv_intraday와 |r|=1 완전공선성 — 제거)
+    # 'parkinson_vol',  # rv_intraday와 동일, 제거됨
+    # C: EWMA 변동성 (ewma_vol_10/21/63 VIF 수백 — 다중공선성 제거)
+    # D: 변동성 모멘텀 (rv_mom_5_21 제거 — HAR_FEATURE_COLS와 동일하게 통일)
+    'rv_term_slope', 'rv_5d_chg',
+    # 장중 고빈도 실현분산 (1h; _5d/_21d/_vs_close 고VIF 파생 제거)
+    'rv_intraday',
     # VIX 기간구조 + SKEW
     'vix_term_slope', 'vix_ts_zscore', 'skew_zscore', 'skew_chg',
     # 5번: 시장 국면(Regime) 피처
@@ -2758,42 +2759,6 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             top_str = ', '.join(f"{n}({v:.3f})" for n, v in imp[:8])
             log.info(f"        피처 중요도 Top8: {top_str}")
 
-        # ── 장중 RV를 타깃으로 한 별도 모델 (최근 730일, 더 정확한 측정값)
-        if 'rv_intraday' in feature_df.columns:
-            try:
-                _intra_df = feature_df[feature_df['rv_intraday'] > 0].copy()
-                _intra_df['target_intra'] = _intra_df['rv_intraday'].shift(-1)
-                _intra_df = _intra_df.dropna(subset=['target_intra'])
-                if len(_intra_df) > 120:
-                    _n_te_i    = min(90, int(len(_intra_df) * 0.15))
-                    _intra_tr  = _intra_df.iloc[:-_n_te_i]
-                    _intra_te  = _intra_df.iloc[-_n_te_i:]
-                    _avail_i   = [c for c in available_feats if c in _intra_tr.columns]
-                    _sc_i      = StandardScaler()
-                    _Xi_tr     = _sc_i.fit_transform(_intra_tr[_avail_i])
-                    _Xi_te     = _sc_i.transform(_intra_te[_avail_i])
-                    _mi        = (xgb.XGBRegressor(n_estimators=300, max_depth=3,
-                                                   learning_rate=0.02, subsample=0.8,
-                                                   n_jobs=-1, random_state=42, verbosity=0)
-                                  if _XGB else Ridge(alpha=1.0))
-                    _mi.fit(_Xi_tr, _intra_tr['target_intra'])
-                    _pi        = _mi.predict(_Xi_te)
-                    _r2_intra  = float(r2_score(_intra_te['target_intra'], _pi))
-                    _r2_train_i = float(r2_score(_intra_tr['target_intra'], _mi.predict(_Xi_tr)))
-                    log.info(f"        장중RV 타깃 모델: R²={_r2_intra:.4f}  "
-                             f"훈련R²={_r2_train_i:.4f}  n_train={len(_intra_tr)}")
-                    # 현재 모델보다 유의미하게 좋으면 교체
-                    if _r2_intra > r2_cv + 0.05 and (_r2_train_i - _r2_intra) < 0.25:
-                        modelA      = _mi
-                        scaler      = _sc_i
-                        available_feats = _avail_i
-                        r2_cv       = _r2_intra
-                        log.info(f"    ✅ 장중RV 타깃 모델 채택 (R²={_r2_intra:.4f})")
-                    else:
-                        log.info(f"    기존 모델 유지 (장중RV R²={_r2_intra:.4f} 미채택)")
-            except Exception as _ie:
-                log.debug(f"    장중RV 타깃 모델 실패({_ie})")
-
         results['xgb_har'] = {
             'model': modelA, 'scaler': scaler, 'features': har_feats,
             'type': 'vol_5d',
@@ -2805,61 +2770,6 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             'actual_rv_test':  y_rv_te.values,
             'test_dates':      test_df.index,
         }
-
-    # ── HAR-A (vol delta) / HAR-B (GARCH 잔차) 비교 훈련
-    if _SKL and _XGB and 'xgb_har' in results:
-        try:
-            _base_r2 = results['xgb_har']['r2']
-            _har_f   = [c for c in har_feats if c in train_df.columns]
-            _best    = ('direct', _base_r2, None, None)   # (method, r2, model, scaler)
-
-            for _tag, _tgt_col, _recon in [
-                ('delta',  'target_rv_delta', 'delta'),
-                ('garch_resid', 'target_rv_garch', 'garch_resid'),
-            ]:
-                if _tgt_col not in train_df.columns:
-                    continue
-                _y_tr_v = train_df[_tgt_col]
-                _y_te_v = test_df[_tgt_col]
-                _sc_v   = StandardScaler()
-                _X_tr_v = _sc_v.fit_transform(train_df[_har_f])
-                _X_te_v = _sc_v.transform(test_df[_har_f])
-                _cw_v   = (np.where(train_df['covid_dummy'].values == 1, 0.35, 1.0)
-                           if 'covid_dummy' in train_df.columns else None)
-                _m_v = xgb.XGBRegressor(
-                    n_estimators=300, max_depth=3, learning_rate=0.02,
-                    subsample=0.7, colsample_bytree=0.6,
-                    min_child_weight=15, reg_alpha=1.0, reg_lambda=5.0,
-                    n_jobs=-1, random_state=42, verbosity=0)
-                _m_v.fit(_X_tr_v, _y_tr_v, sample_weight=_cw_v)
-                _pred_v = _m_v.predict(_X_te_v)
-                # 재구성 후 실제 RV와 비교
-                _last_rv_te = test_df['RV_5d'].values
-                if _recon == 'delta':
-                    _pred_rv_v = _last_rv_te + _pred_v
-                else:   # garch_resid
-                    _garch_base = test_df['garch_vol'].values if 'garch_vol' in test_df.columns else _last_rv_te
-                    _pred_rv_v = _garch_base + _pred_v
-                _pred_rv_v = np.clip(_pred_rv_v, 0, None)
-                _act_rv_te = test_df['target_rv'].values
-                _r2_v  = float(r2_score(_act_rv_te, _pred_rv_v))
-                _mae_v = float(mean_absolute_error(_act_rv_te, _pred_rv_v))
-                log.info(f"    HAR-{_tag}: R²={_r2_v:.4f}  MAE={_mae_v:.5f}  (base={_base_r2:.4f})")
-                if _r2_v > _best[1]:
-                    _best = (_recon, _r2_v, _m_v, _sc_v)
-
-            if _best[0] != 'direct' and _best[2] is not None:
-                log.info(f"    ✅ HAR-{_best[0]} 채택 (R²={_best[1]:.4f} > base={_base_r2:.4f})")
-                results['xgb_har']['model']        = _best[2]
-                results['xgb_har']['scaler']       = _best[3]
-                results['xgb_har']['reconstruction'] = _best[0]
-                results['xgb_har']['r2']           = _best[1]
-            else:
-                log.info(f"    기존 direct HAR 유지 (R²={_base_r2:.4f})")
-                results['xgb_har']['reconstruction'] = 'direct'
-        except Exception as _hve:
-            log.warning(f"    HAR-A/B 비교 실패({_hve})")
-            results['xgb_har']['reconstruction'] = 'direct'
 
     # ── GARCH(1,1) 1-step ahead 성능 평가 (conditional_volatility 사용)
     # GARCH는 전체 데이터로 학습됨 → conditional_volatility[t] = h_t^0.5 (t-1까지 사용)
@@ -2898,12 +2808,9 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
     # ─────────────────────────────────────────────────────────────────────
     # Model B: SARIMAX — 1-step ahead dynamic=False 평가 (정직한 R²)
     # ─────────────────────────────────────────────────────────────────────
-    # Exog: 거시(DXY/충격) + 원유 시장 구조(Brent스프레드/OVX/선물커브) + VIX
+    # Exog: 거시(DXY/수급충격) + VIX — 4개 핵심 변수만 (과적합 억제)
     exog_cols = [c for c in [
         'dxy_change', 'demand_shock', 'supply_shock', 'vix_change',
-        'brent_wti_spread', 'ovx_change', 'futures_spread',
-        'oil_event_score_smooth', 'news_sentiment_smooth7', 'sentiment_chg3',
-        'inv_mom4_z', 'gold_wti_ratio_z', 'copper_gold_ratio_z',
     ] if c in feature_df.columns]
     log.info("    [B] SARIMAX 학습 + 1-step ahead 평가 중...")
 
@@ -2926,9 +2833,20 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 if not _missing.empty:
                     _extra = full_df.loc[_missing, _avail_cols].ffill()
                     _sx_base = pd.concat([feature_df, _extra]).sort_index()
-            cutoff = _sx_base.index[-1] - pd.DateOffset(years=SARIMAX_WINDOW_YEARS)
+            _adp_src = full_df if full_df is not None else feature_df
+            _adp_ovx = float(_adp_src['OVX'].iloc[-1]) if 'OVX' in _adp_src.columns and _adp_src['OVX'].notna().any() else 0.0
+            _adp_mom = float(_adp_src['mom_5d'].dropna().iloc[-1]) if 'mom_5d' in _adp_src.columns and _adp_src['mom_5d'].notna().any() else 0.0
+            # 평가 기간: main test_df와 동일(n_test=90)으로 고정 → 스태킹 정렬 일치
+            # 훈련 창: test 시작점 기준 역산 (today 기준 아님 → test 데이터 오염 방지)
+            n_test_sx = n_test  # = 90
+            _test_start = feature_df.index[-n_test]
+            if _adp_ovx >= 50 or abs(_adp_mom) >= 0.06:
+                cutoff = _test_start - pd.tseries.offsets.BDay(120)
+                log.info(f"    SARIMAX 적응형 윈도우 120일 (train, ovx={_adp_ovx:.0f} mom5={_adp_mom:.1%})")
+            else:
+                cutoff = _test_start - pd.DateOffset(years=SARIMAX_WINDOW_YEARS)
+                log.info(f"    SARIMAX {SARIMAX_WINDOW_YEARS}년 윈도우 (train)")
             sx_df  = _sx_base[_sx_base.index >= cutoff]
-            n_test_sx = min(90, int(len(sx_df) * 0.15))
             sx_train  = sx_df.iloc[:-n_test_sx]
             sx_test   = sx_df.iloc[-n_test_sx:]
 
@@ -2962,12 +2880,13 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     log.info("    [B0] auto_arima 파라미터 탐색 중 (stepwise)...")
                     aa = _auto_arima(
                         wti_train, exogenous=exog_train,
-                        d=1, seasonal=True, m=5, D=0,
+                        d=1, seasonal=False,
                         start_p=0, max_p=4, start_q=0, max_q=3,
-                        start_P=0, max_P=2, start_Q=0, max_Q=2,
-                        information_criterion='aic', stepwise=True,
+                        information_criterion='oob',
+                        out_of_sample_size=30,
+                        stepwise=True,
                         error_action='ignore', suppress_warnings=True,
-                        n_jobs=-1,
+                        n_jobs=1,
                     )
                     sarimax_order    = aa.order
                     sarimax_seasonal = aa.seasonal_order
@@ -3003,10 +2922,14 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             # 훈련 파라미터 고정, 칼만 필터로 1-step ahead 예측
             fit_full   = mdl_full.filter(fit.params)
             pred_obj   = fit_full.get_prediction(start=n_train, dynamic=False)
-            pred_price = pred_obj.predicted_mean.values[-n_test_sx:]
-
-            y_px_te_sx = sx_test['target_price'].values
-            # full_df extra 행(target_price ffill 오염) 제거 — feature_df 기준만 평가
+            _pred_all = pred_obj.predicted_mean.values[-n_test_sx:]
+            # 라이브 등가 D+1 평가: pred[k]=E[WTI_k|WTI_{k-1},exog_k], 실제 return 보정
+            # → WTI_k + β*exog_k (라이브와 동일: 오늘 exog로 내일 예측)
+            # vs target_price[k] = WTI_{k+1}
+            # full_wti는 _to_bday로 확장될 수 있으므로 마지막 n_test_sx 포지션 사용
+            _wti_returns = full_wti.values[-n_test_sx:] - full_wti.values[-(n_test_sx+1):-1]
+            pred_price   = _pred_all + _wti_returns
+            y_px_te_sx   = sx_test['target_price'].values
             _eval_mask   = sx_test.index.isin(feature_df.index)
             _pred_eval   = pred_price[_eval_mask]
             _actual_eval = y_px_te_sx[_eval_mask]
@@ -3024,9 +2947,11 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             )
             fit_live = mdl_live.fit(disp=False, maxiter=100)
 
+            _ci_q75_sx = float(np.percentile(np.abs(_actual_eval - _pred_eval), 75))
             results['sarimax'] = {
                 'model': fit_live, 'features': exog_cols, 'type': 'price',
                 'rmse': rmse_b, 'mae': mae_b, 'r2': r2_b,
+                'ci_calib_q75': _ci_q75_sx,
                 'name': f'SARIMAX{sarimax_order} 1-step',
                 'pred_price_test':   _pred_eval,
                 'actual_price_test': _actual_eval,
@@ -3034,69 +2959,6 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 'order': sarimax_order, 'seasonal_order': sarimax_seasonal,
             }
             log.info(f"        1-step ahead → RMSE={rmse_b:.4f}  MAE={mae_b:.4f}  R²={r2_b:.4f}")
-
-            # 3번: SARIMAX 잔차 교정 (Residual Correction)
-            log.info("    [B2] SARIMAX 잔차 교정 모델 학습 중...")
-            try:
-                # 전체 데이터 fit_live의 잔차 사용 (훈련셋 구간만 추출)
-                train_resid = fit_live.resid.reindex(train_df.index).dropna()
-                rc_feat_cols = [c for c in
-                    ['vol_5d', 'vix_change', 'news_sentiment_smooth', 'dxy_change', 'gpr_zscore']
-                    if c in train_df.columns]
-
-                resid_s = pd.Series(train_resid.values,
-                                    index=train_df.index[-len(train_resid):])
-                rc_df   = train_df.loc[resid_s.index, rc_feat_cols].copy().fillna(0)
-                rc_df['resid_lag1'] = resid_s.shift(1)
-                rc_df['resid_lag2'] = resid_s.shift(2)
-                rc_target = resid_s.shift(-1)          # 다음 날 잔차가 타깃
-
-                valid_idx = rc_df.dropna().index.intersection(rc_target.dropna().index)
-                X_rc = rc_df.loc[valid_idx]
-                y_rc = rc_target.loc[valid_idx]
-
-                if len(X_rc) > 30:
-                    rc_scaler = StandardScaler()
-                    X_rc_s    = rc_scaler.fit_transform(X_rc)
-                    rc_model  = Ridge(alpha=10.0)      # 강한 정규화 → 과적합 방지
-                    rc_model.fit(X_rc_s, y_rc)
-
-                    # 테스트셋 교정값 계산 (마지막 훈련 잔차 사용)
-                    X_te_rc = test_df[rc_feat_cols].fillna(0).copy()
-                    X_te_rc['resid_lag1'] = float(resid_s.iloc[-1])
-                    X_te_rc['resid_lag2'] = float(resid_s.iloc[-2] if len(resid_s) >= 2 else resid_s.iloc[-1])
-                    corrections = rc_model.predict(rc_scaler.transform(X_te_rc[X_rc.columns]))
-
-                    # _pred_eval/_actual_eval: full_df extra 행 제거된 평가 기준
-                    _corr_len = len(_pred_eval)
-                    corrected = _pred_eval + corrections[:_corr_len]
-                    _ref = _actual_eval
-                    mae_c  = float(mean_absolute_error(_ref, corrected))
-                    mae_s  = results['sarimax']['mae']
-                    r2_c   = float(r2_score(_ref, corrected))
-                    r2_s   = results['sarimax']['r2']
-
-                    if mae_c < mae_s:
-                        rmse_c = float(np.sqrt(mean_squared_error(_ref, corrected)))
-                        log.info(f"        잔차 교정 채택 ✓  MAE: {mae_s:.4f} → {mae_c:.4f}  R²: {r2_s:.4f} → {r2_c:.4f}")
-                        # last_resid는 전체 데이터 기준 최신 잔차 사용
-                        full_resid = fit_live.resid.reindex(feature_df.index).dropna()
-                        results['resid_corrector'] = {
-                            'model':       rc_model,
-                            'scaler':      rc_scaler,
-                            'features':    list(X_rc.columns),
-                            'last_resid1': float(full_resid.iloc[-1]),
-                            'last_resid2': float(full_resid.iloc[-2] if len(full_resid) >= 2 else full_resid.iloc[-1]),
-                            'rc_feat_cols': rc_feat_cols,
-                        }
-                        results['sarimax']['r2']             = r2_c
-                        results['sarimax']['mae']            = mae_c
-                        results['sarimax']['rmse']           = rmse_c
-                        results['sarimax']['pred_price_test'] = corrected
-                    else:
-                        log.info(f"        잔차 교정 미채택 (MAE: {mae_s:.4f} ≤ {mae_c:.4f})")
-            except Exception as e:
-                log.warning(f"    잔차 교정 실패({e})")
 
         except Exception as exc:
             log.warning(f"SARIMAX 실패: {exc} → Ridge 대체")
@@ -3141,12 +3003,13 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             _mae_var  = float(mean_absolute_error(_y_var_te, _var_pred_arr))
             _r2_var   = float(r2_score(_y_var_te, _var_pred_arr))
             log.info(f"    [B2] VAR → RMSE={_rmse_var:.4f}  MAE={_mae_var:.4f}  R²={_r2_var:.4f}")
-            # SARIMAX보다 나으면 스택에 추가
+            _ci_q75_var = float(np.percentile(np.abs(_y_var_te - _var_pred_arr), 75))
             _sx_mae = results.get('sarimax', {}).get('mae', 999)
             results['var'] = {
                 'pred_price_test': _var_pred_arr,
                 'actual_price_test': _y_var_te,
                 'rmse': _rmse_var, 'mae': _mae_var, 'r2': _r2_var,
+                'ci_calib_q75': _ci_q75_var,
                 'model': _var_fit, 'cols': _var_cols, 'lag': _lag_ord,
                 'n_test': _n_te_v, 'type': 'price',
                 'name': f'VAR({_lag_ord}) WTI+Brent+DXY+VIX+OVX',
@@ -3363,8 +3226,8 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
 
             # ── 두 모델 평가
             def _eval(model, Xte, label):
-                _pr = np.clip(model.predict(Xte), -0.5, 0.5)   # inf 방지: ±50% 초과 수익률 제거
-                _px = test_df['WTI'].values * np.exp(_pr)
+                _pr = model.predict(Xte)   # log return 예측
+                _px = test_df['WTI'].values * np.exp(np.clip(_pr, -0.5, 0.5))
                 _r2 = float(r2_score(y_px_te, _px))
                 _mae = float(mean_absolute_error(y_px_te, _px))
                 _dir = float((np.sign(_pr) == np.sign(y_ret_te.values)).mean())
@@ -3393,10 +3256,9 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     _Xw_val= _sc_w.transform(X_tr[_vi])
                     _mw = xgb.XGBRegressor(**_xgb_p)
                     _mw.fit(_Xw_tr, y_tr[_ti], sample_weight=w_ret[_ti])
-                    _pp  = _mw.predict(_Xw_val)
-                    _px_w= train_df['WTI'].values[_vi] * np.exp(_pp)
-                    _y_px= train_df['target_price'].values[_vi]
-                    maes.append(mean_absolute_error(_y_px, _px_w))
+                    _pp   = _mw.predict(_Xw_val)   # log return 예측
+                    _y_px = train_df['WTI'].values[_vi] * np.exp(np.clip(_pp, -0.5, 0.5))
+                    maes.append(mean_absolute_error(train_df['target_price'].values[_vi], _y_px))
                 return float(np.mean(maes)) if maes else 999.0
 
             _wf_sel  = _wf_mae(train_df[_sel_feats].values, y_ret_tr.values, _sel_feats)
@@ -3432,7 +3294,11 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     _cls_feats, _sc_cls = _sel_feats, _sc_sel
                     _Xtr_cls, _Xte_cls = _Xtr_sel, _Xte_sel
                 _mD_cls_dir = xgb.XGBClassifier(**_xgb_cls_p)
-                _mD_cls_dir.fit(_Xtr_cls, _y_cls_tr, sample_weight=w_ret)
+                if _dz_mask_tr.sum() >= 100:
+                    _mD_cls_dir.fit(_Xtr_cls[_dz_mask_tr], _y_cls_tr[_dz_mask_tr],
+                                    sample_weight=w_ret[_dz_mask_tr])
+                else:
+                    _mD_cls_dir.fit(_Xtr_cls, _y_cls_tr, sample_weight=w_ret)
                 _xgb_cls_saved = _mD_cls_dir          # SVM 교체 전 XGB 모델 보존
                 _prob_xgb_orig = _mD_cls_dir.predict_proba(_Xte_cls)[:, 1]
                 _prob_up_te = _prob_xgb_orig
@@ -3698,25 +3564,13 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 except Exception as _be:
                     log.warning(f"    XGB blend 실패({_be})")
 
-                # threshold 고정 0.5 (test-set 탐색은 과적합 → wf_dir_acc로 선택)
-                _best_th    = 0.5
-                _best_dir_th = float(((_prob_up_te > 0.5).astype(int) == _y_cls_te).mean())
-                log.info(f"        threshold=0.5 (고정) → dir_acc={_best_dir_th*100:.1f}%")
-                _dir_cls = _best_dir_th
-                # 분류기 방향 + 회귀 크기 결합 (Classifier-adj)
-                _sign_cls = np.where(_prob_up_te > _best_th, 1.0, -1.0)
-                _pr_cls_adj = np.clip(np.abs(_pr_s) * _sign_cls, -0.5, 0.5)
-                _px_cls_adj = test_df['WTI'].values * np.exp(_pr_cls_adj)
-                _mae_cls    = float(mean_absolute_error(y_px_te, _px_cls_adj))
-                _r2_cls     = float(r2_score(y_px_te, _px_cls_adj))
-                _rmse_cls   = float(np.sqrt(mean_squared_error(y_px_te, _px_cls_adj)))
-
                 # ── Walk-forward 5폴드 방향성 평가 (신뢰 지표, 모델 선택 영향 없음)
                 # 실제 예측 파이프라인과 동일한 피처셋(_cem_cols 전체) + 최적 C 사용
                 _wf_dir_acc = 0.0
+                _wf_opt_th  = 0.5
                 try:
                     from sklearn.svm import SVC as _SVC_wf
-                    _wf_dirs = []
+                    _wf_dirs, _wf_ths = [], []
                     for _wti, _wvi in TimeSeriesSplit(n_splits=3).split(_Xtr_svm):
                         if len(_wti) < 100 or len(_wvi) < 15:
                             continue
@@ -3732,9 +3586,17 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         else:
                             _wsm.fit(_wXtr, _y_cls_tr[_wti], sample_weight=_wf_sw)
                         _wpv = _wsm.predict_proba(_wXva)[:, 1]
-                        _wf_dirs.append(
-                            float(((_wpv > 0.5).astype(int) == _y_cls_tr[_wvi]).mean()))
+                        # WF fold별 최적 threshold 탐색
+                        _fold_th, _fold_best = 0.5, 0.0
+                        for _th in np.arange(0.35, 0.66, 0.05):
+                            _d = float(((_wpv > _th).astype(int) == _y_cls_tr[_wvi]).mean())
+                            if _d > _fold_best:
+                                _fold_best, _fold_th = _d, float(_th)
+                        _wf_dirs.append(_fold_best)
+                        _wf_ths.append(_fold_th)
                     _wf_dir_acc = float(np.mean(_wf_dirs)) if _wf_dirs else 0.0
+                    _wf_opt_th  = float(np.median(_wf_ths)) if _wf_ths else 0.5
+                    log.info(f"        SVM WF 최적 threshold={_wf_opt_th:.2f}")
                 except Exception as _wfe:
                     log.warning(f"    WF 평가 실패({_wfe})")
                 _wf_svm_acc = _wf_dir_acc  # SVM WF acc 별도 보존
@@ -3743,13 +3605,18 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 _wf_xgb_acc = 0.0
                 try:
                     _wf_xgb_dirs = []
+                    _wf_xgb_p = {**_xgb_cls_p, 'n_estimators': 100}  # WF fold용 경량화
                     for _wti, _wvi in TimeSeriesSplit(n_splits=3).split(_Xtr_cls):
                         if len(_wti) < 100 or len(_wvi) < 15:
                             continue
                         _wf_sw2 = np.exp(0.002 * np.arange(len(_wti)))
-                        _wxgb = xgb.XGBClassifier(**_xgb_cls_p)
-                        _wxgb.fit(_Xtr_cls[_wti], _y_cls_tr[_wti],
-                                  sample_weight=_wf_sw2)
+                        _dz_wf = _dz_mask_tr[_wti]
+                        _wxgb = xgb.XGBClassifier(**_wf_xgb_p)
+                        if _dz_wf.sum() >= 30:
+                            _wxgb.fit(_Xtr_cls[_wti][_dz_wf], _y_cls_tr[_wti][_dz_wf],
+                                      sample_weight=_wf_sw2[_dz_wf])
+                        else:
+                            _wxgb.fit(_Xtr_cls[_wti], _y_cls_tr[_wti], sample_weight=_wf_sw2)
                         _wxp = _wxgb.predict_proba(_Xtr_cls[_wvi])[:, 1]
                         _wf_xgb_dirs.append(
                             float(((_wxp > 0.5).astype(int) == _y_cls_tr[_wvi]).mean()))
@@ -3773,6 +3640,19 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                             log.info(f"        [WF-weighted blend] dir={_db_wf*100:.1f}% (SVM_w={_ws:.2f} XGB_w={_wx:.2f})")
                 except Exception as _wfb_e:
                     pass
+
+                # WF 평가 완료 후 threshold 적용 (WF fold threshold는 참고용; test엔 0.5 고정)
+                _best_th    = 0.5
+                _best_dir_th = float(((_prob_up_te > _best_th).astype(int) == _y_cls_te).mean())
+                log.info(f"        threshold={_best_th:.2f} (WF최적) → dir_acc={_best_dir_th*100:.1f}%")
+                _dir_cls = _best_dir_th
+                # 분류기 방향 + 회귀 크기 결합 (Classifier-adj)
+                _sign_cls = np.where(_prob_up_te > _best_th, 1.0, -1.0)
+                _pr_cls_adj = np.clip(np.abs(_pr_s) * _sign_cls, -0.5, 0.5)
+                _px_cls_adj = test_df['WTI'].values * np.exp(_pr_cls_adj)
+                _mae_cls    = float(mean_absolute_error(y_px_te, _px_cls_adj))
+                _r2_cls     = float(r2_score(y_px_te, _px_cls_adj))
+                _rmse_cls   = float(np.sqrt(mean_squared_error(y_px_te, _px_cls_adj)))
 
                 log.info(f"        [단일윈도우] dir={_dir_cls*100:.1f}%  "
                          f"[WF-5폴드 평균] dir={_wf_dir_acc*100:.1f}%  "
@@ -4017,7 +3897,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             # ── 회귀 후보 WF dir 계산 (분류기와 동일 기준으로 공정 비교)
             _wf_dir_f, _wf_dir_s = _dir_f, _dir_s  # fallback: test-set
             try:
-                _y_ret_arr = y_ret_tr.values
+                _y_ret_arr = y_ret_tr.values   # 훈련 타겟 + 방향 평가용
                 _wf_dirs_f, _wf_dirs_s = [], []
                 for _wti_r, _wvi_r in TimeSeriesSplit(n_splits=3).split(_Xtr_full):
                     if len(_wti_r) < 100 or len(_wvi_r) < 15:
@@ -4025,14 +3905,14 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     _wr_f = xgb.XGBRegressor(**_xgb_p)
                     _wr_f.fit(_Xtr_full[_wti_r], _y_ret_arr[_wti_r],
                               sample_weight=w_ret[_wti_r])
-                    _pr_wf_f = np.clip(_wr_f.predict(_Xtr_full[_wvi_r]), -0.5, 0.5)
+                    _pr_wf_f = _wr_f.predict(_Xtr_full[_wvi_r])  # log return 예측
                     _wf_dirs_f.append(
                         float((np.sign(_pr_wf_f) == np.sign(_y_ret_arr[_wvi_r])).mean()))
 
                     _wr_s = xgb.XGBRegressor(**_xgb_p)
                     _wr_s.fit(_Xtr_sel[_wti_r], _y_ret_arr[_wti_r],
                               sample_weight=w_ret[_wti_r])
-                    _pr_wf_s = np.clip(_wr_s.predict(_Xtr_sel[_wvi_r]), -0.5, 0.5)
+                    _pr_wf_s = _wr_s.predict(_Xtr_sel[_wvi_r])  # log return 예측
                     _wf_dirs_s.append(
                         float((np.sign(_pr_wf_s) == np.sign(_y_ret_arr[_wvi_r])).mean()))
 
@@ -4108,6 +3988,50 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
         except Exception as exc:
             log.warning(f"    XGBoost 수익률 예측 실패({exc})")
     # ─────────────────────────────────────────────────────────────────────
+    # Model F: 직접 다단계 XGBoost (D+2-7 horizon-specific)
+    # ─────────────────────────────────────────────────────────────────────
+    if _XGB and _SKL and 'xgb_return' in results:
+        try:
+            log.info("    [F] 직접 다단계 XGBoost (D+2-7) 학습 중...")
+            _xr = results['xgb_return']
+            _feats_ms = [f for f in (_xr.get('_reg_features') or _xr['features']) if f in feature_df.columns]
+            _ms_models, _ms_mase = {}, {}
+            _xgb_ms_p = dict(n_estimators=200, max_depth=3, learning_rate=0.05,
+                             subsample=0.7, colsample_bytree=0.6,
+                             min_child_weight=8, reg_alpha=0.2, reg_lambda=2.0,
+                             n_jobs=1, random_state=42, verbosity=0)
+            for h in range(2, 8):
+                _wti_s    = feature_df['WTI']
+                _log_ret_h = np.log(_wti_s.shift(-h) / _wti_s)
+                _y_tr_h   = _log_ret_h.iloc[:-n_test].values
+                _y_te_h   = _log_ret_h.iloc[-n_test:].values
+                _n_valid  = n_test - h
+                _mask_tr  = ~np.isnan(_y_tr_h) & np.all(np.isfinite(train_df[_feats_ms].values), axis=1)
+                _y_te_v   = _y_te_h[:_n_valid]
+                _Xte_v    = test_df[_feats_ms].values[:_n_valid]
+                _mask_te  = ~np.isnan(_y_te_v) & np.all(np.isfinite(_Xte_v), axis=1)
+                if _mask_tr.sum() < 120 or _mask_te.sum() < 10:
+                    continue
+                _sc_h  = StandardScaler()
+                _Xtr_sc = _sc_h.fit_transform(train_df[_feats_ms].values[_mask_tr])
+                _Xte_sc = _sc_h.transform(_Xte_v[_mask_te])
+                _m_h   = xgb.XGBRegressor(**_xgb_ms_p)
+                _m_h.fit(_Xtr_sc, _y_tr_h[_mask_tr])
+                _pred_ret = np.clip(_m_h.predict(_Xte_sc), -0.3, 0.3)
+                _wti_cur  = test_df['WTI'].values[:_n_valid][_mask_te]
+                _pred_px  = _wti_cur * np.exp(_pred_ret)
+                _act_px   = _wti_cur * np.exp(_y_te_v[_mask_te])
+                _mae_h    = float(mean_absolute_error(_act_px, _pred_px))
+                _naive_h  = float(mean_absolute_error(_act_px, _wti_cur))
+                _mase_h   = _mae_h / max(_naive_h, 1e-6)
+                _ms_models[h] = {'model': _m_h, 'scaler': _sc_h, 'features': _feats_ms}
+                _ms_mase[h]   = _mase_h
+                log.info(f"        D+{h} XGB: MAE={_mae_h:.4f}, MASE={_mase_h:.4f}")
+            if _ms_models:
+                results['xgb_ms'] = {'models': _ms_models, 'mase': _ms_mase}
+        except Exception as _ms_e:
+            log.warning(f"    직접 다단계 XGBoost 실패({_ms_e})")
+    # ─────────────────────────────────────────────────────────────────────
     # Model E: Stacking 앙상블 (SARIMAX + XGBoost → Ridge 메타러너)
     # ─────────────────────────────────────────────────────────────────────
     if (_SKL and 'sarimax' in results and 'xgb_return' in results):
@@ -4131,7 +4055,15 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 xr_pred = test_df['WTI'].values * np.exp(np.clip(_pr_s, -0.5, 0.5))
 
             if sx_pred is not None and xr_pred is not None:
-                # 스택 피처 구성: SARIMAX + XGB, LGB/VAR 있으면 추가
+                # 적응형 윈도우 시 SARIMAX test < XGB test → 짧은 쪽으로 정렬
+                _n_sx = len(sx_pred)
+                _n_xr = len(xr_pred)
+                if _n_sx != _n_xr:
+                    _n_stk = min(_n_sx, _n_xr)
+                    sx_pred = sx_pred[-_n_stk:]
+                    xr_pred = xr_pred[-_n_stk:]
+                    log.info(f"    스태킹 test 길이 정렬: SARIMAX {_n_sx} ≠ XGB {_n_xr} → {_n_stk}행")
+
                 _stack_parts = [sx_pred, xr_pred]
                 _stack_names = ['SARIMAX', 'XGB']
 
@@ -4146,9 +4078,9 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 # ETS는 stacking에서 제외 — SARIMAX가 앙상블 다양성 기여
                 # (ETS 단독 MAE 우수하더라도 스태킹 성능 저하 확인됨)
 
-
                 _stack_X = np.column_stack(_stack_parts)
-                _stack_y = y_px_te
+                _n_stk_actual = len(_stack_X)
+                _stack_y = y_px_te.iloc[-_n_stk_actual:] if hasattr(y_px_te, 'iloc') else y_px_te[-_n_stk_actual:]
 
                 # 역MAE 가중평균 (초기값)
                 _mae_lookup = {
@@ -4157,8 +4089,28 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     'XGB':     xr_info.get('mae', 999.0),
                     'VAR':     results.get('var', {}).get('mae', 999.0),
                 }
-                _inv_mae = np.array([1.0 / max(_mae_lookup.get(n, 999.0), 1e-6)
-                                     for n in _stack_names])
+                # MASE 필터: naive 대비 개선된 모델만(MASE<1.0) 풀 진입
+                _y_stk_naive   = test_df['WTI'].values[-_n_stk_actual:]
+                _naive_mae_stk = float(mean_absolute_error(_stack_y, _y_stk_naive))
+                _stk_thresh    = _naive_mae_stk
+                _mase_mask = np.array([_mae_lookup.get(n, 999.0) < _stk_thresh
+                                       for n in _stack_names])
+                if not _mase_mask.any():
+                    _mase_mask[:] = True  # 폴백: 전 모델 기준 미달이면 원본 InvMAE 사용
+                    log.info("    MASE 필터 무력화: 전 모델 MASE≥0.85 → 원본 InvMAE 사용")
+                elif _mase_mask.sum() <= 1:
+                    _sole = [n for n, m in zip(_stack_names, _mase_mask) if m]
+                    log.info(f"    스태킹 건너뜀: 필터 통과 모델 1개({_sole}) — 단독 모델 사용")
+                    raise ValueError(f"단일 모델 풀({_sole[0]}) — 스태킹 무효")
+                else:
+                    _excl = [n for n, m in zip(_stack_names, _mase_mask) if not m]
+                    if _excl:
+                        log.info(f"    MASE 필터 제외: {_excl} "
+                                 f"(기준={_stk_thresh:.4f}, naive×0.85)")
+                _inv_mae = np.array([
+                    1.0 / max(_mae_lookup.get(n, 999.0), 1e-6) if _mase_mask[i] else 0.0
+                    for i, n in enumerate(_stack_names)
+                ])
                 _stack_weights = _inv_mae / _inv_mae.sum()
                 _stack_pred    = _stack_X @ _stack_weights
                 _meta_type     = 'InvMAE-WA'
@@ -4184,7 +4136,16 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         _mae_fh = {_stack_names[_i]: float(mean_absolute_error(
                             _stack_y[:_split_m], _stack_X[:_split_m, _i]))
                             for _i in range(len(_stack_names))}
-                        _inv_fh = np.array([1.0 / max(_mae_fh[n], 1e-6) for n in _stack_names])
+                        _naive_mae_fh = float(mean_absolute_error(
+                            _stack_y[:_split_m], _y_stk_naive[:_split_m]))
+                        _mase_ok_fh = np.array([_mae_fh[n] < _naive_mae_fh
+                                                for n in _stack_names])
+                        if not _mase_ok_fh.any():
+                            _mase_ok_fh[:] = True
+                        _inv_fh = np.array([
+                            1.0 / max(_mae_fh[n], 1e-6) if _mase_ok_fh[i] else 0.0
+                            for i, n in enumerate(_stack_names)
+                        ])
                         _wt_fh  = _inv_fh / _inv_fh.sum()
                         _adapt_half = _stack_X[_split_m:] @ _wt_fh
                         _mae_ah = float(mean_absolute_error(_stack_y[_split_m:], _adapt_half))
@@ -4242,14 +4203,15 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 # ── 동적 블랙스완 가중치 (jump_flag/extreme_neg_news → SARIMAX per-row 페널티)
                 if 'SARIMAX' in _stack_names and 'jump_flag' in test_df.columns:
                     _sx_i   = _stack_names.index('SARIMAX')
-                    _jf_t   = test_df['jump_flag'].fillna(0).values
-                    _en_t   = (test_df['extreme_neg_news'].fillna(0).values
-                               if 'extreme_neg_news' in test_df.columns else np.zeros(len(test_df)))
-                    _gz_t   = (test_df['gpr_zscore'].fillna(0).values
-                               if 'gpr_zscore' in test_df.columns else np.zeros(len(test_df)))
+                    _n_s    = len(_stack_X)
+                    _jf_t   = test_df['jump_flag'].fillna(0).values[-_n_s:]
+                    _en_t   = (test_df['extreme_neg_news'].fillna(0).values[-_n_s:]
+                               if 'extreme_neg_news' in test_df.columns else np.zeros(_n_s))
+                    _gz_t   = (test_df['gpr_zscore'].fillna(0).values[-_n_s:]
+                               if 'gpr_zscore' in test_df.columns else np.zeros(_n_s))
                     _bpen_t = np.where((_en_t >= 1) & (_jf_t >= 1), 0.45,
                               np.where((_en_t >= 1) | (_jf_t >= 1) | (_gz_t > 2.0), 0.60, 1.0))
-                    _pm     = np.ones((len(_stack_X), len(_stack_names)))
+                    _pm     = np.ones((_n_s, len(_stack_names)))
                     _pm[:, _sx_i] = _bpen_t
                     _wr     = _stack_weights[np.newaxis, :] * _pm
                     _wr    /= _wr.sum(axis=1, keepdims=True)
@@ -4294,14 +4256,22 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     if _wv > 0.80:
                         log.warning(f"    ⚠ 스태킹 가중치 편중: {_wn}={_wv:.3f} > 0.80 "
                                     f"(모델 다양성 저하 가능)")
-                    elif _wv < 0.05:
+                    elif 0 < _wv < 0.05:
                         log.warning(f"    ⚠ 스태킹 가중치 미미: {_wn}={_wv:.3f} < 0.05 "
                                     f"(해당 모델 기여 없음)")
 
-                # Stacking 채택 기준: 최고 단일 모델(SARIMAX) 기준
-                # MAE < SARIMAX MAE  OR  (R² > SARIMAX R² AND MAE < SARIMAX MAE × 1.05)
-                _mae_best = sx_info.get('mae', xr_info.get('mae', float('inf')))
-                _r2_best  = sx_info.get('r2', -float('inf'))
+                # Stacking 채택 기준: 모든 컴포넌트 모델 중 최고 성능 기준
+                # MAE < min(SARIMAX,XGB,VAR MAE)  OR  (R² > max R² AND MAE < min_mae × 1.05)
+                _mae_best = min(
+                    sx_info.get('mae', float('inf')),
+                    xr_info.get('mae', float('inf')),
+                    results.get('var', {}).get('mae', float('inf')),
+                )
+                _r2_best = max(
+                    sx_info.get('r2', -float('inf')),
+                    xr_info.get('r2', -float('inf')),
+                    results.get('var', {}).get('r2', -float('inf')),
+                )
                 _stk_mae_ok    = _mae_stack < _mae_best
                 _stk_r2_relax  = (_r2_stack > _r2_best) and (_mae_stack < _mae_best * 1.05)
                 if _stk_mae_ok or _stk_r2_relax:
@@ -4380,7 +4350,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                     except Exception as _ece:
                         log.warning(f"    오차 보정 모델 실패({_ece})")
                 else:
-                    log.info(f"    Stacking 미채택 (MAE={_mae_stack:.4f} ≥ SARIMAX {_mae_best:.4f}×1.05={_mae_best*1.05:.4f})")
+                    log.info(f"    Stacking 미채택 (MAE={_mae_stack:.4f} ≥ best_component {_mae_best:.4f}×1.05={_mae_best*1.05:.4f})")
                     results['stacking_rejected'] = {
                         'name': f'Stacking (+{"+".join(_stack_names)},미채택)',
                         'type': 'price',
@@ -4410,10 +4380,14 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                  f"변동성 MAE={_naive_mae_rv:.6f} R²={_naive_r2_rv:.4f}")
     except Exception as _nbe:
         log.warning(f"    나이브 기준선 계산 실패({_nbe})")
+    # M6-ABS 게이트용: 나이브 MAE를 results에 저장
+    results['naive_px_mae'] = _naive_mae_px
 
     # ── 성능 저장
     perf_rows = []
     for v in results.values():
+        if not isinstance(v, dict):
+            continue
         if 'name' not in v or 'type' not in v:
             continue
         if v.get('benchmark_only', False):
@@ -4432,13 +4406,16 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 row['mase'] = round(v['mae'] / _nm, 4)
         except Exception:
             pass
-        # MaxError (꼬리 오차 관리)
+        # MaxError (꼬리 오차 관리) + CI Q75
         if 'pred_price_test' in v and 'actual_price_test' in v:
             try:
                 _errs = np.abs(np.array(v['actual_price_test']) - np.array(v['pred_price_test']))
                 row['max_error'] = round(float(_errs.max()), 4)
+                row['ci_q75']    = round(float(np.percentile(_errs, 75)), 4)
             except Exception:
                 pass
+        elif 'ci_calib_q75' in v:
+            row['ci_q75'] = round(float(v['ci_calib_q75']), 4)
         perf_rows.append(row)
     # 나이브 퍼시스턴스 기준선 행 추가
     if _naive_mae_px is not None:
@@ -4491,13 +4468,13 @@ def _ridge_fallback(results, Xtr, ytr, Xte, yte, feats, scaler):
 
 
 
-def compute_ensemble_weights(window: int = 30, ovx_level: float = 0.0):
-    """R² 기반 초기 가중치 + MAPE 미세조정 + OVX 레짐 패널티로 SARIMAX/XGBoost 가중치 산출.
+def compute_ensemble_weights(window: int = 30, ovx_level: float = 0.0, price_mom: float = 0.0):
+    """R² 기반 초기 가중치 + MAPE 미세조정 + OVX/모멘텀 레짐 패널티로 SARIMAX/XGBoost 가중치 산출.
 
     1단계: model_performance.csv의 역MAE로 비례 가중치 계산
     2단계: 최근 backtest/live MAPE로 미세조정 (OVX HIGH 시 범위 확장)
-    3단계: OVX 레짐 페널티 적용 (OVX≥60 → SARIMAX -0.12)
-    R² 정보 없으면 기본값(0.65/0.35), 최종 클램프 [0.30, 0.70].
+    3단계: OVX 레짐 페널티 (OVX≥60 → -0.12) + M5 가격 모멘텀 충격 페널티
+    R² 정보 없으면 기본값(0.65/0.35), 최종 클램프 [0.10, 0.70].
     """
     default = (0.65, 0.35)
 
@@ -4544,10 +4521,16 @@ def compute_ensemble_weights(window: int = 30, ovx_level: float = 0.0):
         mape_adj = float(np.clip(np.interp(sarimax_mape, [3.0, 8.0], [0.05, _mape_lo]), _mape_lo, 0.05))
         _ovx_pen = -0.12 if ovx_level >= 60 else (-0.06 if ovx_level >= 40 else 0.0)
 
-        w_s = float(np.clip(w_s_base + mape_adj + _ovx_pen, 0.30, 0.70))
+        # M5: 가격 모멘텀 충격 페널티 (OVX/뉴스보다 빠른 선행 신호)
+        _mom_abs = abs(price_mom)
+        _mom_pen = (-0.25 if _mom_abs >= 0.10 else
+                    -0.15 if _mom_abs >= 0.06 else 0.0)
+
+        _w_lo = 0.10 if _mom_abs >= 0.06 or ovx_level >= 60 else 0.30
+        w_s = float(np.clip(w_s_base + mape_adj + _ovx_pen + _mom_pen, _w_lo, 0.70))
         log.info(f"    최종 앙상블 가중치(2모델 fallback): SARIMAX={w_s:.2f} XGB={1-w_s:.2f} "
-                 f"(base={w_s_base:.2f} MAPE={mape_adj:+.2f} OVX페널티={_ovx_pen:+.2f} "
-                 f"ovx={ovx_level:.0f} sarimax_mape={sarimax_mape:.2f}%)")
+                 f"(base={w_s_base:.2f} MAPE={mape_adj:+.2f} OVX={_ovx_pen:+.2f} "
+                 f"MOM={_mom_pen:+.2f} ovx={ovx_level:.0f} mom={price_mom:.1%})")
         return w_s, 1 - w_s
     except Exception:
         return w_s_base, 1 - w_s_base
@@ -4651,7 +4634,7 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             ecols    = results['sarimax']['features']
             _exog_src = full_df if full_df is not None else feature_df
             last_exog = _exog_src[ecols].iloc[-1]
-            fut_exog  = pd.DataFrame([last_exog.values] * 7, columns=ecols)
+            fut_exog  = pd.DataFrame(np.zeros((7, len(ecols))), columns=ecols)  # 변화량 피처 미래 기대값=0
             fc_vals   = sfit.forecast(steps=7, exog=fut_exog)
             forecasts['sarimax'] = np.array(fc_vals)
             log.info(f"    SARIMAX 7일 예측: {fc_vals.values.round(2)}")
@@ -4731,8 +4714,8 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                 _cls_th = info.get('threshold', 0.5)
                 pred_ret_d1 = abs(_mag_ret) * (1.0 if _prob_up_fc > _cls_th else -1.0)
             else:
-                pred_ret_d1 = float(model.predict(last_s)[0])   # D+1 log 수익률
-            # D+1~7: D+1 수익률 감쇠 체인 (D+2-7은 A4 persistence blend로 덮어씀)
+                pred_ret_d1 = float(model.predict(last_s)[0])  # log return 예측
+            # D+1~7 가격 경로
             decay = np.array([0.95 ** i for i in range(7)])
             ret_path = pred_ret_d1 * decay
             price_path = last_price * np.exp(np.cumsum(ret_path))
@@ -4782,26 +4765,28 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         except Exception as e:
             log.warning(f"잔차 교정 예측 실패: {e}")
 
-    # ── 4번: 롤링 bias 교정 (live gap 기반 SARIMAX 체계적 오차 보정)
+    # ── 4번: 롤링 bias 교정 (live 예측 오차 기반 SARIMAX 체계적 오차 보정)
     if 'sarimax' in forecasts:
         try:
-            _gap_path = OUTPUT_DIR / 'live_gap_spikes.csv'
-            if _gap_path.exists():
-                _gap_df = pd.read_csv(_gap_path)
-                if 'price_error' in _gap_df.columns:
-                    _recent_err = _gap_df['price_error'].dropna().head(5)
+            _log_path = OUTPUT_DIR / 'prediction_log.csv'
+            if _log_path.exists():
+                _log_df = pd.read_csv(_log_path)
+                if 'price_error' in _log_df.columns and 'type' in _log_df.columns:
+                    _live_df = _log_df[_log_df['type'] == 'live']
+                    _recent_err = _live_df.sort_values('date').tail(5)['price_error'].dropna()
                     if len(_recent_err) >= 3:
                         _bias = float(np.clip(_recent_err.mean(), -10.0, 10.0))
                         if abs(_bias) > 1.0:
                             forecasts['sarimax'] = forecasts['sarimax'] + _bias
-                            log.info(f"    롤링 bias 교정: {_bias:+.2f}$ (최근 {len(_recent_err)}일 평균오차 기반)")
+                            log.info(f"    롤링 bias 교정: {_bias:+.2f}$ (최근 {len(_recent_err)}일 live 평균오차 기반)")
         except Exception as _be:
             log.debug(f"    롤링 bias 교정 실패: {_be}")
 
     # ── 동적 앙상블 가중치 (최근 backtest 오차 기반)
     _feat_ovx_src = full_df if full_df is not None else feature_df
     _live_ovx = float(_feat_ovx_src['OVX'].iloc[-1]) if 'OVX' in _feat_ovx_src.columns and _feat_ovx_src['OVX'].notna().any() else 0.0
-    w_sarimax, w_xgb = compute_ensemble_weights(ovx_level=_live_ovx)
+    _live_mom5 = float(_feat_ovx_src['mom_5d'].dropna().iloc[-1]) if 'mom_5d' in _feat_ovx_src.columns and _feat_ovx_src['mom_5d'].notna().any() else 0.0
+    w_sarimax, w_xgb = compute_ensemble_weights(ovx_level=_live_ovx, price_mom=_live_mom5)
 
     if 'sarimax' in forecasts and 'xgb' in forecasts and 'stacking' in results:
         _sx_fc      = forecasts['sarimax']
@@ -4829,6 +4814,15 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             # 상승변동성: 중간 강도 SARIMAX 축소
             _reg_adj.update({'VAR': 1.3, 'XGB': 1.0, 'SARIMAX': 0.7})
             log.info(f"    레짐: 상승변동성 (ovx_z={_cur_ovx_z:.2f} vol_pct={_vol_pct:.0%}) → SARIMAX↓ VAR↑")
+        # M5(stacking): 가격 모멘텀 충격 — OVX/GPR보다 빠른 선행 신호로 SARIMAX 추가 억제
+        _stk_mom5 = float(_feat_src_r['mom_5d'].dropna().iloc[-1]) if 'mom_5d' in _feat_src_r.columns and _feat_src_r['mom_5d'].notna().any() else 0.0
+        _stk_mom_abs = abs(_stk_mom5)
+        if _stk_mom_abs >= 0.10:
+            _reg_adj['SARIMAX'] = min(_reg_adj.get('SARIMAX', 1.0), 0.20)
+            log.info(f"    M5(stk) 모멘텀충격 (mom5={_stk_mom5:.1%}) → SARIMAX ×0.20")
+        elif _stk_mom_abs >= 0.06:
+            _reg_adj['SARIMAX'] = min(_reg_adj.get('SARIMAX', 1.0), 0.40)
+            log.info(f"    M5(stk) 모멘텀 (mom5={_stk_mom5:.1%}) → SARIMAX ×0.40")
         _adj_arr = np.array([_reg_adj.get(n, 1.0) for n in _stk_names]) * _stk_wts
         if _adj_arr.sum() > 0:
             _stk_wts = _adj_arr / _adj_arr.sum()
@@ -4837,13 +4831,12 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         _var_fc = None
         if 'VAR' in _stk_names and 'var' in results:
             try:
-                _vr   = results['var']
-                _vfit = _vr['model']
+                _vr    = results['var']
+                _vfit  = _vr['model']
                 _vcols = _vr['cols']
                 _vlag  = _vr['lag']
                 _vhist = feature_df[_vcols].dropna().asfreq('B', method='ffill').dropna()
-                _vfc   = _vfit.forecast(_vhist.values[-_vlag:], steps=7)
-                _var_fc = _vfc[:, 0]   # WTI 열
+                _var_fc = _vfit.forecast(_vhist.values[-_vlag:], steps=7)[:, 0]
                 forecasts['var_fc'] = _var_fc
             except Exception as _ve:
                 log.warning(f"VAR 예측 실패: {_ve}")
@@ -4897,17 +4890,32 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         # (fallback 역MAE 앙상블은 XGB/VAR 노이즈로 오히려 악화)
         _stk_rej = results.get('stacking_rejected', {})
         _sx_mae_fb = results.get('sarimax', {}).get('mae', 999.0)
+        _naive_px_fb = results.get('naive_px_mae')
+        _sx_reliable = (not _naive_px_fb) or (_sx_mae_fb <= _naive_px_fb)
         if _stk_rej and _stk_rej.get('mae', 999.0) > _sx_mae_fb:
-            ensemble = forecasts['sarimax'].copy()
-            log.info(f"    SARIMAX 단독 사용 (stacking 미채택, SARIMAX MAE={_sx_mae_fb:.4f} 최선) "
-                     f"→ D+1={ensemble[0]:.2f}")
+            if _sx_reliable:
+                # SARIMAX가 stacking과 M6-ABS 모두 통과 → SARIMAX 단독 사용
+                ensemble = forecasts['sarimax'].copy()
+                log.info(f"    stacking 미채택 fallback: SARIMAX 단독 (최적, M6-ABS pass) → D+1={ensemble[0]:.2f}")
+            elif 'var' in results:
+                # SARIMAX M6-ABS FAIL → VAR fallback
+                try:
+                    _vr_fb2 = results['var']
+                    _vhfb2  = feature_df[_vr_fb2['cols']].dropna().asfreq('B', method='ffill').dropna()
+                    ensemble = _vr_fb2['model'].forecast(_vhfb2.values[-_vr_fb2['lag']:], steps=7)[:, 0]
+                    log.info(f"    stacking 미채택 fallback: VAR 단독 (SARIMAX M6-ABS FAIL) → D+1={ensemble[0]:.2f}")
+                except Exception as _vfe2:
+                    ensemble = forecasts['xgb'].copy()
+                    log.info(f"    stacking 미채택 fallback: VAR 실패({_vfe2}) → XGBoost 단독 → D+1={ensemble[0]:.2f}")
+            else:
+                ensemble = forecasts['xgb'].copy()
+                log.info(f"    stacking 미채택 fallback: XGBoost 단독 (SARIMAX M6-ABS FAIL) → D+1={ensemble[0]:.2f}")
         # VAR가 있으면 3모델 역MAE 가중 앙상블, 없으면 2모델
         elif 'var' in results:
             try:
-                _vr2   = results['var']
+                _vr2    = results['var']
                 _vhist2 = feature_df[_vr2['cols']].dropna().asfreq('B', method='ffill').dropna()
-                _vfc2   = _vr2['model'].forecast(_vhist2.values[-_vr2['lag']:], steps=7)
-                _var_fc2 = _vfc2[:, 0]
+                _var_fc2 = _vr2['model'].forecast(_vhist2.values[-_vr2['lag']:], steps=7)[:, 0]
                 forecasts['var_fc'] = _var_fc2
                 _mae_sx  = results['sarimax'].get('mae', 999.0)
                 _mae_xb  = results['xgb_return'].get('mae', 999.0)
@@ -4925,14 +4933,43 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                            0.45 if (_enews >= 1.0 and _jflag >= 1.0) else
                            0.60 if (_enews >= 1.0 or _jflag >= 1.0 or _gpr_z > 2.0) else 1.0)
                 _sx_pen = min(_sx_pen, _bs_pen)
+                # M5: 가격 모멘텀 충격 페널티 — OVX/뉴스보다 빠른 선행 신호
+                _mom5_val = float(_feat_r2['mom_5d'].dropna().iloc[-1]) if 'mom_5d' in _feat_r2.columns and _feat_r2['mom_5d'].notna().any() else 0.0
+                _mom3_val = float(_feat_r2['WTI'].pct_change(3).dropna().iloc[-1]) if 'WTI' in _feat_r2.columns else _mom5_val
+                _max_mom_abs = max(abs(_mom5_val), abs(_mom3_val))
+                _mom_pen2 = (0.20 if _max_mom_abs >= 0.10 else
+                             0.40 if _max_mom_abs >= 0.06 else 1.0)
+                _sx_pen = min(_sx_pen, _mom_pen2)
+                # M6: 최근 SARIMAX 실제 오차 기반 동적 페널티
+                try:
+                    _pl_rc = pd.read_csv(PRED_LOG_FILE)
+                    _bt_rc = _pl_rc[(_pl_rc['type'] == 'backtest') & _pl_rc['sarimax_pred'].notna() & _pl_rc['actual_price'].notna()].tail(7)
+                    if len(_bt_rc) >= 3:
+                        _rc_sx_mae = (_bt_rc['sarimax_pred'] - _bt_rc['actual_price']).abs().mean()
+                        _ov_sx_mae = max(_mae_sx, 0.1)
+                        _rc_ratio = _rc_sx_mae / _ov_sx_mae
+                        _rc_pen = (0.0 if _rc_ratio > 1.5 else
+                                   0.70 if _rc_ratio > 1.2 else 1.0)
+                        _sx_pen = min(_sx_pen, _rc_pen)
+                        log.info(f"    M6 최근SARIMAX MAE: {_rc_sx_mae:.2f} / 전체: {_ov_sx_mae:.2f} "
+                                 f"= {_rc_ratio:.2f}x → rc_pen={_rc_pen:.2f}"
+                                 f"{'  [SARIMAX GATE-OUT]' if _rc_pen == 0.0 else ''}")
+                except Exception:
+                    pass
+                # M6-절대 게이트: SARIMAX가 나이브 퍼시스턴스보다 나쁘면 즉시 배제
+                _naive_px = results.get('naive_px_mae')
+                if _naive_px and _mae_sx > _naive_px:
+                    _sx_pen = 0.0
+                    log.info(f"    M6-ABS GATE-OUT: SARIMAX MAE {_mae_sx:.2f} > Naive {_naive_px:.2f} → weight=0")
                 _inv = np.array([1/_mae_sx * _sx_pen, 1/_mae_xb, 1/_mae_vr])
                 _wts = _inv / _inv.sum()
                 ensemble = (_wts[0] * forecasts['sarimax']
                             + _wts[1] * forecasts['xgb']
                             + _wts[2] * _var_fc2)
-                log.info(f"    3모델 앙상블(InvMAE+OVX+BS레짐): SARIMAX×{_wts[0]:.2f} "
+                log.info(f"    3모델 앙상블(InvMAE+OVX+BS+MOM+RC): SARIMAX×{_wts[0]:.2f} "
                          f"XGB×{_wts[1]:.2f} VAR×{_wts[2]:.2f} "
-                         f"(ovx={_ovx_abs:.0f} sx_pen={_sx_pen:.2f} enews={_enews:.0f} jump={_jflag:.0f} gpr_z={_gpr_z:.1f}) → D+1={ensemble[0]:.2f}")
+                         f"(ovx={_ovx_abs:.0f} sx_pen={_sx_pen:.2f} mom5={_mom5_val:.1%} "
+                         f"enews={_enews:.0f} jump={_jflag:.0f} gpr_z={_gpr_z:.1f}) → D+1={ensemble[0]:.2f}")
             except Exception as _ve2:
                 log.warning(f"VAR 3모델 앙상블 실패({_ve2}) → 2모델 폴백")
                 ensemble = w_sarimax * forecasts['sarimax'] + w_xgb * forecasts['xgb']
@@ -5024,14 +5061,33 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         _persist_fc = np.full(len(ensemble), last_price)
         ensemble = (1 - _spike_blend) * ensemble + _spike_blend * _persist_fc
 
-    # ── A4: D+2-7 구조적 persistence 블렌딩 (multi-step MASE>1.0, 방향정확도<40% → 거의 pure persistence)
-    # D+1(index 0)은 0%이므로 기존 MASE(0.8132) 불변. D+2-7만 적용.
+    # ── A3.5: 직접 D+2-7 XGBoost 예측 주입 (MASE < 1.0인 호라이즌)
+    if 'xgb_ms' in results:
+        _ms_info  = results['xgb_ms']
+        _feat_src = full_df if full_df is not None else feature_df
+        _last_row = _feat_src.iloc[-1]
+        for _h in range(2, 8):
+            _h_idx = _h - 1
+            if _h in _ms_info['models'] and _h_idx < len(ensemble) and _ms_info['mase'].get(_h, 1.0) < 1.0:
+                _md = _ms_info['models'][_h]
+                _flist = [f for f in _md['features'] if f in _feat_src.columns]
+                _X_live = _md['scaler'].transform(_last_row[_flist].values.reshape(1, -1))
+                _ret_h  = float(np.clip(_md['model'].predict(_X_live)[0], -0.3, 0.3))
+                ensemble[_h_idx] = last_price * np.exp(_ret_h)
+
+    # ── A4: D+2-7 구조적 persistence 블렌딩 (MASE 기반 동적 조정)
     _ms_blend = np.array([0.0, 0.85, 0.90, 0.93, 0.95, 0.97, 0.98])[:len(ensemble)]
+    if 'xgb_ms' in results:
+        _ms_mase_d = results['xgb_ms']['mase']
+        for _bi in range(1, len(_ms_blend)):
+            _h_b = _bi + 1
+            if _h_b in _ms_mase_d and _ms_mase_d[_h_b] < 1.0:
+                _ms_blend[_bi] = float(min(_ms_blend[_bi], np.clip(_ms_mase_d[_h_b], 0.0, 0.98)))
     # 모멘텀 바이어스: persistence 기준점을 최근 추세로 보정 (리스크 방향성 정보 제공)
     _mom_src      = full_df if full_df is not None else feature_df
     _mom_val      = float(_mom_src['mom_5d'].dropna().iloc[-1]) if 'mom_5d' in _mom_src.columns else 0.0
-    _daily_mom    = np.clip(_mom_val / 5, -0.02, 0.02)   # 일일 환산, 과도한 외삽 방지
-    _mom_days     = np.arange(len(ensemble))               # [0,1,2,...,6]
+    _daily_mom    = np.clip(_mom_val / 5, -0.02, 0.02)
+    _mom_days     = np.arange(len(ensemble))
     _persist_base = last_price * (1 + _daily_mom * _mom_days * 0.3)
     ensemble = ensemble * (1 - _ms_blend) + _persist_base * _ms_blend
     _d7_adj = float(_persist_base[-1] - last_price) if len(_persist_base) > 1 else 0.0
@@ -5119,8 +5175,12 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             lower_75ci = ensemble - ci_half
             upper_75ci = ensemble + ci_half
 
-    # CI 경험적 보정: live prediction_log Q75 우선, 없으면 백테스트 Q75 폴백
-    _ci_q75 = (aux or {}).get('live_ci_q75') or (results.get('stacking') or {}).get('ci_calib_q75')
+    # CI 경험적 보정: live Q75 → stacking 백테스트 Q75 → SARIMAX 백테스트 Q75 순 폴백
+    _ci_q75 = (
+        (aux or {}).get('live_ci_q75')
+        or (results.get('stacking') or {}).get('ci_calib_q75')
+        or (results.get('sarimax') or {}).get('ci_calib_q75')
+    )
     if _ci_q75 is not None and lower_75ci is not None:
         _d1_half = (float(upper_75ci[0]) - float(lower_75ci[0])) / 2
         if _d1_half > 0.1:
@@ -5175,6 +5235,11 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         _run_date_str = pd.Timestamp.today().strftime('%Y-%m-%d')
         _snap_path = OUTPUT_DIR / 'forecast_snapshots.csv'
         _d1 = fc_df.iloc[0]
+        _d27_cols = {}
+        for _di in range(1, min(7, len(fc_df))):
+            _row_i = fc_df.iloc[_di]
+            _d27_cols[f'd{_di+1}_date']     = str(_row_i['date'])
+            _d27_cols[f'd{_di+1}_forecast'] = round(float(_row_i['forecast_price']), 2)
         _snap_row = pd.DataFrame([{
             'run_date':       _run_date_str,
             'forecast_date':  str(_d1['date']),
@@ -5182,11 +5247,26 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             'lower_75ci':     round(float(_d1['lower_75ci']), 2) if pd.notna(_d1.get('lower_75ci')) else None,
             'upper_75ci':     round(float(_d1['upper_75ci']), 2) if pd.notna(_d1.get('upper_75ci')) else None,
             'sarimax_pred':   round(float(_d1['sarimax_forecast']), 2) if pd.notna(_d1.get('sarimax_forecast')) else None,
+            **_d27_cols,
         }])
         if _snap_path.exists():
             _snap_existing = pd.read_csv(_snap_path)
             _snap_existing = _snap_existing[_snap_existing['run_date'] != _run_date_str]
             _snap_row = pd.concat([_snap_existing, _snap_row], ignore_index=True)
+        # 실제가 채우기: full_df WTI로 각 행의 actual 컬럼 업데이트
+        try:
+            if full_df is not None:
+                _price_str_map = {
+                    str(k.date()): round(float(v), 2)
+                    for k, v in full_df['WTI'].dropna().items()
+                }
+                for _cd, _ca in [('forecast_date', 'actual_price')] + [
+                    (f'd{_i}_date', f'd{_i}_actual') for _i in range(2, 8)
+                ]:
+                    if _cd in _snap_row.columns:
+                        _snap_row[_ca] = _snap_row[_cd].map(_price_str_map)
+        except Exception as _ae:
+            log.warning(f"    스냅샷 실제가 채우기 실패: {_ae}")
         _atomic_csv(_snap_row, _snap_path, index=False)
         log.info(f"    forecast_snapshots.csv 저장 (run={_run_date_str} → {str(_d1['date'])} 예측={round(float(_d1['forecast_price']),2)})")
     except Exception as _se:
@@ -5622,10 +5702,10 @@ def send_risk_alert(risk_signal: dict, fc_df) -> bool:
             )
 
         body = f"""
-[유가 리스크 시스템] {r['emoji']} {level} 경보 — {today}
+[유가 리스크 시스템] {r['emoji']} {r['label']} 경보 — {today}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━
-리스크 레벨  : {r['emoji']} {level} ({r['label']})
+리스크 레벨  : {r['emoji']} {r['label']}
 리스크 점수  : {score:.4f}
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 WTI 현재가   : ${wti:.2f} / bbl
@@ -5642,7 +5722,7 @@ WTI 현재가   : ${wti:.2f} / bbl
         msg = MIMEMultipart()
         msg['From']    = SMTP_USER
         msg['To']      = ALERT_TO
-        msg['Subject'] = f"[유가 리스크] {r['emoji']} {level} 경보 — WTI ${wti:.2f}"
+        msg['Subject'] = f"[유가 리스크] {r['emoji']} {r['label']} 경보 — WTI ${wti:.2f}"
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
@@ -5744,11 +5824,16 @@ def monitor_rss_alerts() -> dict:  # noqa: dead — 향후 독립 스케줄러�
         try:
             import smtplib
             from email.mime.text import MIMEText
-            _lines = '\n'.join(f"  [{t['category'].upper()}] {t['title'][:80]}"
-                               for t in triggered[:5])
+            _cat_em = {'supply_cut': '공급감산', 'geopolitical': '지정학',
+                       'demand_shock': '수요충격', 'price_move': '가격변동', 'ovx_spike': 'OVX급등'}
+            _lines = '\n'.join(
+                f"  [{_cat_em.get(t['category'], t['category'])}] {t['title'][:80]}"
+                for t in triggered[:5])
+            _lvl_ko = {'CRITICAL': '위험', 'WARNING': '경고', 'NORMAL': '정상'}
+            _al_ko  = _lvl_ko.get(alert_level, alert_level)
             _body  = f"""[유가 리스크] 🚨 실시간 이벤트 경보 — {detected_now}
 
-경보 레벨 : {alert_level}  (점수: {total_score})
+경보 레벨 : {_al_ko}  (점수: {total_score})
 OVX 급변  : {'⚠ 감지됨' if ovx_alert else '정상'}
 
 ▶ 감지된 이벤트
@@ -5759,7 +5844,7 @@ OVX 급변  : {'⚠ 감지됨' if ovx_alert else '정상'}
             _msg = MIMEText(_body, 'plain', 'utf-8')
             _msg['From']    = SMTP_USER
             _msg['To']      = ALERT_TO
-            _msg['Subject'] = f"[유가 리스크] 🚨 {alert_level} — {detected_now}"
+            _msg['Subject'] = f"[유가 리스크] 🚨 {_al_ko} — {detected_now}"
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as _sv:
                 _sv.starttls()
                 _sv.login(SMTP_USER, SMTP_PASSWORD)
@@ -5923,7 +6008,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     hedge_ratio = round(float(np.clip(_base_hedge + _surge_adj + _geo_adj + _mom_adj + _ovx_adj, 0.0, 0.75)), 2)
 
     # EIA 발표일(수요일) + 반응일(목요일): CI max 적용 (곱셈 누적 방지) + hedge 증가
-    _eia_dow = pd.Timestamp.today().dayofweek  # 0=Mon, 2=Wed, 3=Thu
+    _eia_dow = pd.Timestamp.now('Asia/Seoul').dayofweek  # 0=Mon, 2=Wed, 3=Thu
     if _eia_dow in (2, 3):
         _eia_ci_floor = 1.2 if _eia_dow == 2 else 1.1
         ci_multiplier = max(ci_multiplier, _eia_ci_floor)
@@ -6733,6 +6818,73 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
             log.warning(f"    급등확률 계산 실패({_spe})")
     risk_signal = classify_risk(feature_df, full_df, forecast_dir=_fc_dir, surge_prob=_surge_p)
 
+    # ── risk_history.csv 백필: feature_df 기준 미기록 과거 날짜 보완
+    try:
+        _bfill_path = OUTPUT_DIR / 'risk_history.csv'
+        _existing_dates: set = set()
+        if _bfill_path.exists():
+            _bfill_df = pd.read_csv(_bfill_path)
+            _existing_dates = set(pd.to_datetime(_bfill_df['date']).dt.strftime('%Y-%m-%d'))
+        _bfill_cutoff = pd.Timestamp.now() - pd.DateOffset(years=1)
+        _bfill_fd = feature_df[feature_df.index >= _bfill_cutoff] if hasattr(feature_df.index, 'min') and pd.api.types.is_datetime64_any_dtype(feature_df.index) else feature_df.iloc[-252:]
+        # hist_vol_75: classify_risk와 동일 방법 (고정 기준선)
+        _n_tr_cr_bf = max(len(feature_df) - 60, 252)
+        _h_vol75_bf = float(feature_df['vol_5d'].iloc[:_n_tr_cr_bf].quantile(0.75)) if 'vol_5d' in feature_df.columns else 0.022
+        _bfill_rows = []
+        for _bdate, _brow in _bfill_fd.iterrows():
+            _ds = str(_bdate)[:10]
+            if _ds in _existing_dates:
+                continue
+            _bvol     = float(_brow.get('vol_5d',                  0.015))
+            _bmom5    = float(_brow.get('mom_5d',                  0.0))
+            _bmom21   = float(_brow.get('mom_21d',                 0.0))
+            _bsent    = float(_brow.get('news_sentiment_smooth',   0.0))
+            _bneg     = float(_brow.get('news_count_neg',          0.0))
+            _bpos     = float(_brow.get('news_count_pos',          0.0))
+            _bgeo     = float(_brow.get('geo_dummy',               0.0))
+            _bovx_z   = float(_brow.get('ovx_zscore',             0.0))
+            _bovx_chg = float(_brow.get('ovx_change',             0.0))
+            _bbb      = float(_brow.get('bb_position',            0.0))
+            _bpz      = float(_brow.get('price_zscore',           0.0))
+            _bexn     = float(_brow.get('extreme_neg_news',       0.0))
+            _bwti     = float(_brow.get('WTI',                    0.0))
+            _bvol_ratio  = _bvol / (_h_vol75_bf + 1e-8)
+            _bnews_amp   = max(1 + min((_bneg - _bpos * 0.5) / 8, 1.0), 1.0)
+            _bgeo_amp    = 1.35 if _bgeo > 0.5 else 1.0
+            _bsent_amp   = 1 + max(-_bsent, 0) * 0.5 + _bexn * 0.1
+            _bovx_amp    = 1.0 + max(_bovx_z - 1.0, 0) * 0.15
+            _bscore      = _bvol_ratio * _bnews_amp * _bgeo_amp * _bsent_amp * _bovx_amp
+            _bdir  = (_bmom5 * 0.5 + _bmom21 * 0.3 + _bsent * 0.3
+                      + _bbb * 0.15 - _bovx_chg * 0.1)
+            if _bmom5 * _bmom21 > 0:
+                _bdir *= 1.3
+            if _bpz > 1.5:
+                _bdir -= 0.01
+            elif _bpz < -1.5:
+                _bdir += 0.01
+            _bdth = 0.05 if (_bgeo > 0.5 or _bovx_z > 1.5) else 0.08
+            if   _bscore >= 2.2 and _bdir >  _bdth: _blevel = 'SURGE_RISK'
+            elif _bscore >= 2.2 and _bdir < -_bdth: _blevel = 'DROP_RISK'
+            elif _bscore >= 1.4 or abs(_bdir) > 0.06: _blevel = 'CAUTION'
+            else:                                      _blevel = 'NORMAL'
+            _bfill_rows.append({'date': _ds, 'risk_level': _blevel,
+                                'risk_score': round(_bscore, 4),
+                                'wti_price': round(_bwti, 2),
+                                'volatility': round(_bvol, 5)})
+        if _bfill_rows:
+            _bfill_new = pd.DataFrame(_bfill_rows)
+            if _bfill_path.exists():
+                _bfill_old = pd.read_csv(_bfill_path)
+                _bfill_combined = (pd.concat([_bfill_old, _bfill_new], ignore_index=True)
+                                   .drop_duplicates(subset=['date'], keep='last')
+                                   .sort_values('date').tail(365))
+            else:
+                _bfill_combined = _bfill_new.sort_values('date').tail(365)
+            _atomic_csv(_bfill_combined, _bfill_path, index=False)
+            log.info(f"    risk_history.csv 백필: {len(_bfill_rows)}행 추가 (총 {len(_bfill_combined)}행)")
+    except Exception as _bfe:
+        log.warning(f"    risk_history 백필 실패({_bfe})")
+
     # Shock CI 확대: classify_risk에서 반환된 ci_multiplier 적용
     _ci_mult = risk_signal.get('ci_multiplier', 1.0)
     if abs(_ci_mult - 1.0) > 0.01 and 'lower_75ci' in fc_df.columns and 'upper_75ci' in fc_df.columns:
@@ -6749,6 +6901,8 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
 
     # ── A: 예측 신뢰도 — forecast_snapshots.csv 전체 기준 MASE
     _live_mae_val = None
+    _live_mase_val = None
+    _live_drift_flag = False
     _forecast_reliability = 'UNKNOWN'
     _snap_mase = None
     _snap_n = 0
@@ -6809,10 +6963,16 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                 if len(_naive_diffs) >= 5:
                     _naive_mae_live = float(_naive_diffs.mean())
                     _live_mase = _live_mae_val / max(_naive_mae_live, 1e-6)
+                    _live_mase_val = round(_live_mase, 4)
                     log.info(f"    라이브 MASE(30d, σ-clip): {_live_mase:.3f} "
                              f"(naive_mae={_naive_mae_live:.4f})")
                     if _live_mase > 0.95:
                         log.warning(f"    ⚠ 라이브 MASE={_live_mase:.3f} → naive 근접, 재훈련 검토")
+                    # n_live>=20 시 drift 경고 — run_meta.json에 기록
+                    if len(_live_known) >= 20 and _live_mase > 0.85:
+                        _live_drift_flag = True
+                        log.warning(f"    ⚠ Live MASE 경고: {_live_mase:.3f} > 0.85 "
+                                    f"(n={len(_live_known)}) → 성능 검토 필요")
                     # 열화 추적 → 연속 N일 초과 시 캐시 강제 초기화
                     _ovx_deg = 0.0
                     try:
@@ -6886,11 +7046,13 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     # ── 마지막 실행 시간 + API 상태 기록
     import json as _json
     _run_meta = {
-        'last_run':    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'data_through': full_df.index[-1].strftime('%Y-%m-%d'),
-        'n_live':      int((pd.read_csv(PRED_LOG_FILE)['type'] == 'live').sum()) if PRED_LOG_FILE.exists() else 0,
-        'live_mae':    round(_live_mae_val, 4) if _live_mae_val is not None else None,
-        'api_status':  api_status,
+        'last_run':           datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'data_through':       full_df.index[-1].strftime('%Y-%m-%d'),
+        'n_live':             int((pd.read_csv(PRED_LOG_FILE)['type'] == 'live').sum()) if PRED_LOG_FILE.exists() else 0,
+        'live_mae':           round(_live_mae_val, 4) if _live_mae_val is not None else None,
+        'live_mase':          _live_mase_val,
+        'live_drift_warning': _live_drift_flag,
+        'api_status':         api_status,
     }
     _atomic_json(_run_meta, OUTPUT_DIR / 'run_meta.json')
 
@@ -6906,7 +7068,8 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     print(f"  리스크 점수 : {risk_signal['risk_score']:.4f}")
     _ovx_lvl = risk_signal.get('ovx_level', 0.0)
     _ovx_alm = risk_signal.get('ovx_alarm', 'NORMAL')
-    print(f"  OVX 수준    : {_ovx_lvl:.1f} ({_ovx_alm})")
+    _ovx_alm_ko = {'HIGH': '높음', 'ELEVATED': '상승', 'NORMAL': '정상'}.get(_ovx_alm, _ovx_alm)
+    print(f"  OVX 수준    : {_ovx_lvl:.1f} ({_ovx_alm_ko})")
     _dn = risk_signal.get('downside_risk_pct', 50.0)
     _up = risk_signal.get('upside_risk_pct',   50.0)
     print(f"  비대칭 리스크: 하방 {_dn:.0f}% / 상방 {_up:.0f}%")

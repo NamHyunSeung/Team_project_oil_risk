@@ -32,4 +32,10 @@ pmdarima>=2.0.0
 
 # 워드클라우드 자동 번역
 deep-translator>=1.11.4
+
+# NLP / 감성 분석
+transformers>=4.35.0
+torch>=2.1.0
+sentence-transformers>=2.2.0
+
 # prophet>=1.1.5  # WTI는 불연속 충격 기반, 트렌드+계절성 모델 부적합 (R²=-4.3)
