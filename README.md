@@ -113,6 +113,26 @@ risk_score = vol_ratio × news_amp × geo_amp × sentiment_amp × ovx_amp
 - `cap=3.5`: 기존 SURGE_RISK 구간에서 mom_ratio 과도 증폭 방지
 - 트렌드형 이동(매일 +2~3% 누적)과 스파이크형 이동 모두 포착
 
+### mom_ratio 도입 배경 (방식F 채택)
+
+기존 수식은 `vol_5d / hist_vol_75`만 사용해 스파이크형 급등락에는 반응했지만,
+매일 +2~3%씩 누적되는 **트렌드형 이동**은 변동성이 낮아 `NORMAL`로 잘못 분류되는 문제가 있었다.
+
+실험한 방식 비교:
+
+| 방식 | 수식 | 문제 |
+|------|------|------|
+| A | `vol_ratio + 0.5×mom_ratio` | 가산 방식 → 정상 구간에서 오탐 발생 |
+| B | `max(vol_ratio, mom_ratio)` cap 없음 | 기존 SURGE 구간에서 과도 증폭 |
+| C | B + 별도 mom_cap 적용 | 임계값 튜닝 복잡, 코드 과적합 위험 |
+| **F** | **`max(vol_ratio, min(mom_ratio, 3.5))`** | 채택 — 오탐 없이 불일치 전부 해결 |
+
+**방식F 검증 결과**:
+- 트렌드형 이동 불일치 구간 7개 → 전부 CAUTION+ 개선
+- 기존 SURGE/DROP 구간 오탐 0건 (레벨 유지)
+- risk_score vs |mom_5d| 상관계수 0.790 (방식 도입 전 0.44)
+- 레벨 분포 변화: SURGE_RISK 39→47건, CAUTION 28→34건, NORMAL 유지
+
 ---
 
 ## 지정학 위험 감지
@@ -131,6 +151,21 @@ GPR(Geopolitical Risk) 데이터 지연 문제를 3단계로 보완:
 - **공휴일·주말 포함**: 영업일·달력일 기준 전일 값 forward fill → 차트 빈 칸 없음
   - 거래일 데이터 없는 날(미국 공휴일, 토/일)은 직전 거래일의 vol_5d, mom_5d, WTI 값 사용
   - 뉴스·감성·OVX 등 독립 피처는 당일 값 반영
+
+---
+
+## 안정성 개선 및 버그 수정
+
+### forecast_snapshots.csv — actual_price 중복 컬럼 수정
+
+`forecast_snapshots.csv`와 `prediction_log.csv`를 merge할 때 두 파일에 `actual_price` 컬럼이 모두 존재하면
+pandas가 `actual_price_x` / `actual_price_y`로 분리해 기존 값이 사라지는 버그 수정.
+`_pl_actual`로 rename 후 coalesce 처리 → 실제 가격 데이터 손실 없음.
+
+### _atomic_csv — UTF-8 인코딩 기본값 추가
+
+`_atomic_csv()` 함수에 `encoding='utf-8'` 기본값 추가.
+이전에는 일부 환경에서 CP949(Windows 기본)로 저장돼 한글 포함 CSV 읽기 오류 발생 가능.
 
 ---
 
