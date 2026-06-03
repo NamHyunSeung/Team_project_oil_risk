@@ -68,3 +68,19 @@ task_schedule.xml
 # 대용량 캐시 (로컬 생성)
 output/news_embed_cache.pkl
 finbert_finetuned/
+
+# 로그 디렉토리
+logs/
+
+# 원시 데이터 디렉토리
+data/
+
+# output — 캐시/바이너리/백업/임시
+output/*.pkl
+output/*.npy
+output/*.bak*
+output/*.log
+output/ppt/
+
+# 임시 파일
+missing_commits.txt
