@@ -5254,18 +5254,35 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             _snap_existing = pd.read_csv(_snap_path)
             _snap_existing = _snap_existing[_snap_existing['run_date'] != _run_date_str]
             _snap_row = pd.concat([_snap_existing, _snap_row], ignore_index=True)
-        # 실제가 채우기: full_df WTI로 각 행의 actual 컬럼 업데이트
+        # 실제가 채우기: full_df WTI + prediction_log 두 소스로 각 행의 actual 컬럼 업데이트
         try:
+            _price_str_map = {}
             if full_df is not None:
-                _price_str_map = {
+                _price_str_map.update({
                     str(k.date()): round(float(v), 2)
                     for k, v in full_df['WTI'].dropna().items()
-                }
+                })
+            # prediction_log의 actual_price도 역채움 소스에 포함 (full_df 없는 날짜 보완)
+            if PRED_LOG_FILE.exists():
+                try:
+                    _pl_src = pd.read_csv(PRED_LOG_FILE)[['date', 'actual_price']].dropna()
+                    _price_str_map.update({
+                        str(r['date']): round(float(r['actual_price']), 2)
+                        for _, r in _pl_src.iterrows()
+                    })
+                except Exception:
+                    pass
+            if _price_str_map:
                 for _cd, _ca in [('forecast_date', 'actual_price')] + [
                     (f'd{_i}_date', f'd{_i}_actual') for _i in range(2, 8)
                 ]:
                     if _cd in _snap_row.columns:
-                        _snap_row[_ca] = _snap_row[_cd].map(_price_str_map)
+                        _mapped = _snap_row[_cd].map(_price_str_map)
+                        if _ca in _snap_row.columns:
+                            # fillna로 기존 actual 보존 — 덮어쓰기 금지
+                            _snap_row[_ca] = _snap_row[_ca].fillna(_mapped)
+                        else:
+                            _snap_row[_ca] = _mapped
         except Exception as _ae:
             log.warning(f"    스냅샷 실제가 채우기 실패: {_ae}")
         _atomic_csv(_snap_row, _snap_path, index=False)
@@ -6950,16 +6967,29 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
                            .sort_values('forecast_date')  # diff() 날짜 순서 보장
                            .copy())
             _snap_known['abs_err'] = (_snap_known['actual_price'] - _snap_known['forecast_price']).abs()
-            _snap_n = len(_snap_known)
+            # d2~d7 actual 포함: 각 horizon의 (actual, forecast) 쌍을 모아 MASE에 반영
+            _extra_pairs = []
+            for _di in range(2, 8):
+                _fcol, _acol = f'd{_di}_forecast', f'd{_di}_actual'
+                if _fcol in _snap_df.columns and _acol in _snap_df.columns:
+                    _di_df = _snap_df[_snap_df[_acol].notna()][[_acol, _fcol]].copy()
+                    if len(_di_df) > 0:
+                        _di_df = _di_df.rename(columns={_acol: 'actual_price', _fcol: 'forecast_price'})
+                        _di_df['abs_err'] = (_di_df['actual_price'] - _di_df['forecast_price']).abs()
+                        _extra_pairs.append(_di_df[['actual_price', 'forecast_price', 'abs_err']])
+            _snap_known_all = (pd.concat([_snap_known[['actual_price', 'forecast_price', 'abs_err']], *_extra_pairs], ignore_index=True)
+                               if _extra_pairs else _snap_known[['actual_price', 'forecast_price', 'abs_err']].copy())
+            _snap_n = len(_snap_known)  # D+1 기준 행 수 유지
+            _snap_n_all = len(_snap_known_all)
             if _snap_n >= 5:
-                _snap_mae = float(_snap_known['abs_err'].mean())
+                _snap_mae = float(_snap_known_all['abs_err'].mean())
                 _snap_naive = float(_snap_known['actual_price'].diff().abs().dropna().mean())
                 _snap_mase = _snap_mae / max(_snap_naive, 1e-6)
                 _forecast_reliability = (
                     'HIGH' if _snap_mase < 1.0 else
                     'MEDIUM' if _snap_mase < 1.5 else 'LOW'
                 )
-                log.info(f"    예측 신뢰도: MASE={_snap_mase:.3f} (n={_snap_n}) → {_forecast_reliability}")
+                log.info(f"    예측 신뢰도: MASE={_snap_mase:.3f} (n={_snap_n}, multi-horizon={_snap_n_all}) → {_forecast_reliability}")
         except Exception as _sne:
             log.warning(f"    스냅샷 MASE 계산 실패({_sne})")
 

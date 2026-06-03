@@ -167,6 +167,23 @@ pandas가 `actual_price_x` / `actual_price_y`로 분리해 기존 값이 사라�
 `_atomic_csv()` 함수에 `encoding='utf-8'` 기본값 추가.
 이전에는 일부 환경에서 CP949(Windows 기본)로 저장돼 한글 포함 CSV 읽기 오류 발생 가능.
 
+### forecast_snapshots.csv — d2~d7 actual 역채움 개선
+
+**버그**: `_snap_row[_ca] = _snap_row[_cd].map(_price_str_map)` 방식은 `_price_str_map`에 해당 날짜가 없으면 기존 actual 값을 NaN으로 덮어쓰는 문제 발생.
+
+**수정**:
+- `fillna` 방식으로 변경 → 기존 actual 값 보존, 없는 경우에만 채움
+- 역채움 소스에 `prediction_log.csv`의 `actual_price`도 추가 → `full_df`에 없는 날짜 보완
+
+### forecast_reliability — 다중 horizon MASE 계산 추가
+
+기존에는 D+1 actual_price만 사용해 MASE를 계산했으나,
+d2~d7 각 horizon의 (actual, forecast) 쌍도 포함해 다중 horizon 기반 MASE로 개선.
+
+- D+1 행 수는 기준 유지, d2~d7 실제가 확인된 쌍을 전체 오차 pool에 합산
+- naive baseline은 D+1 시계열 기준 (day-to-day diff 평균 절대값) 유지
+- 로그에 `n` (D+1 기준)과 `multi-horizon` (전체 합산) 별도 출력
+
 ---
 
 ## 자동 재훈련
