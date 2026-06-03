@@ -861,9 +861,37 @@ SURGE_RISK 신호 감지 엔진: 4단계 단계적 개발
 - monitor_rss_alerts 동기 실행으로 변경 (`743dfd3`)
 - live_mae null 버그 수정, actual_direction backfill 추가 (`4bb4499`)
 
+### 리스크 스코어 3가지 개선 (`b6f5afd`)
+
+**방식F (mom_ratio) 채택**:
+- `vol_ratio = max(vol_5d/hist_vol_75, min(|mom_5d|/hist_mom_75, 3.5))`
+- 이전 방식A~C 대비 불일치 7개 CAUTION+ 개선, 오탐 0건, 상관계수 0.790
+- 레벨 분포: SURGE 0→1, HIGH 5→6, CAUTION 49→50, NORMAL 311→308
+
+**공휴일/주말 actual_price fill**:
+- `risk_history`에서 공휴일·주말 행의 actual_price를 이전 거래일 값으로 forward fill
+
+**GPR 임계값 완화**:
+- `z-score > 1.0` → `z-score > 0.5` (지정학 감지 민감도 향상)
+
+**지정학 키워드 확장 + 뉴스 실시간 보완**:
+- `latest_alerts.json` 기반 실시간 geo_triggers 포함
+
+### forecast_snapshots d2~d7 actual 역채움 버그 수정 + 다중 horizon MASE (`09a9ecc`)
+
+**버그 수정**:
+- 기존: `_snap_row[_ca] = _snap_row[_cd].map(_price_str_map)` → map에 없는 날짜를 NaN으로 덮어쓰는 버그
+- 수정: `fillna` 방식으로 변경 → 기존 actual 값 보존
+- 역채움 소스에 `prediction_log.csv` actual_price 추가 → full_df 누락 날짜 보완
+
+**다중 horizon MASE**:
+- 기존: D+1 actual_price만으로 MASE 계산
+- 개선: d2~d7 각 horizon의 (actual, forecast) 쌍도 오차 pool에 합산해 MASE 계산
+- naive baseline은 D+1 시계열 기준 유지, 로그에 `n` (D+1)과 `multi-horizon` (전체) 별도 출력
+
 ---
 
-## 현재 상태 (2026-06-02)
+## 현재 상태 (2026-06-03)
 
 ### 채택 모델
 
@@ -884,7 +912,7 @@ SURGE_RISK 신호 감지 엔진: 4단계 단계적 개발
 
 ### 주요 알려진 이슈
 
-- **forecast_reliability = UNKNOWN**: 스냅샷 누적 중 → 2026-06-15 이후 자연 해소
+- **forecast_reliability**: 다중 horizon MASE로 계산 범위 확장 (d2~d7 포함), 스냅샷 누적 중 → 2026-06-15 이후 자연 해소
 - **downside/upside_risk_pct = 50/50**: live 오차 전부 양수 시 폴백값 반환 (의도된 동작)
 - **방향성 월별 저하**: 4-5월 고변동 레짐 전환으로 wf_dir_acc 53.6% → REFIT_STALE_DAYS=7로 지속 업데이트 중
 
