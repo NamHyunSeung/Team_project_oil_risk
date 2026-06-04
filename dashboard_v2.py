@@ -253,11 +253,53 @@ _PLAN_RANK = {'free': 0, 'standard': 1, 'pro': 2}
 def _has_plan(required: str) -> bool:
     return _PLAN_RANK.get(_user_plan, 0) >= _PLAN_RANK.get(required, 0)
 
+def _send_upgrade_request(username: str, name: str, current_plan: str, target_plan: str) -> bool:
+    """관리자에게 플랜 업그레이드 요청 이메일 발송."""
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        _su = os.getenv('SMTP_USER', '')
+        _sp = os.getenv('SMTP_PASSWORD', '')
+        if not _su or not _sp:
+            return False
+        _plan_kr = {'free': '무료', 'standard': '일반', 'pro': '프로'}
+        _body = (
+            f"[유가 리스크 시스템] 플랜 업그레이드 요청\n\n"
+            f"아이디  : {username}\n"
+            f"이름    : {name}\n"
+            f"현재 플랜: {_plan_kr.get(current_plan, current_plan)}\n"
+            f"요청 플랜: {_plan_kr.get(target_plan, target_plan)}\n\n"
+            f"관리자 페이지 → 사용자 관리 탭에서 플랜 및 만료일을 변경하세요."
+        )
+        _msg = MIMEText(_body, 'plain', 'utf-8')
+        _msg['From']    = _su
+        _msg['To']      = _su
+        _msg['Subject'] = f"[업그레이드 요청] {username} — {_plan_kr.get(current_plan)} → {_plan_kr.get(target_plan)}"
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=15) as _srv:
+            _srv.starttls()
+            _srv.login(_su, _sp)
+            _srv.sendmail(_su, _su, _msg.as_string())
+        return True
+    except Exception:
+        return False
+
 # ── 사이드바
 with st.sidebar:
     _plan_badge = {'free': '무료', 'standard': '일반', 'pro': '프로'}.get(_user_plan, _user_plan)
     st.markdown(f"**{_name}** 님 · `{_plan_badge}`")
     _authenticator.logout("로그아웃", location="sidebar")
+
+    if not _is_admin and _user_plan != 'pro':
+        _next_plan = 'pro' if _user_plan == 'standard' else 'standard'
+        _next_label = {'standard': '일반 (₩490,000)', 'pro': '프로 (₩1,290,000)'}[_next_plan]
+        with st.expander("⬆ 플랜 업그레이드"):
+            st.caption(f"현재: **{_plan_badge}** → 요청: **{_next_label}**")
+            if st.button("업그레이드 요청 보내기", key="upgrade_req", use_container_width=True):
+                if _send_upgrade_request(_username, _name, _user_plan, _next_plan):
+                    st.success("요청이 관리자에게 전송됐습니다.")
+                else:
+                    st.error("전송 실패. 관리자에게 직접 문의하세요.")
+
     if _has_plan('pro'):
         _default_thresh = 0.7
         try:
