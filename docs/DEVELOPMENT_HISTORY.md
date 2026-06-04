@@ -1182,7 +1182,7 @@ exog_cols = ['dxy_change', 'demand_shock', 'supply_shock', 'vix_change']
 
 ---
 
-## 현재 상태 (2026-06-04)
+## 현재 상태 (2026-06-05)
 
 ### 채택 모델
 
@@ -1200,6 +1200,16 @@ exog_cols = ['dxy_change', 'demand_shock', 'supply_shock', 'vix_change']
 | VAR(9) | 0.9998 | Persistence 수준 |
 | ETS(HW-Damped) | 1.0 | Persistence 수준 |
 | Prophet | R²=-4.3 | 충격 기반 시계열 부적합 |
+
+### 대시보드 시스템 기능 (Phase 22~26)
+
+| Phase | 기능 | 비고 |
+|-------|------|------|
+| 22 | 구독 플랜 기반 기능 잠금 + 구독자 이메일 알람 | free/standard/pro 3단계 |
+| 23 | 로그인 화면 3-플랜 카드 표시 | 전환율 UX 개선 |
+| 24 | 회원가입 기능 (bcrypt 해시, 플랜 선택, 7일 체험) | 관리자 개입 불필요 |
+| 25 | 구독 만료 시 자동 free 다운그레이드 | 관리자 계정 제외 |
+| 26 | 업그레이드 요청 → 관리자 인앱 승인 플로우 | YAML upgrade_request 필드 기반 |
 
 ### 주요 알려진 이슈
 
