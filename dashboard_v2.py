@@ -103,12 +103,16 @@ _name     = st.session_state.get("name", "")
 _username = st.session_state.get("username", "")
 _is_admin = (_username == "admin")
 
-# ── 구독 만료 체크
+# ── 구독 플랜 + 만료 체크
+_user_plan = 'pro' if _is_admin else 'free'  # 기본값 (예외 시 폴백)
+_cfg2      = {}
 try:
     with open(Path(__file__).parent / 'config/auth_config.yaml', encoding='utf-8') as _f2:
-        _cfg2 = yaml.safe_load(_f2)
-    _expiry_str = (_cfg2.get('credentials', {}).get('usernames', {})
-                       .get(_username, {}).get('subscription_expiry', ''))
+        _cfg2 = yaml.safe_load(_f2) or {}
+    _udata      = _cfg2.get('credentials', {}).get('usernames', {}).get(_username, {})
+    _expiry_str = _udata.get('subscription_expiry', '')
+    if not _is_admin:
+        _user_plan = _udata.get('plan', 'free')
     if _expiry_str:
         _expiry    = datetime.datetime.strptime(_expiry_str, '%Y-%m-%d').date()
         _days_left = (_expiry - datetime.date.today()).days
@@ -121,10 +125,30 @@ try:
 except Exception:
     pass
 
-# ── 사이드바 (최소)
+_PLAN_RANK = {'free': 0, 'standard': 1, 'pro': 2}
+def _has_plan(required: str) -> bool:
+    return _PLAN_RANK.get(_user_plan, 0) >= _PLAN_RANK.get(required, 0)
+
+# ── 사이드바
 with st.sidebar:
-    st.markdown(f"**{_name}** 님")
+    _plan_badge = {'free': '무료', 'standard': '일반', 'pro': '프로'}.get(_user_plan, _user_plan)
+    st.markdown(f"**{_name}** 님 · `{_plan_badge}`")
     _authenticator.logout("로그아웃", location="sidebar")
+    if _has_plan('pro'):
+        _default_thresh = 0.7
+        try:
+            _default_thresh = float(
+                _cfg2.get('credentials', {}).get('usernames', {})
+                     .get(_username, {}).get('alert_threshold', 0.7)
+            )
+        except Exception:
+            pass
+        _alert_threshold = st.slider(
+            "알람 임계값", 0.3, 1.0, _default_thresh, 0.05,
+            help="리스크 점수가 이 값 이상이면 이메일 알람 발송",
+        )
+    else:
+        _alert_threshold = 0.7
 
 # ── 자동 새로고침 (5분 간격으로 run_meta.json 변경 감지)
 try:
@@ -256,7 +280,8 @@ def _render_risk_hero(sig):
       <h2 style="color:{col};margin:0;font-size:1.8rem">{em} 현재 리스크: {lbl}</h2>
       <p style="color:#8b949e;margin:6px 0 0">
         기준일: {sig.get('date', '—')} &nbsp;|&nbsp;
-        예측신뢰도: <b style="color:{_rel_clr}">{_fc_rel or '—'}</b>
+        예측신뢰도: <b style="color:{_rel_clr}">{_fc_rel or '—'}</b> &nbsp;|&nbsp;
+        리스크 점수: <b style="color:{col}">{float(sig.get('risk_score', 0)):.3f}</b>
       </p>
     </div>
     """, unsafe_allow_html=True)
@@ -358,7 +383,15 @@ def _render_price_charts(data):
 
     with col_fc:
         st.markdown("**📅 D+1~7 가격 예측**")
-        if 'forecast_7days' in data and not data['forecast_7days'].empty:
+        if not _has_plan('standard'):
+            st.markdown(
+                "<div style='background:#161b22;border:1px solid #30363d;border-radius:8px;"
+                "padding:24px;text-align:center;color:#8b949e;margin-top:8px'>"
+                "🔒 <b style='color:#f0c040'>일반(Standard) 플랜</b> 이상 제공<br>"
+                "<small>7일 가격 예측 · 신뢰구간 · 방향 합의 신호</small></div>",
+                unsafe_allow_html=True,
+            )
+        elif 'forecast_7days' in data and not data['forecast_7days'].empty:
             fc = data['forecast_7days'].copy()
             fc['date'] = pd.to_datetime(fc['date'])
             _DAY_KO = {0:'월',1:'화',2:'수',3:'목',4:'금',5:'토',6:'일'}
@@ -512,6 +545,15 @@ def _render_price_charts(data):
 
 def _render_snapshot_analysis(data):
     """예측 vs 실제 차트 + 방향성 정확도 + 누적 MASE 추이"""
+    if not _has_plan('pro'):
+        st.markdown(
+            "<div style='background:#161b22;border:1px solid #30363d;border-radius:8px;"
+            "padding:32px;text-align:center;color:#8b949e;'>"
+            "🔒 <b style='color:#f0c040'>프로(Pro) 플랜</b> 전용 기능<br>"
+            "<small>예측 vs 실제 비교 차트 · 방향성 정확도 · 30일 롤링 MASE 추이</small></div>",
+            unsafe_allow_html=True,
+        )
+        return
     if 'forecast_snapshots' not in data or 'prediction_log' not in data:
         return
     try:
@@ -665,17 +707,28 @@ def _render_alerts_news(data):
     with col_news:
         st.markdown("**📰 주요 뉴스 키워드**")
         if 'crisis_keywords' in data and not data['crisis_keywords'].empty:
-            kw = data['crisis_keywords'].head(10).copy()
+            _kw_limit = 5 if not _has_plan('standard') else 10
+            kw = data['crisis_keywords'].head(_kw_limit).copy()
             kw['키워드'] = kw['keyword'].apply(lambda w: _KW_KO.get(w.lower(), w))
             kw['분류']   = kw['is_crisis_word'].astype(str).map({'True': '🔴', 'False': '🔵'})
             st.dataframe(
                 kw[['분류', '키워드', 'count']].rename(columns={'count': '빈도'}),
                 hide_index=True, use_container_width=True, height=200,
             )
+            if not _has_plan('standard'):
+                st.caption("🔒 상위 5개 표시 중 — 일반 플랜 이상에서 10개 + 워드클라우드 제공")
         wc_img = OUTPUT_DIR / 'wordcloud.png'
         if wc_img.exists():
-            st.image(str(wc_img), use_container_width=True,
-                     caption='🔴 위기 키워드  |  🔵 일반 키워드')
+            if _has_plan('standard'):
+                st.image(str(wc_img), use_container_width=True,
+                         caption='🔴 위기 키워드  |  🔵 일반 키워드')
+            else:
+                st.markdown(
+                    "<div style='background:#161b22;border:1px dashed #30363d;border-radius:6px;"
+                    "padding:16px;text-align:center;color:#8b949e;font-size:0.85em'>"
+                    "🔒 워드클라우드 — 일반 플랜 이상 제공</div>",
+                    unsafe_allow_html=True,
+                )
 
 
 def _render_risk_drivers(sig):
@@ -725,6 +778,29 @@ def render_user_page():
 
     # 2. 핵심 지표 행
     _render_key_metrics(sig)
+    try:
+        _snap_c = data.get('forecast_snapshots', pd.DataFrame())
+        _pl_c   = data.get('prediction_log', pd.DataFrame())
+        if not _snap_c.empty and not _pl_c.empty:
+            _sc = _snap_c.merge(
+                _pl_c[['date', 'actual_price']].rename(
+                    columns={'date': 'forecast_date', 'actual_price': '_pl_act'}),
+                on='forecast_date', how='left')
+            _sc['actual_price'] = _sc['actual_price'].fillna(_sc.get('_pl_act', float('nan')))
+            _kn = _sc[_sc['actual_price'].notna()].sort_values('forecast_date').reset_index(drop=True)
+            if len(_kn) >= 5:
+                _kn['_ad'] = _kn['actual_price'].diff().apply(
+                    lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+                _kn['_fd'] = (_kn['forecast_price'] - _kn['actual_price'].shift(1)).apply(
+                    lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+                _dm = _kn['_ad'] != 0
+                _da = (_kn.loc[_dm, '_ad'] == _kn.loc[_dm, '_fd']).mean() if _dm.sum() > 0 else 0.0
+                st.caption(
+                    f"모델 방향성 정확도: **{_da*100:.0f}%** (N={len(_kn)}) "
+                    "— 상세 분석은 '📊 예측 성과' 탭 참조"
+                )
+    except Exception:
+        pass
 
     st.markdown("---")
 

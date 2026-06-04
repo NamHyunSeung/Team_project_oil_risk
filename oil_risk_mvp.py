@@ -35,7 +35,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='statsmodels')
 if hasattr(sys.stdout, 'reconfigure'):
     try: sys.stdout.reconfigure(encoding='utf-8')
     except Exception: pass
-import os, re, logging, json
+import os, re, logging, json, yaml
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -5798,6 +5798,95 @@ WTI 현재가   : ${wti:.2f} / bbl
         return False
 
 
+def _send_single_alert(to_email: str, risk_signal: dict, fc_df) -> bool:
+    """단일 수신자에게 리스크 알람 이메일 발송."""
+    if not SMTP_USER or not SMTP_PASSWORD:
+        return False
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        level   = risk_signal.get('risk_level', '')
+        r       = RISK_LEVELS.get(level, {'emoji': '⚠', 'label': level, 'color': '#888'})
+        wti     = risk_signal.get('wti_price', 0)
+        score   = risk_signal.get('risk_score', 0)
+        vol     = risk_signal.get('volatility_5d', 0) * 100
+        sent    = risk_signal.get('news_sentiment', 0)
+        geo     = '활성 ⚠' if risk_signal.get('geopolitical_alert') else '없음'
+        today   = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+        fc_lines = ""
+        if fc_df is not None and len(fc_df) > 0:
+            fc_lines = "\n".join(
+                f"  {row['date']}  ${row['forecast_price']:.2f}"
+                for _, row in fc_df.head(3).iterrows()
+            )
+
+        body = f"""
+[유가 리스크 시스템] {r['emoji']} {r['label']} 경보 — {today}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━
+리스크 레벨  : {r['emoji']} {r['label']}
+리스크 점수  : {score:.4f}
+━━━━━━━━━━━━━━━━━━━━━━━━━
+WTI 현재가   : ${wti:.2f} / bbl
+5일 변동성   : {vol:.2f}%
+뉴스 감성    : {sent:+.4f}
+지정학 경보  : {geo}
+
+▶ 향후 3일 예측
+{fc_lines}
+━━━━━━━━━━━━━━━━━━━━━━━━━
+국제 유가 리스크 예측 시스템 MVP
+""".strip()
+
+        msg = MIMEMultipart()
+        msg['From']    = SMTP_USER
+        msg['To']      = to_email
+        msg['Subject'] = f"[유가 리스크] {r['emoji']} {r['label']} 경보 — WTI ${wti:.2f}"
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_USER, to_email, msg.as_string())
+
+        log.info(f"    📧 알림 발송 → {to_email}")
+        return True
+    except Exception as exc:
+        log.warning(f"    이메일 발송 실패 ({to_email}): {exc}")
+        return False
+
+
+def send_alerts_to_subscribers(risk_signal: dict, fc_df) -> None:
+    """auth_config.yaml의 구독자 목록을 읽어 플랜별 알람 발송."""
+    if not SMTP_USER or not SMTP_PASSWORD:
+        return
+    level = risk_signal.get('risk_level', '')
+    if level not in ('SURGE_RISK', 'DROP_RISK', 'CRITICAL'):
+        return
+    try:
+        _cfg_path = Path(__file__).parent / 'config' / 'auth_config.yaml'
+        with open(_cfg_path, encoding='utf-8') as _f:
+            _cfg = yaml.safe_load(_f) or {}
+        users = _cfg.get('credentials', {}).get('usernames', {})
+        score = float(risk_signal.get('risk_score', 0))
+        for _uname, _udata in users.items():
+            if not isinstance(_udata, dict):
+                continue
+            plan  = _udata.get('plan', 'free')
+            email = _udata.get('email', '')
+            if plan not in ('standard', 'pro') or not email:
+                continue
+            threshold = float(_udata.get('alert_threshold', 0.7))
+            if score < threshold:
+                continue
+            _send_single_alert(email, risk_signal, fc_df)
+    except Exception as exc:
+        log.warning(f"    구독자 알람 발송 오류: {exc}")
+
+
 def monitor_rss_alerts() -> dict:  # noqa: dead — 향후 독립 스케줄러용
     """RSS 긴급 이벤트 스캔. 현재 파이프라인에서 호출 안 됨 (독립 실행 예정)."""
     import json as _json, urllib.request as _ur, xml.etree.ElementTree as _ET, time as _time
@@ -7142,6 +7231,7 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
             pass
 
     _fire_and_forget(send_risk_alert, risk_signal, fc_df)
+    _fire_and_forget(send_alerts_to_subscribers, risk_signal, fc_df)
     kw_df                = extract_crisis_keywords(news_df)
     generate_wordcloud(kw_df)
     plot_oil_forecast(feature_df, fc_df, risk_signal)

@@ -1075,6 +1075,35 @@ exog_cols = ['dxy_change', 'demand_shock', 'supply_shock', 'vix_change']
 
 ---
 
+## Phase 22: 구독 플랜 기반 기능 잠금 + 구독자 알람 발송 (2026-06-04)
+
+### 변경 내용
+
+**auth_config.yaml**:
+- 사용자별 `plan` 필드 추가 (`free` / `standard` / `pro`)
+- pro 사용자에게 `alert_threshold` 필드 추가 (기본 0.7)
+
+**dashboard_v2.py**:
+- `_user_plan` 전역 변수 + `_has_plan(required)` 헬퍼 추가
+- 사이드바에 플랜 배지 표시 + pro 전용 알람 임계값 슬라이더
+- `_render_risk_hero()`: 리스크 점수 수치 표시 추가 (등급 근거)
+- `render_user_page()`: 핵심 지표 아래 모델 방향성 정확도 caption 추가
+- `_render_price_charts()`: free 플랜 — D+1~7 예측 차트/테이블 잠금
+- `_render_alerts_news()`: free 플랜 — 키워드 5개 제한, 워드클라우드 잠금
+- `_render_snapshot_analysis()`: pro 미만 플랜 — 전체 잠금
+
+**oil_risk_mvp.py**:
+- `import yaml` 추가
+- `_send_single_alert(to_email, risk_signal, fc_df)` 추출
+- `send_alerts_to_subscribers(risk_signal, fc_df)` 신규: YAML에서 구독자 읽어 플랜+임계값 조건으로 이메일 발송
+- 파이프라인 `_fire_and_forget(send_alerts_to_subscribers, ...)` 추가
+
+### 목적
+
+구독 플랜 전환율 유도 — 무료 사용자에게 기능 잠금 UI 노출, 일반/프로 구독자에게 자동 알람 발송.
+
+---
+
 ## 현재 상태 (2026-06-04)
 
 ### 채택 모델
