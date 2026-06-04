@@ -5127,7 +5127,7 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         _wti_regime = full_df['WTI'].dropna()
         _regime_chg = _wti_regime.pct_change().abs()
         _shock_in_window = float(_regime_chg.iloc[-5:].max()) if len(_regime_chg) >= 5 else 0.0
-        _SHOCK_REGIME_THRESHOLD = 0.08  # 단일 일간 변동 8% 이상
+        _SHOCK_REGIME_THRESHOLD = 0.14  # 단일 일간 변동 14% 이상 (8%로 했을 때 정확한 예측까지 캡 막음)
         _SHOCK_REGIME_CAP = 0.08        # 충격 레짐에서 D+1 변동폭 ±8%
         if _shock_in_window >= _SHOCK_REGIME_THRESHOLD:
             _cap_lo = last_price * (1 - _SHOCK_REGIME_CAP)
