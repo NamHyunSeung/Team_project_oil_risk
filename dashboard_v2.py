@@ -725,18 +725,14 @@ def render_user_page():
 
     st.markdown("---")
 
-    # 3. 차트 (가격 히스토리 + D+1~7 예측)
-    _render_price_charts(data)
-
-    st.markdown("---")
-
-    # 4. 알람 + 뉴스 키워드
-    _render_alerts_news(data)
-
-    st.markdown("---")
-
-    # 5. 예측 정확도 누적 분석
-    _render_snapshot_analysis(data)
+    # 탭 영역
+    tab_price, tab_news, tab_perf = st.tabs(["📈 가격 예측", "📰 뉴스 & 알람", "📊 예측 성과"])
+    with tab_price:
+        _render_price_charts(data)
+    with tab_news:
+        _render_alerts_news(data)
+    with tab_perf:
+        _render_snapshot_analysis(data)
 
     # 하단 업데이트 시각
     _meta_path = OUTPUT_DIR / 'run_meta.json'
