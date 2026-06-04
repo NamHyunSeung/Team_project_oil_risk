@@ -67,31 +67,85 @@ _authenticator = _load_authenticator()
 
 if not st.session_state.get("authentication_status"):
     st.markdown("""
-<div style='text-align:center; padding: 32px 0 8px 0;'>
-  <span style='font-size:2.4rem;'>🛢</span>
-  <h2 style='color:#e6edf3; margin:8px 0 4px 0; font-size:1.6rem;'>국제 유가 리스크 예측 시스템</h2>
-  <p style='color:#8b949e; margin:0 0 28px 0; font-size:0.9rem;'>AI 기반 WTI 유가 예측 · 리스크 신호 · 뉴스 감성 분석</p>
+<div style='text-align:center; padding:36px 0 4px 0;'>
+  <span style='font-size:2.6rem;'>🛢</span>
+  <h2 style='color:#e6edf3; margin:8px 0 4px 0; font-size:1.7rem; font-weight:700;'>
+    국제 유가 리스크 예측 시스템
+  </h2>
+  <p style='color:#8b949e; margin:0 0 32px 0; font-size:0.9rem;'>
+    AI 기반 WTI 유가 예측 · 리스크 신호 · 뉴스 감성 분석
+  </p>
 </div>
 """, unsafe_allow_html=True)
-    _, col_center, _ = st.columns([1, 1.2, 1])
-    with col_center:
+
+    # ── 플랜 카드 3개
+    _col_free, _col_std, _col_pro = st.columns(3)
+
+    with _col_free:
         st.markdown("""
-<div style='border-radius:12px; padding:24px 24px; text-align:center;
-            border:1px solid #1f6feb; background:#0d2137;'>
-  <p style='color:#58a6ff; font-size:0.8rem; margin:0 0 4px 0; letter-spacing:1px;'>PRO</p>
-  <p style='color:#e6edf3; font-size:2.2rem; font-weight:700; margin:0;'>$79<span style='font-size:0.95rem; font-weight:400; color:#8b949e;'>/월</span></p>
-  <hr style='border-color:#1f6feb; margin:14px 0;'>
-  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 7일 WTI 가격 예측</p>
-  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 리스크 신호 (정상 ~ 급등위험)</p>
-  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 뉴스 감성 분석</p>
-  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ OVX 원유변동성 · 지정학 알람</p>
-  <p style='color:#c9d1d9; font-size:0.85rem; margin:6px 0;'>✓ 이메일 알림 (급등/급락)</p>
+<div style='border-radius:12px; padding:24px 20px; text-align:center;
+            border:1px solid #30363d; background:#161b22; height:100%;'>
+  <p style='color:#8b949e; font-size:0.75rem; margin:0 0 6px 0; letter-spacing:2px; font-weight:600;'>FREE</p>
+  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0 0 2px 0;'>
+    무료<span style='font-size:0.85rem; font-weight:400; color:#8b949e;'>/월</span>
+  </p>
+  <p style='color:#6e7681; font-size:0.75rem; margin:0 0 16px 0;'>기본 현황 파악</p>
+  <hr style='border-color:#30363d; margin:0 0 16px 0;'>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 리스크 등급 (실시간)</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 핵심 지표 6개</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 가격 히스토리 차트</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 뉴스 키워드 상위 5개</p>
+  <p style='color:#6e7681; font-size:0.82rem; margin:7px 0;'>✗ 가격 예측 차트</p>
+  <p style='color:#6e7681; font-size:0.82rem; margin:7px 0;'>✗ 이메일 알람</p>
+  <p style='color:#6e7681; font-size:0.82rem; margin:7px 0;'>✗ 예측 성과 분석</p>
 </div>""", unsafe_allow_html=True)
-    st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-    _authenticator.login(
-        location="main",
-        fields={"Form name": "🔐  로그인", "Username": "아이디", "Password": "비밀번호", "Login": "로그인"},
-    )
+
+    with _col_std:
+        st.markdown("""
+<div style='border-radius:12px; padding:24px 20px; text-align:center;
+            border:1px solid #3fb950; background:#0d1f12; height:100%;'>
+  <p style='color:#3fb950; font-size:0.75rem; margin:0 0 6px 0; letter-spacing:2px; font-weight:600;'>STANDARD</p>
+  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0 0 2px 0;'>
+    ₩29,000<span style='font-size:0.85rem; font-weight:400; color:#8b949e;'>/월</span>
+  </p>
+  <p style='color:#6e7681; font-size:0.75rem; margin:0 0 16px 0;'>실무 예측 · 알람</p>
+  <hr style='border-color:#3fb950; margin:0 0 16px 0; opacity:0.4;'>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 무료 플랜 전체 포함</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ D+1~7 가격 예측 차트</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 75% 신뢰구간 · VaR</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 모델 방향 합의 신호</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 뉴스 키워드 10개 + 워드클라우드</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 이메일 알람 (급등/급락)</p>
+  <p style='color:#6e7681; font-size:0.82rem; margin:7px 0;'>✗ 예측 성과 분석</p>
+</div>""", unsafe_allow_html=True)
+
+    with _col_pro:
+        st.markdown("""
+<div style='border-radius:12px; padding:24px 20px; text-align:center;
+            border:2px solid #1f6feb; background:#0d2137; height:100%; position:relative;'>
+  <p style='color:#58a6ff; font-size:0.75rem; margin:0 0 6px 0; letter-spacing:2px; font-weight:600;'>PRO</p>
+  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0 0 2px 0;'>
+    ₩79,000<span style='font-size:0.85rem; font-weight:400; color:#8b949e;'>/월</span>
+  </p>
+  <p style='color:#6e7681; font-size:0.75rem; margin:0 0 16px 0;'>전문가 분석 · 커스텀 알람</p>
+  <hr style='border-color:#1f6feb; margin:0 0 16px 0; opacity:0.5;'>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 일반 플랜 전체 포함</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 예측 vs 실제 비교 차트</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 방향성 정확도 · MASE 추이</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 모델별 예측값 상세 (SARIMAX/XGB/VAR)</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 알람 임계값 직접 설정</p>
+  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 예측 CSV 다운로드</p>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-top:32px;'></div>", unsafe_allow_html=True)
+
+    # ── 로그인 폼 (중앙 정렬)
+    _, _lc, _ = st.columns([1, 1.2, 1])
+    with _lc:
+        _authenticator.login(
+            location="main",
+            fields={"Form name": "🔐  로그인", "Username": "아이디", "Password": "비밀번호", "Login": "로그인"},
+        )
     _auth_status = st.session_state.get("authentication_status")
     if _auth_status is True:
         st.rerun()
