@@ -9,10 +9,23 @@ credentials:
       alert_threshold: 0.7
     user1:
       email: user1@oil-risk.local
-      name: 사용자
+      name: 프로 사용자
       password: user1234
       subscription_expiry: "2026-12-31"
+      plan: pro
+      alert_threshold: 0.7
+    user_std:
+      email: user_std@oil-risk.local
+      name: 일반 사용자
+      password: std12345
+      subscription_expiry: "2026-12-31"
       plan: standard
+    user_free:
+      email: user_free@oil-risk.local
+      name: 무료 사용자
+      password: free1234
+      subscription_expiry: "2026-12-31"
+      plan: free
 cookie:
   expiry_days: 0
   key: oil_risk_secret_key_x9f2k
