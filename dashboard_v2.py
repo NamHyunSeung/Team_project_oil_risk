@@ -253,13 +253,25 @@ _PLAN_RANK = {'free': 0, 'standard': 1, 'pro': 2}
 def _has_plan(required: str) -> bool:
     return _PLAN_RANK.get(_user_plan, 0) >= _PLAN_RANK.get(required, 0)
 
+def _load_env_vars() -> dict:
+    _ev = {}
+    _ep = Path(__file__).parent / '.env'
+    if _ep.exists():
+        for _line in _ep.read_text(encoding='utf-8').splitlines():
+            _line = _line.strip()
+            if _line and not _line.startswith('#') and '=' in _line:
+                _k, _, _v = _line.partition('=')
+                _ev[_k.strip()] = _v.strip()
+    return _ev
+
 def _send_upgrade_request(username: str, name: str, current_plan: str, target_plan: str) -> bool:
     """관리자에게 플랜 업그레이드 요청 이메일 발송."""
     try:
         import smtplib
         from email.mime.text import MIMEText
-        _su = os.getenv('SMTP_USER', '')
-        _sp = os.getenv('SMTP_PASSWORD', '')
+        _env_v = _load_env_vars()
+        _su = _env_v.get('SMTP_USER', '')
+        _sp = _env_v.get('SMTP_PASSWORD', '')
         if not _su or not _sp:
             return False
         _plan_kr = {'free': '무료', 'standard': '일반', 'pro': '프로'}
