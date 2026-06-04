@@ -78,63 +78,64 @@ if not st.session_state.get("authentication_status"):
 </div>
 """, unsafe_allow_html=True)
 
-    # ── 플랜 카드 3개
+    # ── 플랜 카드 3개 (min-height로 높이 통일)
+    _CARD_H = "min-height:430px"
     _col_free, _col_std, _col_pro = st.columns(3)
 
     with _col_free:
-        st.markdown("""
-<div style='border-radius:12px; padding:24px 20px; text-align:center;
-            border:1px solid #30363d; background:#161b22; height:100%;'>
+        st.markdown(f"""
+<div style='border-radius:12px; padding:28px 24px; text-align:center;
+            border:1px solid #30363d; background:#161b22; {_CARD_H};'>
   <p style='color:#8b949e; font-size:0.75rem; margin:0 0 6px 0; letter-spacing:2px; font-weight:600;'>FREE</p>
-  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0 0 2px 0;'>
-    무료<span style='font-size:0.85rem; font-weight:400; color:#8b949e;'>/월</span>
+  <p style='color:#e6edf3; font-size:2.1rem; font-weight:700; margin:0 0 2px 0;'>
+    무료<span style='font-size:0.85rem; font-weight:400; color:#8b949e;'> /월</span>
   </p>
-  <p style='color:#6e7681; font-size:0.75rem; margin:0 0 16px 0;'>기본 현황 파악</p>
+  <p style='color:#6e7681; font-size:0.75rem; margin:0 0 18px 0;'>기본 현황 파악 · 체험</p>
   <hr style='border-color:#30363d; margin:0 0 16px 0;'>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 리스크 등급 (실시간)</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 핵심 지표 6개</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 가격 히스토리 차트</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 뉴스 키워드 상위 5개</p>
-  <p style='color:#6e7681; font-size:0.82rem; margin:7px 0;'>✗ 가격 예측 차트</p>
-  <p style='color:#6e7681; font-size:0.82rem; margin:7px 0;'>✗ 이메일 알람</p>
-  <p style='color:#6e7681; font-size:0.82rem; margin:7px 0;'>✗ 예측 성과 분석</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 리스크 등급 (실시간)</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 핵심 지표 6개</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 가격 히스토리 차트</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 뉴스 키워드 상위 5개</p>
+  <p style='color:#484f58; font-size:0.83rem; margin:8px 0;'>✗ 가격 예측 차트</p>
+  <p style='color:#484f58; font-size:0.83rem; margin:8px 0;'>✗ 이메일 알람</p>
+  <p style='color:#484f58; font-size:0.83rem; margin:8px 0;'>✗ 예측 성과 분석</p>
 </div>""", unsafe_allow_html=True)
 
     with _col_std:
-        st.markdown("""
-<div style='border-radius:12px; padding:24px 20px; text-align:center;
-            border:1px solid #3fb950; background:#0d1f12; height:100%;'>
+        st.markdown(f"""
+<div style='border-radius:12px; padding:28px 24px; text-align:center;
+            border:1px solid #3fb950; background:#0d1f12; {_CARD_H};'>
   <p style='color:#3fb950; font-size:0.75rem; margin:0 0 6px 0; letter-spacing:2px; font-weight:600;'>STANDARD</p>
-  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0 0 2px 0;'>
-    ₩29,000<span style='font-size:0.85rem; font-weight:400; color:#8b949e;'>/월</span>
+  <p style='color:#e6edf3; font-size:2.1rem; font-weight:700; margin:0 0 2px 0;'>
+    ₩490,000<span style='font-size:0.85rem; font-weight:400; color:#8b949e;'> /월</span>
   </p>
-  <p style='color:#6e7681; font-size:0.75rem; margin:0 0 16px 0;'>실무 예측 · 알람</p>
+  <p style='color:#6e7681; font-size:0.75rem; margin:0 0 18px 0;'>실무 예측 · 자동 알람</p>
   <hr style='border-color:#3fb950; margin:0 0 16px 0; opacity:0.4;'>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 무료 플랜 전체 포함</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ D+1~7 가격 예측 차트</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 75% 신뢰구간 · VaR</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 모델 방향 합의 신호</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 뉴스 키워드 10개 + 워드클라우드</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 이메일 알람 (급등/급락)</p>
-  <p style='color:#6e7681; font-size:0.82rem; margin:7px 0;'>✗ 예측 성과 분석</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 무료 플랜 전체 포함</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ D+1~7 가격 예측 차트</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 75% 신뢰구간 · VaR</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 모델 방향 합의 신호</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 뉴스 키워드 10개 + 워드클라우드</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 이메일 알람 (급등/급락)</p>
+  <p style='color:#484f58; font-size:0.83rem; margin:8px 0;'>✗ 예측 성과 분석</p>
 </div>""", unsafe_allow_html=True)
 
     with _col_pro:
-        st.markdown("""
-<div style='border-radius:12px; padding:24px 20px; text-align:center;
-            border:2px solid #1f6feb; background:#0d2137; height:100%; position:relative;'>
+        st.markdown(f"""
+<div style='border-radius:12px; padding:28px 24px; text-align:center;
+            border:2px solid #1f6feb; background:#0d2137; {_CARD_H};'>
   <p style='color:#58a6ff; font-size:0.75rem; margin:0 0 6px 0; letter-spacing:2px; font-weight:600;'>PRO</p>
-  <p style='color:#e6edf3; font-size:2rem; font-weight:700; margin:0 0 2px 0;'>
-    ₩79,000<span style='font-size:0.85rem; font-weight:400; color:#8b949e;'>/월</span>
+  <p style='color:#e6edf3; font-size:2.1rem; font-weight:700; margin:0 0 2px 0;'>
+    ₩1,290,000<span style='font-size:0.85rem; font-weight:400; color:#8b949e;'> /월</span>
   </p>
-  <p style='color:#6e7681; font-size:0.75rem; margin:0 0 16px 0;'>전문가 분석 · 커스텀 알람</p>
+  <p style='color:#6e7681; font-size:0.75rem; margin:0 0 18px 0;'>전문가 분석 · 커스텀 알람</p>
   <hr style='border-color:#1f6feb; margin:0 0 16px 0; opacity:0.5;'>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 일반 플랜 전체 포함</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 예측 vs 실제 비교 차트</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 방향성 정확도 · MASE 추이</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 모델별 예측값 상세 (SARIMAX/XGB/VAR)</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 알람 임계값 직접 설정</p>
-  <p style='color:#c9d1d9; font-size:0.82rem; margin:7px 0;'>✓ 예측 CSV 다운로드</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 일반 플랜 전체 포함</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 예측 vs 실제 비교 차트</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 방향성 정확도 · MASE 추이</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 모델별 상세 (SARIMAX/XGB/VAR)</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 알람 임계값 직접 설정</p>
+  <p style='color:#c9d1d9; font-size:0.83rem; margin:8px 0;'>✓ 예측 CSV 다운로드</p>
 </div>""", unsafe_allow_html=True)
 
     st.markdown("<div style='margin-top:32px;'></div>", unsafe_allow_html=True)
