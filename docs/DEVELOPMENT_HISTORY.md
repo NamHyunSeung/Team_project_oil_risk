@@ -1104,20 +1104,23 @@ exog_cols = ['dxy_change', 'demand_shock', 'supply_shock', 'vix_change']
 
 ---
 
-## Phase 26: 플랜 업그레이드 요청 기능 (2026-06-05)
+## Phase 26: 플랜 업그레이드 요청 — 인앱 승인 플로우 (2026-06-05)
 
 ### 변경 내용
 
 **dashboard_v2.py** — 사이드바:
 
 - pro 미만 사용자에게 "⬆ 플랜 업그레이드" expander 추가
-- 요청 버튼 클릭 시 관리자 Gmail로 업그레이드 요청 이메일 자동 발송
-- 이메일 내용: 아이디, 이름, 현재 플랜, 요청 플랜 + 관리자 처리 안내
-- `_send_upgrade_request()` 함수 추가 (smtplib, .env SMTP 설정 재사용)
+- 요청 버튼 클릭 시 `auth_config.yaml`에 `upgrade_request: <plan>` 저장
+
+**dashboard_v2.py** — Tab5 사용자 관리:
+
+- 탭 상단에 업그레이드 요청 목록 표시 (요청 없으면 미표시)
+- 승인 버튼: `plan` 업데이트 + `subscription_expiry` 30일 연장 + `upgrade_request` 필드 삭제
 
 ### 목적
 
-사용자가 직접 업그레이드 의사를 표시하고 관리자가 Tab5에서 처리하는 경량 업그레이드 플로우 구축.
+이메일 없이 대시보드 내에서 요청→승인 전체 플로우 완결.
 
 ---
 

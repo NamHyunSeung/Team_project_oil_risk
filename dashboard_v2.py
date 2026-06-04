@@ -264,33 +264,15 @@ def _load_env_vars() -> dict:
                 _ev[_k.strip()] = _v.strip()
     return _ev
 
-def _send_upgrade_request(username: str, name: str, current_plan: str, target_plan: str) -> bool:
-    """관리자에게 플랜 업그레이드 요청 이메일 발송."""
+def _send_upgrade_request(username: str, target_plan: str) -> bool:
+    """upgrade_request 필드를 auth_config.yaml에 저장."""
     try:
-        import smtplib
-        from email.mime.text import MIMEText
-        _env_v = _load_env_vars()
-        _su = _env_v.get('SMTP_USER', '')
-        _sp = _env_v.get('SMTP_PASSWORD', '')
-        if not _su or not _sp:
-            return False
-        _plan_kr = {'free': '무료', 'standard': '일반', 'pro': '프로'}
-        _body = (
-            f"[유가 리스크 시스템] 플랜 업그레이드 요청\n\n"
-            f"아이디  : {username}\n"
-            f"이름    : {name}\n"
-            f"현재 플랜: {_plan_kr.get(current_plan, current_plan)}\n"
-            f"요청 플랜: {_plan_kr.get(target_plan, target_plan)}\n\n"
-            f"관리자 페이지 → 사용자 관리 탭에서 플랜 및 만료일을 변경하세요."
-        )
-        _msg = MIMEText(_body, 'plain', 'utf-8')
-        _msg['From']    = _su
-        _msg['To']      = _su
-        _msg['Subject'] = f"[업그레이드 요청] {username} — {_plan_kr.get(current_plan)} → {_plan_kr.get(target_plan)}"
-        with smtplib.SMTP('smtp.gmail.com', 587, timeout=15) as _srv:
-            _srv.starttls()
-            _srv.login(_su, _sp)
-            _srv.sendmail(_su, _su, _msg.as_string())
+        _ep = Path(__file__).parent / 'config/auth_config.yaml'
+        with open(_ep, encoding='utf-8') as _rf:
+            _rc = yaml.safe_load(_rf) or {}
+        _rc['credentials']['usernames'][username]['upgrade_request'] = target_plan
+        with open(_ep, 'w', encoding='utf-8') as _wf:
+            yaml.dump(_rc, _wf, allow_unicode=True, default_flow_style=False)
         return True
     except Exception:
         return False
@@ -307,10 +289,10 @@ with st.sidebar:
         with st.expander("⬆ 플랜 업그레이드"):
             st.caption(f"현재: **{_plan_badge}** → 요청: **{_next_label}**")
             if st.button("업그레이드 요청 보내기", key="upgrade_req", use_container_width=True):
-                if _send_upgrade_request(_username, _name, _user_plan, _next_plan):
-                    st.success("요청이 관리자에게 전송됐습니다.")
+                if _send_upgrade_request(_username, _next_plan):
+                    st.success("요청이 접수됐습니다. 관리자 승인 후 플랜이 변경됩니다.")
                 else:
-                    st.error("전송 실패. 관리자에게 직접 문의하세요.")
+                    st.error("요청 저장 실패. 관리자에게 직접 문의하세요.")
 
     if _has_plan('pro'):
         _default_thresh = 0.7
@@ -1779,6 +1761,26 @@ def render_admin_page():
         with open(_cfg_path, encoding='utf-8') as _f:
             _cfg = yaml.safe_load(_f)
         _users = _cfg['credentials']['usernames']
+
+        # ── 업그레이드 요청 목록
+        _upgrade_reqs = {k: v for k, v in _users.items() if v.get('upgrade_request')}
+        if _upgrade_reqs:
+            _plan_kr = {'free': '무료', 'standard': '일반', 'pro': '프로'}
+            st.markdown("#### ⬆ 업그레이드 요청")
+            for _req_id, _req_data in _upgrade_reqs.items():
+                _c1, _c2, _c3 = st.columns([2, 2, 1])
+                _c1.write(f"**{_req_id}** ({_req_data.get('name', '')})")
+                _c2.write(f"{_plan_kr.get(_req_data.get('plan','free'))} → {_plan_kr.get(_req_data.get('upgrade_request'))}")
+                if _c3.button("승인", key=f"approve_{_req_id}"):
+                    _tgt = _req_data['upgrade_request']
+                    _users[_req_id]['plan'] = _tgt
+                    _users[_req_id]['subscription_expiry'] = str(datetime.date.today() + datetime.timedelta(days=30))
+                    del _users[_req_id]['upgrade_request']
+                    with open(_cfg_path, 'w', encoding='utf-8') as _fw:
+                        yaml.dump(_cfg, _fw, allow_unicode=True, default_flow_style=False)
+                    st.success(f"{_req_id} → {_plan_kr.get(_tgt)} 승인됨")
+                    st.rerun()
+            st.markdown("---")
 
         st.markdown("#### 계정 목록")
         _user_rows = [
