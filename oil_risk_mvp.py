@@ -5383,6 +5383,21 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
                 except Exception:
                     pass
 
+            # 충격 후 레짐 캡 — 최근 5영업일 내 단일 일간 변동 ≥14% 시 D+1 변동폭 ±8% 캡
+            if i > 0:
+                try:
+                    _bt_window = np.array(actual_prices[max(0, i - 6):i], dtype=float)
+                    if len(_bt_window) >= 2:
+                        _bt_chgs = np.abs(np.diff(_bt_window) / _bt_window[:-1])
+                        _bt_shock = float(_bt_chgs.max())
+                    else:
+                        _bt_shock = 0.0
+                    if _bt_shock >= 0.14:
+                        _bt_last = float(actual_prices[i - 1])
+                        pp = float(np.clip(pp, _bt_last * 0.92, _bt_last * 1.08))
+                except Exception:
+                    pass
+
             p_err     = round(ap - pp, 2)
             p_err_pct = round((ap - pp) / ap * 100, 2) if ap != 0 else None
             v_err     = round(av - pv, 5) if not (np.isnan(av) or np.isnan(pv)) else None
