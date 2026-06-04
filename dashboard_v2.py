@@ -516,8 +516,11 @@ def _render_snapshot_analysis(data):
         return
     try:
         snap = data['forecast_snapshots'].copy()
-        pl   = data['prediction_log'][['date', 'actual_price']].rename(columns={'date': 'forecast_date'})
+        pl   = data['prediction_log'][['date', 'actual_price']].rename(
+                    columns={'date': 'forecast_date', 'actual_price': '_pl_actual'})
         snap = snap.merge(pl, on='forecast_date', how='left')
+        snap['actual_price'] = snap['actual_price'].fillna(snap['_pl_actual'])
+        snap = snap.drop(columns=['_pl_actual'], errors='ignore')
         known = snap[snap['actual_price'].notna()].copy().sort_values('forecast_date').reset_index(drop=True)
     except Exception:
         return
