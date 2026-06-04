@@ -5121,6 +5121,27 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     except Exception as _se:
         log.debug(f"    감성 충격 보정 실패: {_se}")
 
+    # ── A5: 충격 후 레짐 감지 — 최근 5영업일 내 단일 일간 변동 ±8% 이상 시 D+1 변동폭 ±8% 캡
+    # 충격 직후 극단 피처값에 모델이 과반응하는 오차 완충 (4/8 충격 → 4/13 오차 +$9 사례 기반)
+    try:
+        _wti_regime = full_df['WTI'].dropna()
+        _regime_chg = _wti_regime.pct_change().abs()
+        _shock_in_window = float(_regime_chg.iloc[-5:].max()) if len(_regime_chg) >= 5 else 0.0
+        _SHOCK_REGIME_THRESHOLD = 0.08  # 단일 일간 변동 8% 이상
+        _SHOCK_REGIME_CAP = 0.08        # 충격 레짐에서 D+1 변동폭 ±8%
+        if _shock_in_window >= _SHOCK_REGIME_THRESHOLD:
+            _cap_lo = last_price * (1 - _SHOCK_REGIME_CAP)
+            _cap_hi = last_price * (1 + _SHOCK_REGIME_CAP)
+            _d1_before = ensemble[0]
+            ensemble[0] = float(np.clip(ensemble[0], _cap_lo, _cap_hi))
+            if ensemble[0] != _d1_before:
+                log.info(f"    🛡 충격 레짐 캡: D+1 {_d1_before:.2f}$ → {ensemble[0]:.2f}$ "
+                         f"(최근5일 최대변동 {_shock_in_window*100:.1f}%, 캡±{_SHOCK_REGIME_CAP*100:.0f}%)")
+            else:
+                log.info(f"    충격 레짐 감지(최근5일 최대변동 {_shock_in_window*100:.1f}%) — D+1 캡 미발동")
+    except Exception as _re:
+        log.debug(f"    충격 레짐 감지 실패: {_re}")
+
     # ── 예측값 sanity check: spot 대비 ±30% 초과 시 경고
     _dev_d1_pct = (ensemble[0] - last_price) / last_price * 100
     if abs(_dev_d1_pct) > 30.0:
