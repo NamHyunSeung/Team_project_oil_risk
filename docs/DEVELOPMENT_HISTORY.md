@@ -916,6 +916,26 @@ _shock_adj = float(np.clip(_chg3_sh * 20.0, -last_price * 0.03, last_price * 0.0
 
 최대 조정폭을 현재가 ±3%로 제한. 수정 후 D+1=$93.35 (정상 범위).
 
+## Phase 18: live bias 합산 캡 추가 (2026-06-04, 커밋 `TBD`)
+
+### 문제
+
+`compute_live_bias_correction()`은 내부에서 `max_correction=5.0`으로 ±5$ 캡을 적용하지만,
+이후 모멘텀 추가 보정(`bias += _mom_adj`, 최대 -3$)이 그 다음에 더해져 합산이 -8$까지 가능했음.
+강한 하락 추세(mom < -8%) + live 과대예측이 동시 발생하면 트리거.
+
+### 수정
+
+```python
+# live bias(±5$) + momentum(±3$) 합산 캡 — 설계 상한 이상 누적 방지
+_bias_before_cap = bias
+bias = float(np.clip(bias, -8.0, 8.0))
+if bias != _bias_before_cap:
+    log.info(f"    bias 합산 캡: {_bias_before_cap:.2f} → {bias:.2f}$")
+```
+
+모멘텀 += 이후, 방향 불일치 체크 이전에 삽입. 발동 시 로그 출력.
+
 ---
 
 ## 현재 상태 (2026-06-04)

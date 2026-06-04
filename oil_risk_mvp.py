@@ -5014,6 +5014,11 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         _mom_adj = -2.0 * _mom_scale
         bias += _mom_adj
         log.info(f"    모멘텀 하락({_mom_bias*100:.1f}%) 추가 보정: {_mom_adj:.2f}$ (감속비={_mom_decel:.3f} scale={_mom_scale:.2f})")
+    # live bias(±5$) + momentum(±3$) 합산 캡 — 설계 상한 이상 누적 방지
+    _bias_before_cap = bias
+    bias = float(np.clip(bias, -8.0, 8.0))
+    if bias != _bias_before_cap:
+        log.info(f"    bias 합산 캡: {_bias_before_cap:.2f} → {bias:.2f}$")
     # 모멘텀 방향 vs bias 방향 불일치 시 반감 (방향 전환 후 과소/과대 예측 방지)
     if bias != 0.0 and _mom_bias != 0.0:
         if (bias < 0 and _mom_bias > 0.02) or (bias > 0 and _mom_bias < -0.02):
