@@ -7,10 +7,10 @@ credentials:
       subscription_expiry: "2099-12-31"
       plan: pro
       alert_threshold: 0.7
-    user1:
-      email: user1@oil-risk.local
+    user_pro:
+      email: user_pro@oil-risk.local
       name: 프로 사용자
-      password: user1234
+      password: pro12345
       subscription_expiry: "2026-12-31"
       plan: pro
       alert_threshold: 0.7
