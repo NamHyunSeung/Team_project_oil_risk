@@ -5109,7 +5109,8 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
             _sent_sh   = float(_raw_d_sh.loc[_today_key])  if _today_key in _raw_d_sh.index  else 0.0
             _ens_chg_pct = (ensemble[0] - last_price) / last_price if last_price != 0 else 0.0
             if _chg3_sh < -0.15 and _sent_sh < 0.10 and _ens_chg_pct > -0.02:
-                _shock_adj = _chg3_sh * 20.0
+                # ±3% 캡: FinBERT 극단값이 예측 전체를 왜곡하지 않도록 제한
+                _shock_adj = float(np.clip(_chg3_sh * 20.0, -last_price * 0.03, last_price * 0.03))
                 ensemble = ensemble + _shock_adj
                 log.info(f"    ⚡ 감성 충격 보정: raw_chg3={_chg3_sh:.3f} raw_sent={_sent_sh:.3f} → {_shock_adj:+.2f}$")
     except Exception as _se:
