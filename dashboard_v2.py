@@ -236,10 +236,14 @@ try:
     if _expiry_str:
         _expiry    = datetime.datetime.strptime(_expiry_str, '%Y-%m-%d').date()
         _days_left = (_expiry - datetime.date.today()).days
-        if _days_left < 0:
-            st.error(f'구독이 만료됐습니다 ({_expiry_str}). 관리자에게 문의하세요.')
-            _authenticator.logout('로그아웃', location='sidebar')
-            st.stop()
+        if _days_left < 0 and not _is_admin:
+            if _udata.get('plan', 'free') != 'free':
+                _cfg2['credentials']['usernames'][_username]['plan'] = 'free'
+                _cfg2['credentials']['usernames'][_username]['subscription_expiry'] = '2099-12-31'
+                with open(_AUTH_CFG, 'w', encoding='utf-8') as _dw:
+                    yaml.dump(_cfg2, _dw, allow_unicode=True, default_flow_style=False)
+            _user_plan = 'free'
+            st.warning(f'구독이 만료되어 무료 플랜으로 전환됐습니다 (만료일: {_expiry_str}).')
         elif _days_left <= 30:
             st.warning(f'구독 만료 {_days_left}일 전 ({_expiry_str}). 갱신이 필요합니다.')
 except Exception:
