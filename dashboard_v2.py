@@ -17,11 +17,13 @@ from pathlib import Path
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import importlib.util as _ilu
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import bcrypt
 
 # ── 한글 폰트
 def _set_korean_font():
@@ -140,18 +142,81 @@ if not st.session_state.get("authentication_status"):
 
     st.markdown("<div style='margin-top:32px;'></div>", unsafe_allow_html=True)
 
-    # ── 로그인 폼 (중앙 정렬)
+    # ── 로그인 / 회원가입 탭
     _, _lc, _ = st.columns([1, 1.2, 1])
     with _lc:
-        _authenticator.login(
-            location="main",
-            fields={"Form name": "🔐  로그인", "Username": "아이디", "Password": "비밀번호", "Login": "로그인"},
-        )
-    _auth_status = st.session_state.get("authentication_status")
-    if _auth_status is True:
-        st.rerun()
-    if _auth_status is False:
-        st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+        _tab_login, _tab_reg = st.tabs(["🔐 로그인", "📝 회원가입"])
+
+        # ── 로그인 탭
+        with _tab_login:
+            _authenticator.login(
+                location="main",
+                fields={"Form name": "로그인", "Username": "아이디", "Password": "비밀번호", "Login": "로그인"},
+            )
+            _auth_status = st.session_state.get("authentication_status")
+            if _auth_status is True:
+                st.rerun()
+            if _auth_status is False:
+                st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+
+        # ── 회원가입 탭
+        with _tab_reg:
+            with st.form("register_form", clear_on_submit=True):
+                _r_id   = st.text_input("아이디 (영문+숫자, 4~20자)")
+                _r_nm   = st.text_input("이름")
+                _r_em   = st.text_input("이메일")
+                _r_pw   = st.text_input("비밀번호 (8자 이상)", type="password")
+                _r_pw2  = st.text_input("비밀번호 확인", type="password")
+                _r_plan = st.radio(
+                    "플랜 선택",
+                    ["free", "standard", "pro"],
+                    format_func=lambda x: {
+                        "free": "무료 (₩0)",
+                        "standard": "일반 (₩490,000/월)",
+                        "pro": "프로 (₩1,290,000/월)",
+                    }[x],
+                    horizontal=True,
+                )
+                _r_submit = st.form_submit_button("가입하기", use_container_width=True)
+
+            if _r_submit:
+                _r_err = None
+                if not re.match(r'^[a-zA-Z0-9]{4,20}$', _r_id):
+                    _r_err = "아이디는 영문+숫자 4~20자로 입력하세요."
+                elif len(_r_pw) < 8:
+                    _r_err = "비밀번호는 8자 이상이어야 합니다."
+                elif _r_pw != _r_pw2:
+                    _r_err = "비밀번호가 일치하지 않습니다."
+                elif not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', _r_em):
+                    _r_err = "이메일 형식이 올바르지 않습니다."
+                else:
+                    with open(_AUTH_CFG, encoding='utf-8') as _rf:
+                        _rcfg = yaml.safe_load(_rf) or {}
+                    if _r_id in _rcfg.get('credentials', {}).get('usernames', {}):
+                        _r_err = "이미 사용 중인 아이디입니다."
+
+                if _r_err:
+                    st.error(_r_err)
+                else:
+                    _hashed  = bcrypt.hashpw(_r_pw.encode(), bcrypt.gensalt()).decode()
+                    _today   = datetime.date.today()
+                    _expiry  = '2099-12-31' if _r_plan == 'free' else str(_today + datetime.timedelta(days=7))
+                    _rcfg['credentials']['usernames'][_r_id] = {
+                        'name': _r_nm,
+                        'email': _r_em,
+                        'password': _hashed,
+                        'plan': _r_plan,
+                        'subscription_expiry': _expiry,
+                        'joined_at': str(_today),
+                    }
+                    with open(_AUTH_CFG, 'w', encoding='utf-8') as _wf:
+                        yaml.dump(_rcfg, _wf, allow_unicode=True, default_flow_style=False)
+                    if _r_plan == 'free':
+                        st.success("가입 완료! 로그인 탭에서 로그인하세요.")
+                    else:
+                        st.success("가입 완료! 7일 체험이 시작됩니다. 로그인 탭에서 로그인하세요.")
+                        st.info("체험 만료 후 관리자가 결제를 확인하고 구독을 연장합니다.")
+
     st.stop()
 
 _name     = st.session_state.get("name", "")
@@ -1660,7 +1725,8 @@ def render_admin_page():
         st.markdown("#### 계정 목록")
         _user_rows = [
             {'아이디': k, '이름': v.get('name', ''), '이메일': v.get('email', ''),
-             '구독만료': v.get('subscription_expiry', '—')}
+             '플랜': v.get('plan', 'free'), '구독만료': v.get('subscription_expiry', '—'),
+             '가입일': v.get('joined_at', '—')}
             for k, v in _users.items()
         ]
         st.dataframe(_user_rows, use_container_width=True)
@@ -1671,16 +1737,25 @@ def render_admin_page():
         with col_add:
             st.markdown("#### 계정 추가")
             with st.form('add_user_v2', clear_on_submit=True):
-                _new_id = st.text_input('아이디')
-                _new_nm = st.text_input('이름')
-                _new_em = st.text_input('이메일')
-                _new_pw = st.text_input('비밀번호', type='password')
+                _new_id   = st.text_input('아이디')
+                _new_nm   = st.text_input('이름')
+                _new_em   = st.text_input('이메일')
+                _new_pw   = st.text_input('비밀번호', type='password')
+                _new_plan = st.selectbox('플랜', ['free', 'standard', 'pro'], key='adm_plan')
                 if st.form_submit_button('추가'):
                     if _new_id and _new_pw:
                         if _new_id in _users:
                             st.error('이미 존재하는 아이디')
                         else:
-                            _users[_new_id] = {'name': _new_nm, 'email': _new_em, 'password': _new_pw}
+                            _adm_today  = datetime.date.today()
+                            _adm_expiry = '2099-12-31' if _new_plan == 'free' else str(_adm_today + datetime.timedelta(days=7))
+                            _users[_new_id] = {
+                                'name': _new_nm, 'email': _new_em,
+                                'password': _new_pw,
+                                'plan': _new_plan,
+                                'subscription_expiry': _adm_expiry,
+                                'joined_at': str(_adm_today),
+                            }
                             with open(_cfg_path, 'w', encoding='utf-8') as _fw:
                                 yaml.dump(_cfg, _fw, allow_unicode=True)
                             st.success(f'{_new_id} 추가됨. 페이지를 새로고침하세요.')
