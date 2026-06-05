@@ -67,6 +67,17 @@ def _load_authenticator():
 
 _authenticator = _load_authenticator()
 
+def _load_auth_config() -> dict:
+    with open(_AUTH_CFG, encoding='utf-8') as _f:
+        return yaml.safe_load(_f) or {}
+
+def _save_auth_config(cfg: dict) -> None:
+    with open(_AUTH_CFG, 'w', encoding='utf-8') as _f:
+        yaml.dump(cfg, _f, allow_unicode=True, default_flow_style=False)
+
+def _get_cols(df, cols: list) -> list:
+    return [c for c in cols if c in df.columns]
+
 if not st.session_state.get("authentication_status"):
     st.markdown("""
 <div style='text-align:center; padding:36px 0 4px 0;'>
@@ -190,8 +201,7 @@ if not st.session_state.get("authentication_status"):
                 elif not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', _r_em):
                     _r_err = "이메일 형식이 올바르지 않습니다."
                 else:
-                    with open(_AUTH_CFG, encoding='utf-8') as _rf:
-                        _rcfg = yaml.safe_load(_rf) or {}
+                    _rcfg = _load_auth_config()
                     if _r_id in _rcfg.get('credentials', {}).get('usernames', {}):
                         _r_err = "이미 사용 중인 아이디입니다."
 
@@ -209,8 +219,7 @@ if not st.session_state.get("authentication_status"):
                         'subscription_expiry': _expiry,
                         'joined_at': str(_today),
                     }
-                    with open(_AUTH_CFG, 'w', encoding='utf-8') as _wf:
-                        yaml.dump(_rcfg, _wf, allow_unicode=True, default_flow_style=False)
+                    _save_auth_config(_rcfg)
                     if _r_plan == 'free':
                         st.success("가입 완료! 로그인 탭에서 로그인하세요.")
                     else:
@@ -227,8 +236,7 @@ _is_admin = (_username == "admin")
 _user_plan = 'pro' if _is_admin else 'free'  # 기본값 (예외 시 폴백)
 _cfg2      = {}
 try:
-    with open(Path(__file__).parent / 'config/auth_config.yaml', encoding='utf-8') as _f2:
-        _cfg2 = yaml.safe_load(_f2) or {}
+    _cfg2 = _load_auth_config()
     _udata      = _cfg2.get('credentials', {}).get('usernames', {}).get(_username, {})
     _expiry_str = _udata.get('subscription_expiry', '')
     if not _is_admin:
@@ -240,8 +248,7 @@ try:
             if _udata.get('plan', 'free') != 'free':
                 _cfg2['credentials']['usernames'][_username]['plan'] = 'free'
                 _cfg2['credentials']['usernames'][_username]['subscription_expiry'] = '2099-12-31'
-                with open(_AUTH_CFG, 'w', encoding='utf-8') as _dw:
-                    yaml.dump(_cfg2, _dw, allow_unicode=True, default_flow_style=False)
+                _save_auth_config(_cfg2)
             _user_plan = 'free'
             st.warning(f'구독이 만료되어 무료 플랜으로 전환됐습니다 (만료일: {_expiry_str}).')
         elif _days_left <= 30:
@@ -267,12 +274,9 @@ def _load_env_vars() -> dict:
 def _send_upgrade_request(username: str, target_plan: str) -> bool:
     """upgrade_request 필드를 auth_config.yaml에 저장."""
     try:
-        _ep = Path(__file__).parent / 'config/auth_config.yaml'
-        with open(_ep, encoding='utf-8') as _rf:
-            _rc = yaml.safe_load(_rf) or {}
+        _rc = _load_auth_config()
         _rc['credentials']['usernames'][username]['upgrade_request'] = target_plan
-        with open(_ep, 'w', encoding='utf-8') as _wf:
-            yaml.dump(_rc, _wf, allow_unicode=True, default_flow_style=False)
+        _save_auth_config(_rc)
         return True
     except Exception:
         return False
@@ -360,7 +364,7 @@ button[data-baseweb="tab"][aria-selected="true"] {
 # ── 상수
 RISK_COLOR = {
     'NORMAL': '#2ecc71', 'CAUTION': '#f39c12',
-    'SURGE_RISK': '#e74c3c', 'DROP_RISK': '#3498db',
+    'SURGE_RISK': '#e74c3c', 'DROP_RISK': '#3498db', 'CRITICAL': '#8e44ad',
 }
 RISK_LABEL = {
     'NORMAL': ('🟢', '정상'),
@@ -492,10 +496,6 @@ def _render_price_charts(data):
             rh = rh[rh['date'] >= _cutoff].sort_values('date')
             if not _is_admin:
                 rh = rh.tail(30)
-            _LEVEL_CLR = {
-                'NORMAL': '#2ecc71', 'CAUTION': '#f39c12',
-                'SURGE_RISK': '#e74c3c', 'DROP_RISK': '#3498db', 'CRITICAL': '#8e44ad',
-            }
             fig_rh = make_subplots(specs=[[{"secondary_y": True}]])
             fig_rh.add_trace(go.Scatter(
                 x=rh['date'], y=rh['wti_price'],
@@ -503,7 +503,7 @@ def _render_price_charts(data):
                 line=dict(color='#58a6ff', width=2),
                 hovertemplate='%{x|%m/%d}<br>$%{y:.2f}<extra></extra>',
             ), secondary_y=False)
-            for _lv, _clr in _LEVEL_CLR.items():
+            for _lv, _clr in RISK_COLOR.items():
                 _mask = rh['risk_level'] == _lv
                 if _mask.any():
                     fig_rh.add_trace(go.Scatter(
@@ -1101,7 +1101,7 @@ def render_admin_page():
                 if 'SARIMAX' in m:       return '가격예측' if _stk_adopted_m else '앙상블 컴포넌트'
                 return '모니터링/비교'
             _price_disp.insert(0, '역할', _price_disp['model'].apply(_assign_role_tab))
-            _p_cols = ['역할'] + [c for c in ['model','rmse','mae','r2','mase','dir_acc','wf_dir_acc'] if c in _price.columns]
+            _p_cols = ['역할'] + _get_cols(_price, ['model','rmse','mae','r2','mase','dir_acc','wf_dir_acc'])
             st.caption("가격 예측 모델 (RMSE·MAE: ↓ | R²·dir_acc: ↑)")
             st.dataframe(_price_disp[_p_cols], hide_index=True, use_container_width=True)
             _mon_only = _price[_price['mae'] >= 20] if 'mae' in _price.columns else pd.DataFrame()
@@ -1109,7 +1109,7 @@ def render_admin_page():
                 st.caption(f"※ {', '.join(_mon_only['model'].tolist())} — 모니터링 전용 (차트 제외)")
 
             if not _vol.empty:
-                _v_cols = [c for c in ['model','rmse','mae','r2','train_r2','overfit_gap'] if c in _vol.columns]
+                _v_cols = _get_cols(_vol, ['model','rmse','mae','r2','train_r2','overfit_gap'])
                 st.caption("변동성 예측 모델")
                 st.dataframe(_vol[_v_cols], hide_index=True, use_container_width=True)
 
@@ -1409,7 +1409,7 @@ def render_admin_page():
             col_bt, col_lv = st.columns(2)
             with col_bt:
                 st.caption("**백테스트 (최근 10일)**")
-                _bt_cols = [c for c in ['date','sarimax_pred','actual_price','price_error','price_error_pct'] if c in bt.columns]
+                _bt_cols = _get_cols(bt, ['date','sarimax_pred','actual_price','price_error','price_error_pct'])
                 st.dataframe(bt.tail(10)[_bt_cols].rename(columns={
                     'date':'날짜','sarimax_pred':'SARIMAX예측($)','actual_price':'실제가($)',
                     'price_error':'오차($)','price_error_pct':'오차(%)',
@@ -1419,7 +1419,7 @@ def render_admin_page():
                 if live_confirmed.empty:
                     st.info("라이브 기록 없음")
                 else:
-                    _lv_cols = [c for c in ['date','sarimax_pred','actual_price','price_error','price_error_pct'] if c in lv.columns]
+                    _lv_cols = _get_cols(lv, ['date','sarimax_pred','actual_price','price_error','price_error_pct'])
                     st.dataframe(lv[_lv_cols].rename(columns={
                         'date':'날짜','sarimax_pred':'예측가($)','actual_price':'실제가($)',
                         'price_error':'오차($)','price_error_pct':'오차(%)',
@@ -1757,9 +1757,7 @@ def render_admin_page():
     # ── Tab5: 사용자 관리
     with tab_users:
         st.subheader("👤 사용자 관리")
-        _cfg_path = Path(__file__).parent / 'config/auth_config.yaml'
-        with open(_cfg_path, encoding='utf-8') as _f:
-            _cfg = yaml.safe_load(_f)
+        _cfg = _load_auth_config()
         _users = _cfg['credentials']['usernames']
 
         # ── 업그레이드 요청 목록
@@ -1776,8 +1774,7 @@ def render_admin_page():
                     _users[_req_id]['plan'] = _tgt
                     _users[_req_id]['subscription_expiry'] = str(datetime.date.today() + datetime.timedelta(days=30))
                     del _users[_req_id]['upgrade_request']
-                    with open(_cfg_path, 'w', encoding='utf-8') as _fw:
-                        yaml.dump(_cfg, _fw, allow_unicode=True, default_flow_style=False)
+                    _save_auth_config(_cfg)
                     st.success(f"{_req_id} → {_plan_kr.get(_tgt)} 승인됨")
                     st.rerun()
             st.markdown("---")
@@ -1816,8 +1813,7 @@ def render_admin_page():
                                 'subscription_expiry': _adm_expiry,
                                 'joined_at': str(_adm_today),
                             }
-                            with open(_cfg_path, 'w', encoding='utf-8') as _fw:
-                                yaml.dump(_cfg, _fw, allow_unicode=True)
+                            _save_auth_config(_cfg)
                             st.success(f'{_new_id} 추가됨. 페이지를 새로고침하세요.')
                     else:
                         st.warning('아이디/비밀번호 필수')
@@ -1833,8 +1829,7 @@ def render_admin_page():
             _new_exp = st.date_input('만료일', value=_cur_exp_date, key='exp_date_v2')
             if st.button('저장', key='exp_save_v2'):
                 _users[_exp_target]['subscription_expiry'] = str(_new_exp)
-                with open(_cfg_path, 'w', encoding='utf-8') as _fw:
-                    yaml.dump(_cfg, _fw, allow_unicode=True)
+                _save_auth_config(_cfg)
                 st.success(f'{_exp_target} 만료일 → {_new_exp}')
 
         st.markdown("---")
@@ -1853,8 +1848,7 @@ def render_admin_page():
                         st.error('비밀번호 불일치')
                     else:
                         _users[_pw_target]['password'] = _new_pw_r
-                        with open(_cfg_path, 'w', encoding='utf-8') as _fw:
-                            yaml.dump(_cfg, _fw, allow_unicode=True)
+                        _save_auth_config(_cfg)
                         st.success(f'{_pw_target} 비밀번호 변경됨')
 
         with col_del:
@@ -1864,8 +1858,7 @@ def render_admin_page():
                 _del_target = st.selectbox('삭제할 계정', _deletable, key='del_v2')
                 if st.button('삭제', type='secondary', key='del_btn_v2'):
                     del _users[_del_target]
-                    with open(_cfg_path, 'w', encoding='utf-8') as _fw:
-                        yaml.dump(_cfg, _fw, allow_unicode=True)
+                    _save_auth_config(_cfg)
                     st.success(f'{_del_target} 삭제됨. 페이지를 새로고침하세요.')
             else:
                 st.info('삭제 가능한 계정 없음')

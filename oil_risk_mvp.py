@@ -159,11 +159,11 @@ log = logging.getLogger(__name__)
 
 def _check_refit_staleness() -> int:
     """마지막 재훈련 경과일 반환. REFIT_STALE_DAYS 초과 시 Optuna 캐시 삭제."""
-    import json as _jr, time as _tr
+    import time as _tr
     age_days = 0
     if LAST_RETRAIN_FILE.exists():
         try:
-            _ts = _jr.loads(LAST_RETRAIN_FILE.read_text()).get('timestamp', 0)
+            _ts = json.loads(LAST_RETRAIN_FILE.read_text()).get('timestamp', 0)
             age_days = int((_tr.time() - _ts) / 86400)
         except Exception:
             pass
@@ -177,7 +177,7 @@ def _check_refit_staleness() -> int:
 
 def _save_retrain_record() -> None:
     """재훈련 완료 시각 + 모델 버전 기록."""
-    import json as _jw, time as _tw
+    import time as _tw
     try:
         _atomic_json({
             'timestamp': _tw.time(),
@@ -191,9 +191,8 @@ def _check_degradation_trigger(mase: float, ovx_level: float = 0.0) -> bool:
     """MASE 열화 일수 추적. 연속 MASE_RETRAIN_DAYS 초과 시 True 반환 + 캐시 초기화.
     OVX≥60 고변동기는 임계값 완화 (시장 구조적 예측 난이도 상승 반영).
     """
-    import json as _jd
     try:
-        rec = _jd.loads(DEGRADATION_FILE.read_text()) if DEGRADATION_FILE.exists() else {}
+        rec = json.loads(DEGRADATION_FILE.read_text()) if DEGRADATION_FILE.exists() else {}
     except Exception:
         rec = {}
 
@@ -727,7 +726,7 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
     try:
         if not EIA_API_KEY:
             raise ValueError("EIA_API_KEY 미설정")
-        import urllib.request as _ur, json as _json, urllib.parse as _up
+        import urllib.request as _ur, urllib.parse as _up
 
         log.info("    EIA 수집: 미국 원유 재고 (WCESTUS1)...")
         params = _up.urlencode({
@@ -745,7 +744,7 @@ def _attach_fred_data(df: pd.DataFrame, start_date: str, end_date: str) -> pd.Da
         })
         url = f"https://api.eia.gov/v2/petroleum/stoc/wstk/data/?{params}"
         with _ur.urlopen(url, timeout=20) as r:
-            rows = _json.loads(r.read())['response']['data']
+            rows = json.loads(r.read())['response']['data']
 
         inv_records = {row['period']: float(row['value'])
                        for row in rows if row['value'] is not None}
@@ -999,7 +998,7 @@ NEWS_CACHE_FILE   = OUTPUT_DIR / 'guardian_news_cache.csv'
 
 def _guardian_fetch_chunk(api_key: str, from_dt: str, to_dt: str) -> list:
     """Guardian API에서 특정 기간 뉴스 수집 (페이지네이션 포함)"""
-    import urllib.request, json as _json, urllib.parse
+    import urllib.request, urllib.parse
     articles = []
     page = 1
     while True:
@@ -1016,7 +1015,7 @@ def _guardian_fetch_chunk(api_key: str, from_dt: str, to_dt: str) -> list:
         url = f"https://content.guardianapis.com/search?{params}"
         try:
             with urllib.request.urlopen(url, timeout=15) as r:
-                data = _json.loads(r.read())['response']
+                data = json.loads(r.read())['response']
         except Exception as exc:
             log.debug(f"Guardian chunk 실패 ({from_dt}~{to_dt} p{page}): {exc}")
             break
@@ -1041,7 +1040,7 @@ def _guardian_fetch_chunk(api_key: str, from_dt: str, to_dt: str) -> list:
 
 def _newsapi_fetch(api_key: str, from_dt: str, to_dt: str) -> list:
     """NewsAPI.org에서 원유 뉴스 수집 (무료 플랜: 최근 30일, 100req/day)"""
-    import urllib.request, json as _json, urllib.parse
+    import urllib.request, urllib.parse
     NEWSAPI_QUERY = (
         'oil OR "crude oil" OR WTI OR OPEC OR "OPEC+" OR petroleum '
         'OR "brent crude" OR "oil price" OR "oil supply" OR "crude inventory"'
@@ -1063,7 +1062,7 @@ def _newsapi_fetch(api_key: str, from_dt: str, to_dt: str) -> list:
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=15) as r:
-                data = _json.loads(r.read())
+                data = json.loads(r.read())
             if data.get('status') != 'ok':
                 log.warning(f"NewsAPI 응답 오류: {data.get('message','')}")
                 break
@@ -2600,7 +2599,6 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
     X_te_all = test_df[available_feats]
 
     # ── D: 훈련 피처 분포 저장 (라이브 드리프트 감지용)
-    import json as _json_fds
     try:
         _fd_stats = {}
         for _fc in X_tr_all.columns:
@@ -2868,8 +2866,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             _sx_cached = {}
             if _sx_cache_file.exists():
                 try:
-                    import json as _json
-                    _sx_cached = _json.loads(_sx_cache_file.read_text())
+                    _sx_cached = json.loads(_sx_cache_file.read_text())
                 except Exception:
                     pass
             if _sx_cached.get('key') == _sx_cache_key:
@@ -3353,12 +3350,11 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         _Xtr_svm, _Xte_svm, _sc_cem = _Xtr_sel, _Xte_sel, None
 
                     # C 그리드 서치 (7일 이내 캐시 사용으로 skip 가능)
-                    import json as _jsc
                     _best_c, _best_c_dir = 1.0, -1.0
                     _svm_c_cached = False
                     if SVM_CACHE.exists():
                         try:
-                            _sc_d = _jsc.loads(SVM_CACHE.read_text())
+                            _sc_d = json.loads(SVM_CACHE.read_text())
                             _sc_age = (pd.Timestamp.today() - pd.Timestamp(_sc_d['date'])).days
                             if _sc_age < REFIT_STALE_DAYS:
                                 _best_c = float(_sc_d['best_c'])
@@ -4291,11 +4287,10 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                         'actual_price_test': _stack_y.copy(),
                     }
                     # ── B: 가중치 EMA 평활화 (라이브 예측용, α=0.3 — 급격한 가중치 전환 방지)
-                    import json as _json_ema
                     try:
                         _ema_prev = {}
                         if STACK_WEIGHTS_EMA.exists():
-                            _ema_prev = _json_ema.loads(STACK_WEIGHTS_EMA.read_text())
+                            _ema_prev = json.loads(STACK_WEIGHTS_EMA.read_text())
                         _ema_names = _ema_prev.get('names', [])
                         _ema_wts   = _ema_prev.get('weights', [])
                         if _ema_names == list(_stack_names) and len(_ema_wts) == len(_stack_weights):
@@ -4606,8 +4601,7 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
     # ── D: 라이브 피처 드리프트 감지 (p01/p99 훈련 범위 이탈 경고)
     if FEAT_TRAIN_STATS.exists():
         try:
-            import json as _json_fdc
-            _fd_stats = _json_fdc.loads(FEAT_TRAIN_STATS.read_text())
+            _fd_stats = json.loads(FEAT_TRAIN_STATS.read_text())
             _live_row  = feature_df.iloc[-1]
             _drift_list = []
             for _fc, _st in _fd_stats.items():
@@ -5295,7 +5289,7 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
                     _pl_src = pd.read_csv(PRED_LOG_FILE)[['date', 'actual_price']].dropna()
                     _price_str_map.update({
                         str(r['date']): round(float(r['actual_price']), 2)
-                        for _, r in _pl_src.iterrows()
+                        for r in _pl_src.to_dict('records')
                     })
                 except Exception:
                     pass
@@ -5499,7 +5493,7 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
     if prev_fc_df is not None and not prev_fc_df.empty:
         try:
             prev_lookup = {str(row['date']): float(row['forecast_price'])
-                           for _, row in prev_fc_df.iterrows()}
+                           for row in prev_fc_df.to_dict('records')}
             # 마지막 actual 확정일 기준 (미래 dated entry 무시)
             _confirmed = [pd.Timestamp(r['date']) for r in live_rows
                           if r.get('date') and pd.notna(r.get('actual_price'))
@@ -5758,7 +5752,7 @@ def send_risk_alert(risk_signal: dict, fc_df) -> bool:
         if fc_df is not None and len(fc_df) > 0:
             fc_lines = "\n".join(
                 f"  {row['date']}  ${row['forecast_price']:.2f}"
-                for _, row in fc_df.head(3).iterrows()
+                for row in fc_df.head(3).to_dict('records')
             )
 
         body = f"""
@@ -5820,7 +5814,7 @@ def _send_single_alert(to_email: str, risk_signal: dict, fc_df) -> bool:
         if fc_df is not None and len(fc_df) > 0:
             fc_lines = "\n".join(
                 f"  {row['date']}  ${row['forecast_price']:.2f}"
-                for _, row in fc_df.head(3).iterrows()
+                for row in fc_df.head(3).to_dict('records')
             )
 
         body = f"""
@@ -5889,7 +5883,7 @@ def send_alerts_to_subscribers(risk_signal: dict, fc_df) -> None:
 
 def monitor_rss_alerts() -> dict:  # noqa: dead — 향후 독립 스케줄러용
     """RSS 긴급 이벤트 스캔. 현재 파이프라인에서 호출 안 됨 (독립 실행 예정)."""
-    import json as _json, urllib.request as _ur, xml.etree.ElementTree as _ET, time as _time
+    import urllib.request as _ur, xml.etree.ElementTree as _ET, time as _time
 
     ALERT_KEYWORDS = {
         'supply_cut':  ['opec cut','production cut','supply disruption','pipeline attack',
@@ -6027,8 +6021,7 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     geo       = float(row.get('geo_dummy',             0.0))
     # 뉴스 기반 지정학 감지로 GPR 데이터 지연 보완
     try:
-        import json as _json
-        _alerts = _json.loads((OUTPUT_DIR / 'latest_alerts.json').read_text(encoding='utf-8'))
+        _alerts = json.loads((OUTPUT_DIR / 'latest_alerts.json').read_text(encoding='utf-8'))
         if any(t.get('category') == 'geopolitical' for t in _alerts.get('triggers', [])):
             geo = max(geo, 1.0)
     except Exception:
@@ -6084,11 +6077,9 @@ def classify_risk(feature_df: pd.DataFrame, full_df: pd.DataFrame, forecast_dir:
     # 3일 급등탐지기 확률 반영: 2일 연속 확인 + OVX 게이트 (단발 오경보 억제)
     _prev_surge_p = 0.0
     try:
-        _ps_path = OUTPUT_DIR / 'latest_risk_signal.csv'
-        if _ps_path.exists():
-            _ps_df = pd.read_csv(_ps_path)
-            if 'surge_prob_3d' in _ps_df.columns:
-                _prev_surge_p = float(_ps_df['surge_prob_3d'].iloc[0])
+        _ps_df = pd.read_csv(OUTPUT_DIR / 'latest_risk_signal.csv')
+        if 'surge_prob_3d' in _ps_df.columns:
+            _prev_surge_p = float(_ps_df['surge_prob_3d'].iloc[0])
     except Exception:
         pass
     # 펀더멘탈 확인: EIA 재고 감소(bullish) OR 중기 모멘텀 상승
@@ -6748,7 +6739,7 @@ def plot_oil_forecast(feature_df: pd.DataFrame, fc_df: pd.DataFrame, signal: dic
     try:
         pf = pd.read_csv(OUTPUT_DIR / 'model_performance.csv')
         tdata = [[r['model'], r['target'], f"{r['rmse']:.4f}",
-                  f"{r['mae']:.4f}", f"{r['r2']:.3f}"] for _, r in pf.iterrows()]
+                  f"{r['mae']:.4f}", f"{r['r2']:.3f}"] for r in pf.to_dict('records')]
         tbl = ax6.table(cellText=tdata, colLabels=['Model','Target','RMSE','MAE','R²'],
                         loc='center', cellLoc='center')
         tbl.auto_set_font_size(False); tbl.set_fontsize(8); tbl.scale(1.0, 1.8)
@@ -7237,7 +7228,6 @@ def run_pipeline(start_date=None, end_date=None) -> dict:
     plot_oil_forecast(feature_df, fc_df, risk_signal)
 
     # ── 마지막 실행 시간 + API 상태 기록
-    import json as _json
     _run_meta = {
         'last_run':           datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'data_through':       full_df.index[-1].strftime('%Y-%m-%d'),
@@ -7318,8 +7308,7 @@ if __name__ == '__main__':
     if args.schedule:
         schedule_daily(args.hour, args.minute)
     elif args.rss_alerts:
-        import json as _json
         result = monitor_rss_alerts()
-        print(_json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         run_pipeline()

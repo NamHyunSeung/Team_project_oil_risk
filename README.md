@@ -260,7 +260,7 @@ live(±5$) + momentum(±3$) 설계 의도 상한을 코드에서 명시적으로
 
 ```
 Team_project_oil_risk/
-├── oil_risk_mvp.py          # 메인 파이프라인 (~7100줄)
+├── oil_risk_mvp.py          # 메인 파이프라인 (~7314줄)
 ├── dashboard_v2.py          # Streamlit 대시보드
 ├── requirements.txt
 ├── run_pipeline.bat / run_rss_alerts.bat / run_dashboard.bat

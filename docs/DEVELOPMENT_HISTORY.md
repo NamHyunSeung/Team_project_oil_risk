@@ -1182,6 +1182,22 @@ exog_cols = ['dxy_change', 'demand_shock', 'supply_shock', 'vix_change']
 
 ---
 
+## Phase 27: 코드 경량화 — 중복 제거 및 구조 개선 (2026-06-05)
+
+### oil_risk_mvp.py
+
+- **`import json as _json` 전부 제거**: 함수 내부 9+5곳의 중복 임포트 → 최상위 `import json` 사용으로 통일 (`_atomic_json/csv/pkl` 자체완결 임포트는 유지)
+- **경합 조건 수정**: `latest_risk_signal.csv` 읽기 시 `if exists(): read()` → `try: read() except: pass` (EAFP 패턴)
+- **`.iterrows()` → `.to_dict('records')` (5곳)**: 단순 dict/list 컴프리헨션에서 이터레이터 오버헤드 제거
+
+### dashboard_v2.py
+
+- **YAML 헬퍼 추출**: `_load_auth_config()` / `_save_auth_config()` — 10곳 이상의 중복 open/yaml 패턴 통합
+- **`RISK_COLOR` 통합**: 전역 상수에 `CRITICAL` 추가, 함수 내 `_LEVEL_CLR` 인라인 dict 제거
+- **`_get_cols(df, cols)` 헬퍼 추출**: 4곳의 반복 컬럼 필터링 패턴 통합
+
+---
+
 ## 현재 상태 (2026-06-05)
 
 ### 채택 모델
