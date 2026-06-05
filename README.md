@@ -269,6 +269,10 @@ Team_project_oil_risk/
 ├── config/                  # 작업 스케줄러 XML, 인증 설정
 ├── data/                    # CFTC annual.txt, GPR xls
 ├── docs/                    # 개발 히스토리, 논문 링크
+│   ├── generate_timeline.py      # 기술 카테고리 타임라인 생성
+│   ├── generate_timeline_biz.py  # 비즈니스 발표용 타임라인 생성
+│   ├── timeline.png              # 기술 타임라인 이미지
+│   └── timeline_biz.png          # 비즈니스 타임라인 이미지 (발표용)
 ├── experiments/             # 실험 스크립트
 ├── scripts/                 # 스케줄러 등록 유틸
 └── output/                  # 자동 생성
