@@ -75,10 +75,83 @@ def _save_auth_config(cfg: dict) -> None:
     with open(_AUTH_CFG, 'w', encoding='utf-8') as _f:
         yaml.dump(cfg, _f, allow_unicode=True, default_flow_style=False)
 
+# ── 세션 관리 (Standard 플랜 단일 기기 제한)
+from datetime import timedelta as _td
+
+_SESSIONS_PATH = Path(__file__).parent / "config/active_sessions.json"
+_SESSION_TTL_H = 8
+
+def _sessions_load() -> dict:
+    try:
+        return json.loads(_SESSIONS_PATH.read_text(encoding='utf-8')) if _SESSIONS_PATH.exists() else {}
+    except Exception:
+        return {}
+
+def _sessions_save(data: dict) -> None:
+    try:
+        _SESSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SESSIONS_PATH.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+    except Exception:
+        pass
+
+def _session_id() -> str:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        ctx = get_script_run_ctx()
+        return ctx.session_id if ctx else ""
+    except Exception:
+        return ""
+
+def _sessions_purge(data: dict) -> dict:
+    cutoff = datetime.datetime.now() - _td(hours=_SESSION_TTL_H)
+    result = {}
+    for u, ss in data.items():
+        live = [s for s in ss if datetime.datetime.fromisoformat(s["t"]) > cutoff]
+        if live:
+            result[u] = live
+    return result
+
+def _session_register(username: str) -> None:
+    sid = _session_id()
+    if not sid or not username:
+        return
+    data = _sessions_purge(_sessions_load())
+    now = datetime.datetime.now().isoformat(timespec='seconds')
+    sessions = data.get(username, [])
+    for s in sessions:
+        if s["id"] == sid:
+            s["t"] = now
+            _sessions_save(data)
+            return
+    sessions.append({"id": sid, "t": now})
+    data[username] = sessions
+    _sessions_save(data)
+
+def _session_remove(username: str) -> None:
+    sid = _session_id()
+    if not sid or not username:
+        return
+    data = _sessions_load()
+    if username in data:
+        data[username] = [s for s in data[username] if s["id"] != sid]
+        if not data[username]:
+            del data[username]
+        _sessions_save(data)
+
+def _session_blocked(username: str, plan: str) -> bool:
+    if plan == 'pro':
+        return False
+    sid = _session_id()
+    data = _sessions_purge(_sessions_load())
+    return any(s["id"] != sid for s in data.get(username, []))
+
 def _get_cols(df, cols: list) -> list:
     return [c for c in cols if c in df.columns]
 
 if not st.session_state.get("authentication_status"):
+    _prev_sid_user = st.session_state.pop("_sid_user", None)
+    if _prev_sid_user:
+        _session_remove(_prev_sid_user)
     st.markdown("""
 <div style='text-align:center; padding:36px 0 4px 0;'>
   <span style='font-size:2.6rem;'>🛢</span>
@@ -313,6 +386,14 @@ with st.sidebar:
         )
     else:
         _alert_threshold = 0.7
+
+# ── 세션 유효성 검사 (Standard: 단일 기기 제한)
+if not _is_admin and _session_blocked(_username, _user_plan):
+    st.error("⚠️ 이미 다른 기기(탭)에서 로그인 중입니다. 일반 플랜은 동시에 1개 세션만 접속 가능합니다.")
+    st.info("사이드바에서 로그아웃 후 재시도하세요.")
+    st.stop()
+_session_register(_username)
+st.session_state["_sid_user"] = _username
 
 # ── 자동 새로고침 (5분 간격으로 run_meta.json 변경 감지)
 try:

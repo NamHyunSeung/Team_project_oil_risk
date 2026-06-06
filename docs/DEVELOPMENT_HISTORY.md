@@ -1308,6 +1308,7 @@ exog_cols = ['dxy_change', 'demand_shock', 'supply_shock', 'vix_change']
 | 24 | 회원가입 기능 (bcrypt 해시, 플랜 선택, 7일 체험) | 관리자 개입 불필요 |
 | 25 | 구독 만료 시 자동 free 다운그레이드 | 관리자 계정 제외 |
 | 26 | 업그레이드 요청 → 관리자 인앱 승인 플로우 | YAML upgrade_request 필드 기반 |
+| 29 | 플랜별 동시 접속 제한 (무료·일반 1대 / 프로 무제한) | active_sessions.json, TTL 8시간 |
 
 ### 주요 알려진 이슈
 
