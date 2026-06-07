@@ -4,6 +4,17 @@ WTI 원유 가격의 D+1~D+7 예측 및 리스크 등급 자동 분류 파이프
 
 ---
 
+## Background
+
+Oil price volatility directly impacts the cost
+structure of energy-dependent companies. This system
+predicts WTI crude oil prices (D+1~D+7) and
+automatically classifies risk levels (SURGE/DROP/
+CAUTION/NORMAL) by combining time-series models,
+volatility modeling, and news sentiment analysis.
+
+---
+
 ## 빠른 시작
 
 ```bash
