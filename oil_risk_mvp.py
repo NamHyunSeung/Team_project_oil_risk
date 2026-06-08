@@ -2920,18 +2920,18 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             # 훈련 파라미터 고정, 칼만 필터로 1-step ahead 예측
             fit_full   = mdl_full.filter(fit.params)
             pred_obj   = fit_full.get_prediction(start=n_train, dynamic=False)
-            _pred_all = pred_obj.predicted_mean.values[-n_test_sx:]
             # 라이브 등가 D+1 평가: pred[k]=E[WTI_k|WTI_{k-1},exog_k], 실제 return 보정
             # → WTI_k + β*exog_k (라이브와 동일: 오늘 exog로 내일 예측)
             # vs target_price[k] = WTI_{k+1}
-            # full_wti는 _to_bday로 확장될 수 있으므로 마지막 n_test_sx 포지션 사용
-            _wti_returns = full_wti.values[-n_test_sx:] - full_wti.values[-(n_test_sx+1):-1]
-            pred_price   = _pred_all + _wti_returns
-            y_px_te_sx   = sx_test['target_price'].values
+            # 날짜 인덱스 기준 정렬: full_wti는 _to_bday로 확장되어 sx_test와 길이가
+            # 다를 수 있으므로, 포지션 슬라이싱 대신 날짜로 join하여 어긋남을 방지
+            _wti_returns_s = full_wti - full_wti.shift(1)
+            pred_price_s   = (pred_obj.predicted_mean + _wti_returns_s).reindex(sx_test.index)
+            y_px_te_sx   = sx_test['target_price']
             _eval_mask   = sx_test.index.isin(feature_df.index)
-            _pred_eval   = pred_price[_eval_mask]
-            _actual_eval = y_px_te_sx[_eval_mask]
             _dates_eval  = sx_test.index[_eval_mask]
+            _pred_eval   = pred_price_s.values[_eval_mask]
+            _actual_eval = y_px_te_sx.values[_eval_mask]
             rmse_b = float(np.sqrt(mean_squared_error(_actual_eval, _pred_eval)))
             mae_b  = float(mean_absolute_error(_actual_eval, _pred_eval))
             r2_b   = float(r2_score(_actual_eval, _pred_eval))
