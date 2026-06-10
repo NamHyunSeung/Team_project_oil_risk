@@ -988,23 +988,29 @@ def _patch_wti_with_fred(df: pd.DataFrame, start_date: str, end_date: str) -> pd
 # ─────────────────────────────────────────────────────────────────────────────
 
 GUARDIAN_QUERY = (
-    'oil OR "crude oil" OR "brent crude" OR WTI OR OPEC OR "OPEC+" OR petroleum '
-    'OR "energy crisis" OR "oil price" OR "oil supply" OR "oil demand" '
-    'OR "natural gas" OR LNG OR "oil production" OR "oil sanction" '
-    'OR "crude inventory" OR "oil inventory" OR "oil sanctions"'
+    '"crude oil" OR "brent crude" OR WTI OR OPEC OR "OPEC+" OR petroleum '
+    'OR "oil price" OR "oil supply" OR "oil demand" OR "oil production" '
+    'OR "oil sanctions" OR "crude inventory" OR "oil inventory" OR "oil tanker" '
+    'OR "oil facility" OR "natural gas" OR LNG'
+)
+GUARDIAN_QUERY_GEO = (
+    '"Strait of Hormuz" OR "Iran nuclear" OR "Iran attack" OR "Israel Iran" '
+    'OR "Iran ceasefire" OR "Iran oil" OR "Saudi Arabia oil" OR "OPEC cut" '
+    'OR "oil embargo" OR "Middle East oil" OR "oil supply cut"'
 )
 NEWS_CACHE_FILE   = OUTPUT_DIR / 'guardian_news_cache.csv'
 
 
-def _guardian_fetch_chunk(api_key: str, from_dt: str, to_dt: str) -> list:
+def _guardian_fetch_chunk(api_key: str, from_dt: str, to_dt: str, query: str = None) -> list:
     """Guardian API에서 특정 기간 뉴스 수집 (페이지네이션 포함)"""
     import urllib.request, urllib.parse
+    _query = query if query is not None else GUARDIAN_QUERY
     articles = []
     page = 1
     while True:
         params = urllib.parse.urlencode({
             'api-key':    api_key,
-            'q':          GUARDIAN_QUERY,
+            'q':          _query,
             'from-date':  from_dt,
             'to-date':    to_dt,
             'page':       page,
@@ -1253,23 +1259,28 @@ def fetch_news(days_back: int = None):
             cur = chunk_start
             while cur < chunk_end:
                 nxt  = min(cur + timedelta(days=CHUNK_DAYS), chunk_end)
-                arts = _guardian_fetch_chunk(
-                    GUARDIAN_API_KEY,
-                    cur.strftime('%Y-%m-%d'),
-                    nxt.strftime('%Y-%m-%d'),
-                )
-                new_articles.extend(arts)
+                f_dt = cur.strftime('%Y-%m-%d')
+                t_dt = nxt.strftime('%Y-%m-%d')
+                arts_market = _guardian_fetch_chunk(GUARDIAN_API_KEY, f_dt, t_dt)
+                arts_geo    = _guardian_fetch_chunk(GUARDIAN_API_KEY, f_dt, t_dt, GUARDIAN_QUERY_GEO)
+                new_articles.extend(arts_market)
+                new_articles.extend(arts_geo)
                 log.info(f"      {cur.strftime('%Y-%m')} ~ {nxt.strftime('%Y-%m')}: "
-                         f"+{len(arts)}건")
+                         f"market+{len(arts_market)} geo+{len(arts_geo)}건")
                 cur = nxt + timedelta(days=1)
 
-            # Guardian은 일반 에너지 기사(재생에너지·기후) 포함 → 원유 관련만 필터
-            _OIL_KW = {'oil','crude','brent','wti','opec','barrel','petroleum','refinery','shale','tanker','sanctions','inventory'}
+            # 팜유·엔진오일·모터스포츠 등 노이즈 제거 — 복합어 기반 필터 (standalone 'oil' 제외)
+            _OIL_KW = [
+                'crude oil','brent crude','brent','wti','opec','barrel','petroleum',
+                'refinery','shale','tanker','crude inventory','oil inventory',
+                'oil price','oil supply','oil demand','oil production','oil tanker',
+                'oil facility','oil sanctions','oil embargo','hormuz',
+            ]
             new_articles = [
                 a for a in new_articles
                 if any(kw in a.get('title','').lower() for kw in _OIL_KW)
             ]
-            log.info(f"    Guardian 신규 수집: {len(new_articles)}건 (oil 필터 후)")
+            log.info(f"    Guardian 신규 수집: {len(new_articles)}건 (복합어 필터 후)")
         except Exception as exc:
             log.warning(f"    Guardian API 오류({exc}) → RSS 폴백")
 
@@ -2920,14 +2931,19 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             # 훈련 파라미터 고정, 칼만 필터로 1-step ahead 예측
             fit_full   = mdl_full.filter(fit.params)
             pred_obj   = fit_full.get_prediction(start=n_train, dynamic=False)
-            # 라이브 등가 D+1 평가: pred[k]=E[WTI_k|WTI_{k-1},exog_k], 실제 return 보정
-            # → WTI_k + β*exog_k (라이브와 동일: 오늘 exog로 내일 예측)
-            # vs target_price[k] = WTI_{k+1}
+            # get_prediction(dynamic=False)의 predicted_mean은 SARIMAX(d=1)가 자체적으로
+            # 역차분하여 돌려주는 "가격 레벨" 1-step-ahead 예측치 E[WTI_k|WTI_{<k},exog_k] 그 자체.
+            # (이전엔 여기에 실제 등락폭 _wti_returns_s = WTI_k - WTI_{k-1}를 더했는데,
+            #  이는 미래 시점 k의 실제 종가를 이미 포함한 확정값이라 pred_price_s[k]가
+            #  거의 정답 WTI_k와 같아지는 데이터 누수였음 — 그 결과 price_error가
+            #  -(predicted_mean[k]-WTI_{k-1})와 100% 동일해져 "예측오차"가 아니라
+            #  "모델이 예측한 당일 변동폭 크기"만 측정하는 의미 없는 값이 되었고,
+            #  백테스트 MAE가 $0.39로 비현실적으로 낮게 나오는 원인이었음)
             # 날짜 인덱스 기준 정렬: full_wti는 _to_bday로 확장되어 sx_test와 길이가
             # 다를 수 있으므로, 포지션 슬라이싱 대신 날짜로 join하여 어긋남을 방지
-            _wti_returns_s = full_wti - full_wti.shift(1)
-            pred_price_s   = (pred_obj.predicted_mean + _wti_returns_s).reindex(sx_test.index)
-            y_px_te_sx   = sx_test['target_price']
+            pred_price_s   = pred_obj.predicted_mean.reindex(sx_test.index)
+            # pred_price_s[k] = E[WTI_k]이므로 정답도 같은 날 WTI_k로 맞춘다
+            y_px_te_sx   = sx_test['WTI']
             _eval_mask   = sx_test.index.isin(feature_df.index)
             _dates_eval  = sx_test.index[_eval_mask]
             _pred_eval   = pred_price_s.values[_eval_mask]
@@ -3006,6 +3022,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
             results['var'] = {
                 'pred_price_test': _var_pred_arr,
                 'actual_price_test': _y_var_te,
+                'test_dates': _v_te.index,
                 'rmse': _rmse_var, 'mae': _mae_var, 'r2': _r2_var,
                 'ci_calib_q75': _ci_q75_var,
                 'model': _var_fit, 'cols': _var_cols, 'lag': _lag_ord,
@@ -3967,6 +3984,7 @@ def train_models(feature_df: pd.DataFrame, full_df: pd.DataFrame = None, aux: di
                 'model_q10': _mD_q10, 'model_q90': _mD_q90,
                 'pred_price_test': pred_px_d,
                 'actual_price_test': y_px_te.values,
+                'test_dates': y_px_te.index,
             }
             # 분류기 채택 시: 회귀 모델(크기) + 분류기(방향) 분리 보관 (라이브 예측 반영)
             if _cname == 'Classifier-adj' and _mD_sel is not None:
@@ -5101,6 +5119,8 @@ def forecast_next_7days(results: dict, feature_df: pd.DataFrame, full_df: pd.Dat
         if _nc_file_sh.exists():
             _nc_sh = pd.read_csv(_nc_file_sh)
             _nc_sh['date'] = pd.to_datetime(_nc_sh['date'])
+            _NC_KW = ['crude oil','brent crude','brent','wti','opec','barrel','petroleum','refinery','shale','tanker','crude inventory','oil inventory','oil price','oil supply','oil demand','oil production','oil tanker','oil facility','oil sanctions','oil embargo','hormuz']
+            _nc_sh = _nc_sh[_nc_sh['title'].str.lower().apply(lambda t: any(kw in t for kw in _NC_KW))]
             _raw_d_sh  = _nc_sh.groupby('date')['finbert_score'].mean().sort_index()
             _raw_c3_sh = _raw_d_sh.diff(3)
             _today_key = _raw_d_sh.index[-1]
@@ -5342,6 +5362,8 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
         if _nc_file.exists():
             _nc_df = pd.read_csv(_nc_file)
             _nc_df['date'] = pd.to_datetime(_nc_df['date'])
+            _NC_KW2 = ['crude oil','brent crude','brent','wti','opec','barrel','petroleum','refinery','shale','tanker','crude inventory','oil inventory','oil price','oil supply','oil demand','oil production','oil tanker','oil facility','oil sanctions','oil embargo','hormuz']
+            _nc_df = _nc_df[_nc_df['title'].str.lower().apply(lambda t: any(kw in t for kw in _NC_KW2))]
             _raw_daily = _nc_df.groupby('date')['finbert_score'].mean().sort_index()
             _raw_chg3s = _raw_daily.diff(3)
             _raw_sent_lkp = {k: float(v) for k, v in _raw_daily.items() if pd.notna(v)}
@@ -5356,6 +5378,14 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
         pred_vols     = xg.get('pred_rv_test',   np.full(len(dates), np.nan))
         actual_vols   = xg.get('actual_rv_test', np.full(len(dates), np.nan))
         stk_preds     = stk.get('pred_price_test')  # None when Stacking not adopted
+
+        # Stacking 미채택 시 폴백: SARIMAX+VAR+XGB 역MAE 가중평균(날짜 교집합 기준, 가용 모델만 재정규화)
+        _var_r, _xgr_r = results.get('var', {}), results.get('xgb_return', {})
+        _var_lkp = (dict(zip(pd.DatetimeIndex(_var_r['test_dates']), _var_r['pred_price_test']))
+                    if 'test_dates' in _var_r and 'pred_price_test' in _var_r else {})
+        _xgr_lkp = (dict(zip(pd.DatetimeIndex(_xgr_r['test_dates']), _xgr_r['pred_price_test']))
+                    if 'test_dates' in _xgr_r and 'pred_price_test' in _xgr_r else {})
+        _sx_mae_e, _var_mae_e, _xgr_mae_e = sx.get('mae'), _var_r.get('mae'), _xgr_r.get('mae')
 
         for i, dt in enumerate(dates):
             pp = float(pred_prices[i])
@@ -5389,6 +5419,20 @@ def save_prediction_log(results: dict, feature_df: pd.DataFrame, fc_df: pd.DataF
                     if _bt_shock >= 0.14:
                         _bt_last = float(actual_prices[i - 1])
                         pp = float(np.clip(pp, _bt_last * 0.92, _bt_last * 1.08))
+                except Exception:
+                    pass
+
+            # Stacking 미채택 시: SARIMAX+VAR+XGB 역MAE 가중평균으로 대체(라이브 기본 앙상블 방식과 동일)
+            if sp is None and _sx_mae_e:
+                try:
+                    _dt_key = pd.Timestamp(dt)
+                    _comp = [(pp, _sx_mae_e)]
+                    if _dt_key in _var_lkp and _var_mae_e:
+                        _comp.append((float(_var_lkp[_dt_key]), _var_mae_e))
+                    if _dt_key in _xgr_lkp and _xgr_mae_e:
+                        _comp.append((float(_xgr_lkp[_dt_key]), _xgr_mae_e))
+                    _wsum = sum(1.0 / m for _, m in _comp)
+                    sp = round(sum(p * (1.0 / m) for p, m in _comp) / _wsum, 2)
                 except Exception:
                     pass
 

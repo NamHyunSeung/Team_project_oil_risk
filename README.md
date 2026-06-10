@@ -283,6 +283,85 @@ live(±5$) + momentum(±3$) 설계 의도 상한을 코드에서 명시적으로
 
 ---
 
+### 백테스트 차트에 다중모델 앙상블 예측 추가 (2026-06-08)
+
+**배경**: 라이브는 SARIMAX+VAR+XGB를 역MAE 가중평균으로 결합하지만 백테스트
+차트는 SARIMAX 단일 모델만 표시 — 라이브와 동일한 앙상블 예측을 백테스트에서도
+보기 위해 개선. (참고: model_performance.csv의 "Stacking(+SARIMAX+XGB+VAR,
+미채택)" MAE=3.14는 이미 유사 조합을 시도했으나 XGB 단독(3.00)보다 나빠 정확도
+개선을 보장하진 않음을 사전 인지하고 진행)
+
+**구현**: VAR/XGB 결과에 `test_dates` 추가 → SARIMAX·VAR·XGB의 `pred_price_test`를
+날짜 교집합 기준 역MAE 가중평균(라이브 기본 앙상블과 동일 방식)으로 결합해 기존
+`stacking_pred`/`stacking_error` 슬롯(실제 Stacking 미채택 시 폴백)에 채움 —
+기존 `stacking_error` 우선 로직을 통해 대시보드 전체에 자동 반영. 한 모델의
+날짜가 없으면 나머지 모델만으로 가중치 재정규화.
+
+**효과**: 추가 학습/연산 거의 없이(기존 `pred_price_test` 배열 재사용) 백테스트
+차트에 라이브와 동일한 방식의 다중모델 앙상블 예측선 표시. 라벨 "Stacking 예측" →
+"앙상블 예측"으로 수정해 학습된 메타러너가 아닌 가중평균임을 명확히 함.
+
+---
+
+### SARIMAX 백테스트 정답값 정의 불일치 수정 (2026-06-08)
+
+**버그**: 모델 모니터링 탭(약 80%)과 백테스트 탭(51.3%, 동전 던지기 수준)의 SARIMAX
+방향성 정확도가 크게 어긋남. 원인은 `pred_price_test`(= "같은 날" `WTI_k` 나우캐스트)와
+비교하는 정답값이 `target_price`(= `WTI_{k+1}`, 다음 날)로 채워져 있어 예측·정답이
+하루 어긋난 채 비교되고 있었음 — `prediction_log` 실측 대조로 확인(`sarimax_pred`는
+당일 실제가와 MAE 0.369로 거의 일치, `actual_price`는 다음날 실제가와 MAE 0.667로
+일치). VAR/ETS/XGBoost-Return/Stacking은 예측·정답 정의가 내부적으로 일관됨을
+전수 확인 — 이상 없음.
+
+**수정**: `oil_risk_mvp.py:2932` 한 줄, `y_px_te_sx = sx_test['target_price']` →
+`sx_test['WTI']`(같은 날 실제가)로 변경. SARIMAX 평가 지표(rmse/mae/r2/ci_calib_q75)와
+`prediction_log` 백테스트 행(actual_price/price_error/dir_correct)이 모두 이 값에서
+파생되므로 한 줄 수정으로 함께 정합성을 회복.
+
+### SARIMAX 백테스트 데이터 누수(look-ahead) 수정 (2026-06-09)
+
+**버그**: 위 정렬 버그 수정 직후 백테스트 MAE가 $0.39, 방향성 정확도 96.2%로
+비현실적으로 좋아지고 "모델 드리프트(라이브/백테스트 MAE 비율 4.44×)" 경고가
+새로 발생. 원인은 `oil_risk_mvp.py:2927`의
+`pred_price_s = pred_obj.predicted_mean + _wti_returns_s`에서
+`_wti_returns_s = full_wti - full_wti.shift(1)`(= **실제 확정 등락폭** `WTI_k - WTI_{k-1}`,
+모델이 예측한 변화량이 아님)을 이미 가격 레벨 예측치인 `predicted_mean`(SARIMAX(d=1)의
+`get_prediction`이 자동 역차분하여 반환하는 `E[WTI_k|WTI_{<k},exog_k]` 그 자체)에 더해
+미래 시점 `k`의 실제 종가 정보가 예측값에 누수된 것. 그 결과
+`pred_price_s[k] = WTI_k + (predicted_mean[k] - WTI_{k-1})`이 되어 "예측값"이 사실상
+"정답 + 작은 잡음"이 됨.
+
+**증거**: `price_error[k](= actual − pred)`와 `-(predicted_mean[k] - 전일종가)`의
+상관계수 = 0.9999999999999999, 최대 절대 차이 7.1×10⁻¹⁵(부동소수점 오차 수준)로
+완전히 동일 — 즉 "백테스트 오차"는 forecast 정확도가 아니라 "SARIMAX가 예측한 당일
+가격 변동폭의 크기"(평균 ≈$0.40)만 측정하는 의미 없는 값이었음을 수학적으로 확정.
+(이 누수는 위 정렬 버그보다 먼저 존재했으나, 두 버그가 서로 가려 "그럴듯한" $1~2대
+오차로 보였음 — 정렬 버그를 고치자 누수가 그대로 노출되어 MAE가 $0.39로 떨어진 것)
+
+**수정**: `_wti_returns_s` 가산 로직을 제거하고 `predicted_mean`을 그대로 가격
+예측치로 사용 — `pred_price_s = pred_obj.predicted_mean.reindex(sx_test.index)`.
+라이브 예측(`forecast_next_7days`, D+1~D+7 forward forecast)과 백테스트(나우캐스트)는
+본질적으로 다른 과제이므로, 수정 후 백테스트 MAE가 라이브 MAE($1.50) 수준으로
+정상화되고 "모델 드리프트" 거짓 경보가 해소될 것으로 예상.
+
+---
+
+### 뉴스 수집 정확도 개선 + 대시보드 안정성 개선 (2026-06-10)
+
+**뉴스 수집**: Guardian 키워드 필터가 standalone "oil"을 포함해 팜유·엔진오일·
+모터스포츠 등 비석유 기사를 다수 수집 — 복합어 기반 필터(`crude oil`,
+`oil price`, `oil tanker` 등)로 교체해 노이즈 제거. 동시에 호르무즈 해협·이란
+관련 지정학 이슈 전용 쿼리(`GUARDIAN_QUERY_GEO`)를 추가해 블랙스완 감지에
+중요한 지정학 뉴스 누락을 보완. 동일 필터를 `forecast_next_7days`/
+`save_prediction_log`의 뉴스 캐시 필터링에도 일괄 적용.
+
+**대시보드**: 백테스트 탭의 중복된 "오차 스파이크" 테이블 제거(앙상블 추가로
+오차 차트와 중복). 파이프라인 실행 상태를 boolean 플래그 대신 실제
+`subprocess.Popen` 객체(`pipeline_proc`)와 `.poll()`로 판단하도록 변경 —
+플래그가 프로세스 상태와 어긋나 "실행 중" 표시가 고착되는 문제 방지.
+
+---
+
 ## 자동 재훈련
 
 - **REFIT_STALE_DAYS=7**: 7일마다 Optuna 캐시 초기화 → 하이퍼파라미터 재탐색
@@ -335,6 +414,21 @@ Team_project_oil_risk/
 |----------|------|--------|
 | 1 | `vix_change` → `ovx_change` 교체 — 원유 특화 변동성으로 대체 | 낮음 |
 | 2 | `news_sentiment_3d` exog 추가 — 감성을 예측값에 직접 반영 | 중간 (선행성 검증 필요) |
+
+### 보류 아이디어 — 뉴스 감성 D+1 한정 반영 (2026-06-09)
+
+장마감~다음날 개장 사이 뉴스 감성을 D+1 예측에만 실측값으로 반영하고 이후
+스텝은 기존처럼 가정값(0)을 쓰는 아이디어. `fut_exog` 생성부
+(`oil_risk_mvp.py:4633-4642`)에 이미 추출돼 있는 `last_exog`를 스텝0에만
+적용하면 구조적으로 구현 가능 — 멀티스텝 미래값을 가정해야 하는 기존 한계가
+이 범위에는 적용되지 않음.
+
+**보류 사유**: `news_sentiment`는 `groupby('date')`(`oil_risk_mvp.py:2230`)로
+달력일 단위 집계되는데, 캐시(`guardian_news_cache.csv`)의 `date` 컬럼이
+`YYYY-MM-DD`뿐이라 "장마감 후~개장 전" 시간창과 정렬 불가. RSS 파싱부
+(`oil_risk_mvp.py:1300`)는 `published_parsed`로 시:분:초까지 얻지만 캐싱 시
+날짜만 남기고 버림(`oil_risk_mvp.py:1309`). 선행 작업으로 캐시 스키마를
+datetime화하고 과거 뉴스 데이터를 재수집해야 적용 가능.
 
 ---
 

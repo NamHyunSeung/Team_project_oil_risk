@@ -1317,6 +1317,197 @@ exog_cols = ['dxy_change', 'demand_shock', 'supply_shock', 'vix_change']
 
 ---
 
+## Phase 31: 백테스트 차트에 다중모델 앙상블 예측 추가 (2026-06-08)
+
+### 배경
+
+라이브 대시보드는 SARIMAX+VAR+XGB 등 여러 모델을 역MAE 가중평균으로 결합한 예측을
+보여주지만, 백테스트 차트는 SARIMAX 단일 모델 예측만 표시하고 있었음. "라이브처럼
+모든 모델을 앙상블한 백테스트 그래프로 보고 싶다"는 요청에 따라 개선.
+
+### 제약과 선택
+
+라이브 파이프라인 전체(동적 패널티 5종 + 후처리 6단계)를 백테스트에서 그대로
+재현하면 실행 시간이 크게 늘어남. 대신 이미 계산되어 있는 각 모델의
+`pred_price_test` 배열을 라이브의 기본 앙상블과 동일한 **역MAE 가중평균** 방식으로
+결합하는 절충안을 채택 — 추가 학습/연산 없이 기존 배열만 재사용하므로 실행 시간
+영향 거의 없음.
+
+(참고: `model_performance.csv`의 "Stacking(+SARIMAX+XGB+VAR, 미채택)" MAE=3.14는
+이미 유사 조합을 시도했고 XGB 단독(MAE=3.00)보다 나빠 채택되지 않았음 — 이번 변경은
+시간 효율적이지만 정확도 개선을 보장하진 않음을 사용자에게 사전 안내 후 진행.)
+
+### 구현
+
+- `oil_risk_mvp.py`: VAR(`results['var']`)과 XGB-Return(`results['xgb_return']`)
+  결과 딕셔너리에 `test_dates`(예측 인덱스) 추가 — 기존엔 SARIMAX만 보유해 모델 간
+  날짜 정렬이 불가능했음
+- `save_prediction_log()`: 기존에 비어있던 `stk_preds`(Stacking 미채택 시 `None`)
+  슬롯에, SARIMAX(보정 적용된 `pp`)·VAR·XGB의 예측을 **날짜 교집합 기준**으로
+  결합한 역MAE 가중평균 값을 폴백으로 채움. 한 모델의 예측이 해당 날짜에 없으면
+  나머지 모델만으로 가중치를 재정규화. 실제 Stacking이 채택되는 경우에는 기존처럼
+  학습된 Stacking 예측이 우선됨 (변경 없음)
+- 기존 `stacking_error` 우선 로직(`price_error`를 `stacking_error`로 자동 대체,
+  대시보드 전체 반영)을 그대로 활용 — `dashboard_v2.py`는 라벨만
+  "Stacking 예측" → "앙상블 예측"으로 수정 (학습된 메타러너가 아닌 가중평균임을 명확히)
+
+### 검증
+
+합성 데이터로 가중평균 계산과 "한 모델의 날짜가 없을 때 재정규화" 로직을
+별도 스크립트로 검증 — 기댓값과 일치 확인.
+
+---
+
+## Phase 33: SARIMAX 백테스트 데이터 누수(look-ahead) 수정 — MAE $0.39의 정체 규명 (2026-06-09)
+
+### 문제
+
+Phase 32(날짜 정렬 버그) 수정 직후, 대시보드에 백테스트 MAE $0.39 / MAPE 0.42% /
+방향성 정확도 96.2%라는 비현실적으로 좋은 수치와 함께 "⚠️ 모델 드리프트 — 라이브/
+백테스트 MAE 비율 4.44×"(라이브 MAE $1.50) 경고가 새로 나타남. 사용자가 "갑자기
+성능이 좋아진 이유"를 질문 — 추측 없이 코드와 데이터를 직접 검증.
+
+### 원인
+
+`oil_risk_mvp.py:2927`(수정 전):
+
+```python
+_wti_returns_s = full_wti - full_wti.shift(1)
+pred_price_s   = (pred_obj.predicted_mean + _wti_returns_s).reindex(sx_test.index)
+```
+
+- `pred_obj.predicted_mean`: SARIMAX(d=1)의 `get_prediction(dynamic=False)`이 **자동으로
+  역차분하여 반환하는 가격 레벨 1-step-ahead 예측치** `E[WTI_k|WTI_{<k},exog_k]` 그 자체.
+  추가 보정이 불필요함.
+- `_wti_returns_s[k] = WTI_k - WTI_{k-1}`: 모델이 예측한 변화량이 아니라 **실제(확정)
+  등락폭** — 이를 이미 가격 레벨인 `predicted_mean`에 더하면 미래 시점 `k`의 실제
+  종가 정보가 예측값에 누수되어 `pred_price_s[k] = WTI_k + (predicted_mean[k]-WTI_{k-1})`
+  ≈ `WTI_k`(정답 + 작은 잡음)가 됨.
+
+### 증명 (수치 검증, `prediction_log.csv` 직접 분석)
+
+1. backtest 행의 `sarimax_pred` vs `actual_price` 비교 → MAE $0.39, 거의 동일한 값.
+2. "예측 변화"(`pp[1:]-ap[:-1]`) vs "실제 변화"(`ap[1:]-ap[:-1]`) 상관계수 = 0.9614,
+   크기도 거의 동일 (예: -3.01 vs -3.07).
+3. **결정적 증명**: `predicted_mean[k]`을 `pp[k] - act_chg[k-1]`로 역산한 뒤
+   `price_error[k](= ap-pp)`와 `-(predicted_mean[k] - 전일종가)`를 비교 →
+   **상관계수 0.9999999999999999, 최대 절대 차이 7.105427357601002e-15**(부동소수점
+   오차 수준) — 두 값이 수학적으로 100% 동일함을 입증. 즉 "백테스트 오차"는 forecast
+   정확도가 아니라 "SARIMAX가 예측한 당일 가격 변동폭의 크기"(평균 ≈$0.40)만
+   측정하는 의미 없는 수치였음.
+
+### 두 버그의 상호 가림 현상
+
+이번 누수 버그는 Phase 32의 정렬 버그보다 먼저 존재했으나, 정렬 버그로 인해
+`pred_price_s[k]≈WTI_k`(누수로 인한 거의-정답)와 `target_price[k]=WTI_{k+1}`(다음 날)을
+비교하게 되어 우연히 "그럴듯한" 1일 예측 오차($1~2대)처럼 보였음. 정렬 버그를 고치자
+누수가 그대로 노출되어 MAE가 $0.39로 떨어진 것 — 사용자가 관찰한 "갑자기 좋아진" 현상의
+정확한 원인.
+
+### 라이브 vs 백테스트는 본질적으로 다른 과제
+
+`forecast_next_7days()`(`oil_risk_mvp.py:4593`)는
+`fc_dates = pd.date_range(start=last_date+timedelta(days=1), periods=7, freq='B')`,
+`fc_vals = sfit.forecast(steps=7, exog=fut_exog)`로 **진짜 D+1~D+7 forward 예측**을
+수행(미래 exog는 placeholder). 반면 백테스트(수정 후)는 같은 날 exog를 사용할 수 있는
+나우캐스트 평가 — 라이브 MAE $1.50은 정상이며 "모델 드리프트 4.44×" 경고는 백테스트
+누수로 인한 거짓 경보였음.
+
+### 수정
+
+`oil_risk_mvp.py:2920-2932` — `_wti_returns_s` 가산 로직 제거, `predicted_mean`을
+그대로 가격 예측치로 사용:
+
+```python
+# 변경 전
+_wti_returns_s = full_wti - full_wti.shift(1)
+pred_price_s   = (pred_obj.predicted_mean + _wti_returns_s).reindex(sx_test.index)
+# 변경 후
+pred_price_s   = pred_obj.predicted_mean.reindex(sx_test.index)
+```
+
+`y_px_te_sx = sx_test['WTI']`(Phase 32 수정)는 그대로 유지 — `pred_price_s[k] = E[WTI_k]`와
+정의가 일치하므로 변경 불필요.
+
+### 영향
+
+백테스트 MAE가 $0.39 → 라이브 MAE($1.50)와 비슷한 현실적 수준으로 정상화되고,
+"모델 드리프트" 거짓 경보가 해소될 것으로 예상.
+
+---
+
+## Phase 32: SARIMAX 백테스트 정답값 정의 불일치 수정 — 방향성 정확도 51.3%→정상화 (2026-06-08)
+
+### 문제
+
+대시보드 "모델 모니터링" 탭(약 80%)과 "백테스트" 탭(51.3%, 동전 던지기 수준)의
+SARIMAX 방향성 정확도가 크게 어긋남.
+
+### 원인
+
+`oil_risk_mvp.py:2929`에서 `pred_price_s[k]`는 주석대로 **"같은 날" `WTI_k`**의
+나우캐스트(`E[WTI_k|WTI_{k-1},exog_k]` + 실현 수익률 보정)로 설계되었으나, 비교 대상
+정답값 `y_px_te_sx`는 `sx_test['target_price']`(= `WTI_{k+1}`, **다음 날**)로 채워져
+있어 예측·정답이 하루 어긋난 상태로 비교됨.
+
+`prediction_log.csv` 실측 대조 결과: `sarimax_pred[i]`는 `date[i]`의 실제가와
+MAE 0.369로 거의 일치하지만, `actual_price[i]`(= `target_price`)는 `date[i]+1`의
+실제가와 MAE 0.667로 일치 — 즉 한 칸 밀린 값을 "정답"으로 비교하고 있었음.
+그 결과 `pred_dir`(나우캐스트 vs 전일 실측)과 `actual_dir`(다음날 실측 vs 당일 실측)이
+서로 다른 구간의 등락을 비교하게 되어 방향성 정확도가 51.3%로 무의미하게 낮아짐.
+(VAR/ETS/XGBoost-Return/Stacking은 `pred_price_test`와 `actual_price_test`가
+동일한 날짜를 가리키도록 내부적으로 일관되어 있음을 전수 확인 — 해당 모델은 이상 없음)
+
+### 수정
+
+`oil_risk_mvp.py:2932` 한 줄 변경:
+
+```python
+# 변경 전
+y_px_te_sx   = sx_test['target_price']      # WTI_{k+1} (다음 날) — 정의 불일치
+# 변경 후
+y_px_te_sx   = sx_test['WTI']                # WTI_k (같은 날) — pred_price_s와 정의 일치
+```
+
+`_actual_eval`/`rmse_b`/`mae_b`/`r2_b`/`ci_calib_q75`/`actual_price_test`가 모두
+이 값에서 파생되므로 한 줄 수정으로 SARIMAX 평가 지표와 `prediction_log` 백테스트
+행(`actual_price`/`price_error`/`dir_correct`)이 함께 정합성을 회복함. `prediction_log`
+생성 루프(약 5372행) 자체는 `ap`/`prev_ap`의 의미가 자동으로 바로잡히므로 변경 불필요.
+
+### 참고 — 별도 검토 필요 사항 (이번엔 미변경)
+
+Stacking 앙상블은 "같은 날 나우캐스트"(SARIMAX, VAR)와 "다음 날 예측"(XGBoost-Return)의
+`pred_price_test`를 한 행렬에 합쳐 `target_price`(다음 날 실측)에 대해 학습함 —
+서로 다른 시점을 예측하는 모델을 같은 컬럼으로 섞는 구조적 설계 문제일 수 있으나,
+이번 수정 범위(정답값 정의 불일치) 밖의 별도 사안으로 판단해 손대지 않음.
+
+---
+
+## Phase 34: 뉴스 수집 정확도 개선 + 대시보드 안정성 개선 (2026-06-10)
+
+### 뉴스 수집 — 복합어 필터 + 지정학 쿼리
+
+**문제**: 기존 `_OIL_KW`는 `oil`, `crude` 등 단어 단위 필터라 "palm oil",
+"motor oil", 모터스포츠 기사("Lewis Hamilton... Castrol oil") 등 비석유
+기사가 다수 섞여 들어옴.
+
+**수정**: `_OIL_KW`를 `crude oil`/`oil price`/`oil tanker`/`hormuz` 등
+복합어·구체 표현 리스트로 교체(standalone `oil` 제외). 추가로
+`GUARDIAN_QUERY_GEO`(Strait of Hormuz, Iran nuclear/attack, OPEC cut 등)를
+신설해 시장 키워드 쿼리와 별도로 수집 — 블랙스완 감지에 중요한 지정학 이벤트
+보도 누락 방지. 동일 `_OIL_KW`를 `forecast_next_7days`/`save_prediction_log`의
+뉴스 감성 캐시 필터링에도 동일 적용해 일관성 확보.
+
+### 대시보드 — 오차 스파이크 테이블 제거 + 파이프라인 상태 관리 개선
+
+Phase 31에서 백테스트 차트에 앙상블 오차선이 추가되며 중복된 "오차 스파이크"
+테이블 제거. 또한 파이프라인 실행 여부를 `st.session_state['pipeline_running']`
+boolean으로 관리하던 방식은 예외 발생 시 또는 페이지 재실행 시 플래그가
+실제 프로세스 상태와 어긋날 수 있어, 실제 `subprocess.Popen` 객체를
+`pipeline_proc`에 저장하고 `.poll() is None`으로 실행 여부를 직접 판단하도록 변경.
+
+---
+
 ## 현재 상태 (2026-06-05)
 
 ### 채택 모델

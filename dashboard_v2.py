@@ -1317,17 +1317,6 @@ def render_admin_page():
     with tab_error:
         st.subheader("📋 예측 오차 분석")
 
-        # 오차 스파이크 테이블
-        if 'live_gap_spikes' in data and not data['live_gap_spikes'].empty:
-            st.markdown("**⚡ 오차 스파이크 (최근)**")
-            _gs = data['live_gap_spikes'].copy()
-            _gs.columns = [{
-                'date': '날짜', 'actual_price': '실제가($)', 'sarimax_pred': 'SARIMAX예측($)',
-                'price_error': '오차($)', 'abs_error': '절대오차($)',
-                'xgb_pred_vol': 'XGB예측변동성', 'actual_vol_5d': '실제변동성(5d)',
-            }.get(c, c) for c in _gs.columns]
-            st.dataframe(_gs, hide_index=True, use_container_width=True)
-
         if 'prediction_log' not in data:
             st.info("파이프라인 실행 후 데이터가 표시됩니다.")
         else:
@@ -1341,14 +1330,15 @@ def render_admin_page():
                            if 'stacking_error' in bt.columns and bt['stacking_error'].notna().any()
                            else 'price_error')
             if not bt.empty and bt[_bt_err_col].notna().any():
-                c1.metric("백테스트 MAE (Stacking)" if _bt_err_col == 'stacking_error' else "백테스트 MAE",
+                c1.metric("백테스트 MAE (앙상블)" if _bt_err_col == 'stacking_error' else "백테스트 MAE",
                           f"${bt[_bt_err_col].abs().mean():.2f}")
                 if 'price_error_pct' in bt.columns and bt['price_error_pct'].notna().any():
                     c2.metric("백테스트 MAPE", f"{bt['price_error_pct'].abs().mean():.2f}%")
             if not live_confirmed.empty:
                 _bt_mae = bt[_bt_err_col].abs().mean() if not bt.empty and bt[_bt_err_col].notna().any() else None
                 _lv_mae = live_confirmed['price_error'].abs().mean()
-                _delta  = f"+${_lv_mae - _bt_mae:.2f}" if _bt_mae else None
+                _diff   = _lv_mae - _bt_mae
+                _delta  = f"{'-' if _diff < 0 else '+'}${abs(_diff):.2f}" if _bt_mae else None
                 c3.metric("라이브 MAE", f"${_lv_mae:.2f}", delta=_delta, delta_color="inverse")
                 if 'price_error_pct' in live_confirmed.columns and live_confirmed['price_error_pct'].notna().any():
                     c4.metric("라이브 MAPE", f"{live_confirmed['price_error_pct'].abs().mean():.2f}%")
@@ -1391,9 +1381,9 @@ def render_admin_page():
                 if 'stacking_pred' in bt_p.columns and bt_p['stacking_pred'].notna().any():
                     fig_err.add_trace(go.Scatter(
                         x=bt_p['date'], y=bt_p['stacking_pred'],
-                        mode='lines', name='Stacking 예측',
+                        mode='lines', name='앙상블 예측',
                         line=dict(color='#3fb950', width=1.5, dash='dash'),
-                        hovertemplate='%{x|%m/%d}<br>Stacking: $%{y:.2f}<extra></extra>',
+                        hovertemplate='%{x|%m/%d}<br>앙상블: $%{y:.2f}<extra></extra>',
                     ), row=1, col=1)
                 if 'sarimax_pred' in bt_p.columns:
                     fig_err.add_trace(go.Scatter(
@@ -1695,13 +1685,13 @@ def render_admin_page():
         # 수동 실행
         st.markdown("---")
         st.markdown("**수동 실행**")
-        if 'pipeline_running' not in st.session_state:
-            st.session_state['pipeline_running'] = False
+        if 'pipeline_proc' not in st.session_state:
+            st.session_state['pipeline_proc'] = None
 
-        if st.button("▶ 파이프라인 실행",
-                     disabled=st.session_state['pipeline_running'],
-                     type="primary"):
-            st.session_state['pipeline_running'] = True
+        _running_proc = st.session_state['pipeline_proc']
+        _is_running = (_running_proc is not None and _running_proc.poll() is None)
+
+        if st.button("▶ 파이프라인 실행", disabled=_is_running, type="primary"):
             _log_box  = st.empty()
             _pipe_path = Path(__file__).parent / 'oil_risk_mvp.py'
             try:
@@ -1712,6 +1702,7 @@ def render_admin_page():
                     cwd=str(Path(__file__).parent),
                     stdout=_log_f, stderr=subprocess.STDOUT,
                 )
+                st.session_state['pipeline_proc'] = _proc
                 while _proc.poll() is None:
                     if _log_path.exists():
                         with open(_log_path, encoding='utf-8', errors='replace') as _lf:
@@ -1719,7 +1710,6 @@ def render_admin_page():
                         _log_box.code(_tail, language=None)
                     _time.sleep(2)
                 _log_f.close()
-                st.session_state['pipeline_running'] = False
                 if _proc.returncode == 0:
                     st.cache_data.clear()
                     _log_box.empty()
@@ -1728,7 +1718,6 @@ def render_admin_page():
                 else:
                     st.error(f"파이프라인 오류 (exit={_proc.returncode})")
             except Exception as _e:
-                st.session_state['pipeline_running'] = False
                 st.error(f"오류: {_e}")
 
         # 자동 스케줄러
