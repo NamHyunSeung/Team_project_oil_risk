@@ -1,0 +1,12 @@
+(1580, 4)
+label dist: {'down': 842, 'up': 738}
+
+label∫∞ ret_pct ≈Î∞Ë:
+       count      mean       std     min    25%    50%    75%     max
+label                                                                
+down   842.0 -2.820825  2.741457 -24.404 -3.371 -2.041 -1.472  -0.500
+up     738.0  2.301984  1.981686   0.505  1.074  1.829  3.181  21.019
+
+unique labels: <ArrowStringArray>
+['up', 'down']
+Length: 2, dtype: str

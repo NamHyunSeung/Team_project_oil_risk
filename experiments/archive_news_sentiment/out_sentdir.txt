@@ -1,0 +1,16 @@
+Loading weights:   0%|          | 0/201 [00:00<?, ?it/s]Loading weights: 100%|##########| 201/201 [00:00<00:00, 21204.13it/s]
+id2label: {0: 'positive', 1: 'negative', 2: 'neutral'}
+
+총 1033일
+  net_sent vs ret_pct: Pearson r=-0.020(p=0.527)  Spearman r=-0.006(p=0.847)
+       pos vs ret_pct: Pearson r=-0.023(p=0.458)  Spearman r=-0.016(p=0.610)
+       neg vs ret_pct: Pearson r=+0.014(p=0.655)  Spearman r=-0.002(p=0.947)
+
+단순 부호일치 정확도 (net_sent>0 -> up): 0.5073
+Majority baseline (전체): 0.5150
+
+로지스틱회귀 (train=826, test=104)
+  Test period: 2024-05-16 ~ 2026-06-08
+  Test Accuracy: 0.4712
+  Test AUC: 0.4601
+  Majority (test): 0.5288

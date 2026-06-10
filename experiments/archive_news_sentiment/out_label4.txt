@@ -1,0 +1,50 @@
+Traceback (most recent call last):
+  File "<string>", line 24, in <module>
+    print(' -', t[:100])
+    ~~~~~^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'cp949' codec can't encode character '\u2013' in position 24: illegal multibyte sequence
+전체 날짜별 기사수 분포:
+count    473.000000
+mean       3.340381
+std       12.046889
+min        1.000000
+25%        1.000000
+50%        1.000000
+75%        2.000000
+max      135.000000
+dtype: float64
+
+2026 날짜별 기사수 (상위 10):
+date
+2026-05-28    135
+2026-06-01    134
+2026-05-26     89
+2026-05-27     81
+2026-06-02     75
+2026-05-29     64
+2026-06-08     64
+2026-06-03     55
+2026-06-04     43
+2026-06-05     39
+dtype: int64
+
+2018-2025 날짜별 기사수 분포:
+count    419.000000
+mean       1.441527
+std        0.916773
+min        1.000000
+25%        1.000000
+50%        1.000000
+75%        2.000000
+max        8.000000
+dtype: float64
+
+2026 샘플 제목 3개:
+ - Dense, sticky and heavy: why Venezuelan crude oil appeals to US refineries
+ - US aircraft monitor tanker off Ireland that tried to evade Venezuela blockade
+ - Prax Lindsey oil refinery bought out of administration by US rival
+
+2018-2025 샘플 제목 3개:
+ - Weather hampers efforts to contain oil tanker fire off China coast Bad weather has hindered efforts 
+ - Fracking firm gets green light to test for oil at Balcombe … again Fracking firm Cuadrilla has been 
+ - 

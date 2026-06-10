@@ -1,0 +1,6 @@
+min |up| ret_pct: 0.505
+max |down| ret_pct: -0.5
+ret_pct==0 존재?: 0
+|ret_pct|<0.5 존재?: 0
+총 unique date 수: 473
+전체 row 수: 1580

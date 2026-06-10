@@ -1,0 +1,137 @@
+INFO | [1/9] ∞°∞› µ•¿Ã≈Õ ºˆ¡˝: 2016-06-12 ~ 2026-06-11
+INFO |     ∫¥∑ƒ ¥ŸøÓ∑ŒµÂ øœ∑· (BZ=F/DXY/VIX/OVX/VIX3M/SKEW/NG/RBOB/Gold/Copper)
+INFO |     FRED ºˆ¡˝: Brent ∞°∞› (DCOILBRENTEU)...
+INFO |       ºˆø‰√Ê∞›(Ω∫«¡∑πµÂ•ƒ): •Ï=-0.013, •Ú=1.860
+INFO |     FRED ºˆ¡˝: Henry Hub √µø¨∞°Ω∫ (DHHNGSP)...
+INFO |       ∞¯±ﬁ√Ê∞›(HenryHub•ƒ%): •Ï=0.522, •Ú=13.178
+INFO |     EIA ºˆ¡˝: πÃ±π ø¯¿Ø ¿Á∞Ì (WCESTUS1)...
+INFO |       ø¯¿Ø ¿Á∞Ì ø¨∞· øœ∑·: 522¡÷ƒ° + º≠«¡∂Û¿Ã¡Ó°§∏∏‡≈“ ««√≥
+INFO |     GPR ø¨∞· øœ∑·: ¡ˆ¡§«– ¿ß±‚¿œ 955¿œ (37.9%) / ±‚¡ÿ z>1.0
+INFO |     FRED Ω«¡¶ µ•¿Ã≈Õ ø¨∞· øœ∑· \u2713
+WARNING |     \u26a0 WTI ¿ÃªÛ∞™ 7∞« °Ê FRED DCOILWTICO ∞™¿∏∑Œ ±≥√º:
+WARNING |       2020-03-20: yfinance=22.43 °Ê FRED=19.48 (±´∏Æ 15.1%)
+WARNING |       2020-03-24: yfinance=24.01 °Ê FRED=21.03 (±´∏Æ 14.2%)
+WARNING |       2020-03-25: yfinance=24.49 °Ê FRED=20.75 (±´∏Æ 18.0%)
+WARNING |       2020-03-26: yfinance=22.60 °Ê FRED=16.60 (±´∏Æ 36.1%)
+WARNING |       2020-03-27: yfinance=21.51 °Ê FRED=15.48 (±´∏Æ 39.0%)
+WARNING |       2020-03-30: yfinance=20.09 °Ê FRED=14.10 (±´∏Æ 42.5%)
+WARNING |       2020-04-21: yfinance=10.01 °Ê FRED=8.91 (±´∏Æ 12.3%)
+WARNING |     \u26a0 Brent ¿ÃªÛ∞™ 35∞« °Ê FRED DCOILBRENTEU ∞™¿∏∑Œ ±≥√º:
+WARNING |       2016-11-11: yfinance=45.84 °Ê FRED=41.61 (±´∏Æ 10.2%)
+WARNING |       2020-03-19: yfinance=28.47 °Ê FRED=23.98 (±´∏Æ 18.7%)
+WARNING |       2020-03-23: yfinance=27.03 °Ê FRED=23.75 (±´∏Æ 13.8%)
+WARNING |       2020-03-24: yfinance=27.15 °Ê FRED=24.50 (±´∏Æ 10.8%)
+WARNING |       2020-03-26: yfinance=26.34 °Ê FRED=23.55 (±´∏Æ 11.8%)
+WARNING |       2020-03-27: yfinance=24.93 °Ê FRED=22.39 (±´∏Æ 11.3%)
+WARNING |       2020-03-30: yfinance=22.76 °Ê FRED=19.19 (±´∏Æ 18.6%)
+WARNING |       2020-03-31: yfinance=22.74 °Ê FRED=14.85 (±´∏Æ 53.1%)
+WARNING |       2020-04-01: yfinance=24.74 °Ê FRED=14.97 (±´∏Æ 65.3%)
+WARNING |       2020-04-02: yfinance=29.94 °Ê FRED=20.24 (±´∏Æ 47.9%)
+WARNING |       2020-04-03: yfinance=34.11 °Ê FRED=24.33 (±´∏Æ 40.2%)
+WARNING |       2020-04-06: yfinance=33.05 °Ê FRED=22.58 (±´∏Æ 46.4%)
+WARNING |       2020-04-07: yfinance=31.87 °Ê FRED=22.10 (±´∏Æ 44.2%)
+WARNING |       2020-04-08: yfinance=32.84 °Ê FRED=25.22 (±´∏Æ 30.2%)
+WARNING |       2020-04-09: yfinance=31.48 °Ê FRED=20.23 (±´∏Æ 55.6%)
+WARNING |       2020-04-14: yfinance=29.60 °Ê FRED=21.74 (±´∏Æ 36.2%)
+WARNING |       2020-04-15: yfinance=27.69 °Ê FRED=19.80 (±´∏Æ 39.8%)
+WARNING |       2020-04-16: yfinance=27.82 °Ê FRED=18.69 (±´∏Æ 48.8%)
+WARNING |       2020-04-17: yfinance=28.08 °Ê FRED=19.75 (±´∏Æ 42.2%)
+WARNING |       2020-04-20: yfinance=25.57 °Ê FRED=17.36 (±´∏Æ 47.3%)
+WARNING |       2020-04-21: yfinance=19.33 °Ê FRED=9.12 (±´∏Æ 112.0%)
+WARNING |       2020-04-22: yfinance=20.37 °Ê FRED=13.77 (±´∏Æ 47.9%)
+WARNING |       2020-04-23: yfinance=21.33 °Ê FRED=15.06 (±´∏Æ 41.6%)
+WARNING |       2020-04-24: yfinance=21.44 °Ê FRED=15.87 (±´∏Æ 35.1%)
+WARNING |       2020-04-27: yfinance=19.99 °Ê FRED=15.17 (±´∏Æ 31.8%)
+WARNING |       2020-04-28: yfinance=20.46 °Ê FRED=15.60 (±´∏Æ 31.2%)
+WARNING |       2020-04-29: yfinance=22.54 °Ê FRED=17.86 (±´∏Æ 26.2%)
+WARNING |       2020-04-30: yfinance=25.27 °Ê FRED=18.11 (±´∏Æ 39.5%)
+WARNING |       2020-05-01: yfinance=26.44 °Ê FRED=18.49 (±´∏Æ 43.0%)
+WARNING |       2020-05-04: yfinance=27.20 °Ê FRED=20.40 (±´∏Æ 33.3%)
+WARNING |       2020-05-05: yfinance=30.97 °Ê FRED=25.46 (±´∏Æ 21.6%)
+WARNING |       2020-05-06: yfinance=29.72 °Ê FRED=24.20 (±´∏Æ 22.8%)
+WARNING |       2020-05-07: yfinance=29.46 °Ê FRED=24.23 (±´∏Æ 21.6%)
+WARNING |       2020-05-11: yfinance=29.63 °Ê FRED=25.53 (±´∏Æ 16.1%)
+WARNING |       2020-05-12: yfinance=29.98 °Ê FRED=26.67 (±´∏Æ 12.4%)
+INFO |     yfinance º∫∞¯: 2,518 rows
+INFO | [2/9] ¥∫Ω∫ ºˆ¡˝ ¡ﬂ (√÷±Ÿ 10≥‚, 3650¿œ)...
+INFO |     ƒ≥Ω√ ∑ŒµÂ: 10042∞« (√÷±Ÿ: 2026-06-10)
+INFO |     Guardian API ºˆ¡˝: 1∞≥ √ª≈©
+INFO |       2026-06 ~ 2026-06: market+4 geo+10∞«
+INFO |     Guardian Ω≈±‘ ºˆ¡˝: 4∞« (∫π«’æÓ « ≈Õ »ƒ)
+INFO |       RSS MarketWatch: +2∞«
+INFO |       RSS OilPrice: +13∞«
+INFO |       RSS EIA: +11∞«
+INFO |       RSS Rigzone: +16∞«
+INFO |       RSS CNBC: +16∞«
+INFO |       RSS HellenicShipping: +8∞«
+INFO |       RSS OffshoreTech: +7∞«
+INFO |       RSS NGIntel: +6∞«
+INFO |     NewsAPI p1: 94∞«, total=4404
+INFO |     NewsAPI raw ºˆ¡˝: 94∞« (« ≈Õ ¿¸)
+INFO |     NewsAPI ºˆ¡˝: 26∞« (oil « ≈Õ »ƒ)
+INFO |     ¥∫Ω∫ ƒ≥Ω√ ¿˙¿Â: 10047∞« °Ê output\guardian_news_cache.csv
+INFO |     ¥∫Ω∫ √— 10047∞« ªÁøÎ
+INFO | [3/9] ««√≥ ª˝º∫ ¡ﬂ...
+INFO |     COVID ±‚∞£ 330¿œ ¥ıπÃ º≥¡§ (2020-03-11 ~ 2021-06-30)
+INFO |     Parkinson vol ª˝º∫ (•Ï=0.02520)
+INFO |     CEEMDAN ƒ≥Ω√ ∑ŒµÂ (¥Ÿ¿Ω ¿Á∞ËªÍ±Ó¡ˆ ~2 ∞≈∑°¿œ)
+INFO |     CEEMDAN ∫–«ÿ øœ∑· (IMF ºˆ: 9)
+INFO |     GARCH(1,1) ¡∂∞«∫Œ ∫–ªÍ ª˝º∫ (•Ï=0.02316)
+INFO |     ¿Â¡ﬂ RV ƒ≥Ω√ ∑ŒµÂ
+INFO |     ¿Â¡ﬂ RV ª˝º∫: 305¿œ (•Ï=0.02538)
+INFO |     VIX ±‚∞£±∏¡∂ ª˝º∫ (•Ï=1.968)
+INFO |     SKEW ««√≥ ª˝º∫ (•Ï=135.93)
+INFO |     OPEC ƒ∂∏∞¥ı ««√≥ ª˝º∫ (pre5d=192¿œ post2d=116¿œ)
+INFO |     FinBERT Ω≈±‘ √≥∏Æ: 5∞«...
+INFO | HTTP Request: HEAD https://huggingface.co/ProsusAI/finbert/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+INFO | HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/ProsusAI/finbert/4556d13015211d73dccd3fdd39d39232506f3e43/config.json "HTTP/1.1 200 OK"
+INFO | HTTP Request: HEAD https://huggingface.co/ProsusAI/finbert/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+INFO | HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/ProsusAI/finbert/4556d13015211d73dccd3fdd39d39232506f3e43/config.json "HTTP/1.1 200 OK"
+INFO | HTTP Request: HEAD https://huggingface.co/ProsusAI/finbert/resolve/main/model.safetensors "HTTP/1.1 404 Not Found"
+INFO | HTTP Request: GET https://huggingface.co/api/models/ProsusAI/finbert "HTTP/1.1 200 OK"
+INFO | HTTP Request: GET https://huggingface.co/api/models/ProsusAI/finbert/commits/main "HTTP/1.1 200 OK"
+Îç∞Ïù¥ÌÑ∞ ÏàòÏßë/ÌîºÏ≤ò ÏÉùÏÑ± Ï§ë (Ï∫êÏãú ÌôúÏö©)...
+Loading weights:   0%|          | 0/201 [00:00<?, ?it/s]Loading weights: 100%|##########| 201/201 [00:00<00:00, 38059.46it/s]
+INFO | HTTP Request: GET https://huggingface.co/api/models/ProsusAI/finbert/discussions?p=0 "HTTP/1.1 200 OK"
+INFO | HTTP Request: GET https://huggingface.co/api/models/ProsusAI/finbert/commits/refs%2Fpr%2F29 "HTTP/1.1 200 OK"
+INFO | HTTP Request: GET https://huggingface.co/api/models/ProsusAI/finbert/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+INFO | HTTP Request: GET https://huggingface.co/api/models/ProsusAI/finbert/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+INFO | HTTP Request: HEAD https://huggingface.co/ProsusAI/finbert/resolve/refs%2Fpr%2F29/model.safetensors.index.json "HTTP/1.1 404 Not Found"
+INFO | HTTP Request: HEAD https://huggingface.co/ProsusAI/finbert/resolve/refs%2Fpr%2F29/model.safetensors "HTTP/1.1 302 Found"
+INFO |     \u2705 FinBERT ∑ŒµÂ øœ∑· (GPU)
+INFO |     Sentence Embedding Ω≈±‘: 5∞«...
+WARNING |     Embedding ∑ŒµÂ Ω«∆–(We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+Check your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.)
+INFO |     Oil Event Ω∫ƒ⁄æÓ: •Ï=0.0255 •Ú=0.0509
+INFO |     Embedding top-15: max|corr|=0.0000 mean|corr|=0.0000
+INFO |     OVX/VIX ∞¯∆˜ Ω∫«¡∑πµÂ ª˝º∫ (•Ï=2.227)
+INFO |     ø¿¥ı«√∑ŒøÏ ««√≥ ª˝º∫ (buy_pressure/cmf_10/volume_zscore)
+INFO |     COT CFTC 2026≥‚ ¿⁄µø ∞ªΩ≈: 22¡÷ √ﬂ∞°
+INFO |     COT ∑ŒµÂ: 544¡÷ (2026-06-02±Ó¡ˆ)
+INFO |     COT ««√≥ ª˝º∫ (net_pct •Ï=-0.20)
+INFO |     º±π∞ ƒø∫Í Ω∫«¡∑πµÂ ««√≥ ª˝º∫ (contango ∫Ò¿≤=46.6%)
+INFO |     √µø¨∞°Ω∫ ∏∏‡≈“ ««√≥ ª˝º∫
+INFO |     RBOB ≈©∑¢ Ω∫«¡∑πµÂ ««√≥ ª˝º∫
+INFO |     ≈©∑ŒΩ∫ø°º¬ ««√≥ ª˝º∫ (Gold/Copper)
+INFO |     ««√≥ øœº∫: 2,454 rows °ø 179 cols
+
+HAR baseline ÌîºÏ≤ò: 22Í∞ú
+
+=== 4Í∞ÄÏßÄ Î∞©Î≤ï Í∞úÎ≥Ñ Í≤ÄÏ¶ù ===
+  [HAR baseline                    ] n=22  RMSE=0.00820  MAE=0.00457  R2=0.6390
+  [1.GARCH-MIDAS proxy(+ma60)      ] n=23  RMSE=0.00844  MAE=0.00466  R2=0.6172
+  [2a.+news_vol x high_vol_regime  ] n=23  RMSE=0.00845  MAE=0.00468  R2=0.6162
+  [2b.+news_vol x geo_dummy        ] n=23  RMSE=0.00838  MAE=0.00463  R2=0.6226
+  [3.+sent_ma20(Í∞êÏÑ±Í∑πÏÑ±)              ] n=23  RMSE=0.00872  MAE=0.00469  R2=0.5917
+  [4.+news_vol_shock(Ïù¥Î≤§Ìä∏)          ] n=23  RMSE=0.00843  MAE=0.00464  R2=0.6187
+
+=== Í∞úÏÑ†Îêú Í≤ÉÎì§Îßå Ï°∞Ìï© ===
+  baseline ÎåÄÎπÑ RMSE Í∞úÏÑ†: ÏóÜÏùå
+
+=== ÏöîÏïΩ ===
+  baseline                         RMSE=0.00820 MAE=0.00457 R2=0.6390
+  1.GARCH-MIDAS proxy              RMSE=0.00844(+2.97%) MAE=0.00466 R2=0.6172
+  2a.regime x highvol              RMSE=0.00845(+3.10%) MAE=0.00468 R2=0.6162
+  2b.regime x geo                  RMSE=0.00838(+2.24%) MAE=0.00463 R2=0.6226
+  3.sent_ma20                      RMSE=0.00872(+6.35%) MAE=0.00469 R2=0.5917
+  4.news_vol_shock                 RMSE=0.00843(+2.77%) MAE=0.00464 R2=0.6187

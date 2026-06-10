@@ -1,0 +1,37 @@
+output/guardian_training_corpus_2010.csv: 1452 rows
+output/guardian_training_corpus.csv: 848 rows
+output/guardian_historical_cache.csv: 157 rows
+output/guardian_news_cache.csv: 1381 rows (OIL_KW 필터 후)
+
+병합 후: 3681 rows | 2010-01-10 ~ 2026-06-09
+
+Fetching Brent prices (yfinance 2009-12-01 ~ 2026-06-10)...
+
+저장: 2464 rows -> output/finbert_training_data_2010.csv
+Label 분포:
+label
+down    1279
+up      1185
+Date range: 2010-01-11 ~ 2026-06-08
+
+연도별:
+year
+2010     82
+2011    145
+2012     79
+2013     58
+2014    108
+2015    168
+2016    188
+2017     56
+2018     49
+2019    105
+2020     86
+2021     69
+2022    147
+2023     64
+2024     45
+2025     39
+2026    976
+
+날짜당 최대 기사수: 135, 고유 날짜수: 1033

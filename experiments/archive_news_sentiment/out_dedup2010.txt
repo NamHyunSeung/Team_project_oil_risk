@@ -1,0 +1,35 @@
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|##########| 199/199 [00:00<00:00, 47510.62it/s]
+[transformers] [1mBertModel LOAD REPORT[0m from: ProsusAI/finbert
+Key               | Status     |  | 
+------------------+------------+--+-
+classifier.bias   | UNEXPECTED |  | 
+classifier.weight | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+원본: 2464행, 1033개 날짜
+중복제거 후: 2340행 (제거 124)
+cap 적용 후: 1736행 -> output/finbert_training_data_2010_final.csv
+
+연도별:
+year
+2010     82
+2011    139
+2012     78
+2013     57
+2014    104
+2015    163
+2016    182
+2017     56
+2018     49
+2019    105
+2020     81
+2021     69
+2022    146
+2023     63
+2024     45
+2025     39
+2026    278
+
+날짜당 최대 기사수: 10
+label 분포: {'up': 893, 'down': 843}
