@@ -84,3 +84,6 @@ output/ppt/
 
 # 임시 파일
 missing_commits.txt
+
+# 런타임 세션 상태
+config/active_sessions.json
